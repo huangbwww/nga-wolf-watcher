@@ -19,7 +19,7 @@ This path does not require editing code or running Python commands.
 
 Keep the first-start mark-seen option enabled before the first launch. It marks currently fetched NGA replies as already seen, so old replies are not pushed to Feishu in bulk.
 
-The GUI saves local secrets to `nga_wolf_config.json` next to the EXE. Do not share that file.
+The GUI saves local secrets under `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`. Do not share that file.
 
 ## Commands
 
@@ -65,7 +65,7 @@ Install dependencies:
 
 ```powershell
 cd D:\nga-wolf
-python -m pip install lark-oapi
+python -m pip install lark-oapi customtkinter
 ```
 
 Set required environment variables:
@@ -156,7 +156,7 @@ The script stores pushed reply ids and handled command ids in `.nga_seen.json`.
 
 ```powershell
 python -m pip install pyinstaller
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name NGA-Wolf-Watcher --collect-all lark_oapi .\nga_wolf_gui.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name NGA-Wolf-Watcher --icon .\assets\app_icon.ico --add-data ".\assets\app_icon.ico;assets" --add-data ".\assets\app_icon.png;assets" --collect-all lark_oapi --collect-all customtkinter .\nga_wolf_gui.py
 ```
 
 The output is `dist\NGA-Wolf-Watcher.exe`.

@@ -69,6 +69,15 @@ class BotCommand:
     target_id: str = ""
     count: int = 20
 
+    def __str__(self) -> str:
+        action_labels = {"start": "开始菜单", "history": "查询", "pack": "打包"}
+        target_labels = {"reply": "用户回复", "thread": "帖子回复", "": "无目标"}
+        return (
+            f"{action_labels.get(self.action, self.action)} "
+            f"{target_labels.get(self.target_type, self.target_type)} "
+            f"{self.target_id or '-'} {self.count} 条"
+        ).strip()
+
 
 def http_json(
     url: str,
@@ -89,7 +98,7 @@ def http_json(
     except urllib.error.HTTPError as exc:
         raw = exc.read()
         detail = raw.decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code} from {url}: {detail}") from exc
+        raise RuntimeError(f"请求 {url} 返回 HTTP {exc.code}：{detail}") from exc
     return json.loads(raw.decode("utf-8"))
 
 
@@ -125,12 +134,12 @@ def fetch_nga_page(author_id: str, page: int, cookie: str, timeout: int) -> dict
     if author_id and author_id != "0":
         params["authorid"] = author_id
     query = urllib.parse.urlencode(params)
-    return fetch_nga_json(f"{NGA_ENDPOINT}?{query}", cookie, timeout, f"author page {page}")
+    return fetch_nga_json(f"{NGA_ENDPOINT}?{query}", cookie, timeout, f"用户回复第 {page} 页")
 
 
 def fetch_nga_thread_page(tid: str, page: int, cookie: str, timeout: int) -> dict[str, Any]:
     query = urllib.parse.urlencode({"tid": tid, "page": str(page), "__output": "8"})
-    return fetch_nga_json(f"{NGA_READ_ENDPOINT}?{query}", cookie, timeout, f"thread {tid} page {page}")
+    return fetch_nga_json(f"{NGA_READ_ENDPOINT}?{query}", cookie, timeout, f"帖子 {tid} 第 {page} 页")
 
 
 def fetch_nga_json(url: str, cookie: str, timeout: int, label: str) -> dict[str, Any]:
@@ -161,15 +170,15 @@ def fetch_nga_json(url: str, cookie: str, timeout: int, label: str) -> dict[str,
     except json.JSONDecodeError as exc:
         preview = re.sub(r"\s+", " ", text[:300]).strip()
         if not preview:
-            preview = "<empty response>"
+            preview = "<空响应>"
         raise RuntimeError(
-            f"NGA returned non-JSON response on {label}: "
-            f"status={status}, content-type={content_type}, preview={preview}"
+            f"NGA 在 {label} 返回的不是 JSON："
+            f"状态码={status}，内容类型={content_type}，响应预览={preview}"
         ) from exc
     if payload.get("error"):
         err = payload["error"]
         message = err.get("0") if isinstance(err, dict) else str(err)
-        raise RuntimeError(f"NGA returned error on {label}: {message}")
+        raise RuntimeError(f"NGA 在 {label} 返回错误：{message}")
     return payload
 
 
@@ -420,7 +429,7 @@ def push_feishu(webhook: str, secret: str | None, post: NgaPost, timeout: int) -
 
     result = http_json(webhook, method="POST", body=body, timeout=timeout)
     if result.get("code") not in (None, 0):
-        raise RuntimeError(f"Feishu push failed: {result}")
+        raise RuntimeError(f"飞书 Webhook 推送失败：{result}")
 
 
 def get_feishu_tenant_access_token(app_id: str, app_secret: str, timeout: int) -> str:
@@ -431,10 +440,10 @@ def get_feishu_tenant_access_token(app_id: str, app_secret: str, timeout: int) -
         timeout=timeout,
     )
     if result.get("code") != 0:
-        raise RuntimeError(f"Feishu token failed: {result}")
+        raise RuntimeError(f"飞书访问凭证获取失败：{result}")
     token = result.get("tenant_access_token")
     if not token:
-        raise RuntimeError(f"Feishu token missing in response: {result}")
+        raise RuntimeError(f"飞书访问凭证响应缺少 token：{result}")
     return str(token)
 
 
@@ -459,7 +468,7 @@ def feishu_app_request(
 def feishu_app_token(args: argparse.Namespace) -> tuple[str, str, str, str, str]:
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     if not (app_id and app_secret and receive_id):
-        raise SystemExit("Missing FEISHU_APP_ID, FEISHU_APP_SECRET, or FEISHU_RECEIVE_ID.")
+        raise SystemExit("缺少 FEISHU_APP_ID、FEISHU_APP_SECRET 或 FEISHU_RECEIVE_ID。")
     token = get_feishu_tenant_access_token(app_id, app_secret, args.timeout)
     return app_id, app_secret, receive_id, receive_id_type, token
 
@@ -488,7 +497,7 @@ def push_feishu_app(
         body={"receive_id": receive_id, "msg_type": msg_type, "content": content},
     )
     if result.get("code") != 0:
-        raise RuntimeError(f"Feishu app push failed: {result}")
+        raise RuntimeError(f"飞书应用消息推送失败：{result}")
 
 
 def multipart_body(fields: dict[str, str], file_field: str, file_name: str, file_bytes: bytes) -> tuple[bytes, str]:
@@ -530,12 +539,12 @@ def upload_feishu_file(token: str, file_name: str, text: str, timeout: int) -> s
             result = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Feishu file upload failed: HTTP {exc.code}: {detail}") from exc
+        raise RuntimeError(f"飞书文件上传失败：HTTP {exc.code}: {detail}") from exc
     if result.get("code") != 0:
-        raise RuntimeError(f"Feishu file upload failed: {result}")
+        raise RuntimeError(f"飞书文件上传失败：{result}")
     file_key = result.get("data", {}).get("file_key")
     if not file_key:
-        raise RuntimeError(f"Feishu file_key missing: {result}")
+        raise RuntimeError(f"飞书文件上传响应缺少 file_key：{result}")
     return str(file_key)
 
 
@@ -551,7 +560,7 @@ def push_feishu_file(args: argparse.Namespace, file_name: str, text: str) -> Non
         timeout=args.timeout,
     )
     if result.get("code") != 0:
-        raise RuntimeError(f"Feishu file message failed: {result}")
+        raise RuntimeError(f"飞书文件消息发送失败：{result}")
 
 
 def push_feishu_app_posts(
@@ -579,7 +588,7 @@ def push_feishu_app_posts(
         body={"receive_id": receive_id, "msg_type": msg_type, "content": content},
     )
     if result.get("code") != 0:
-        raise RuntimeError(f"Feishu app push failed: {result}")
+        raise RuntimeError(f"飞书应用消息推送失败：{result}")
 
 
 def list_feishu_chats(app_id: str, app_secret: str, timeout: int) -> list[dict[str, Any]]:
@@ -590,7 +599,7 @@ def list_feishu_chats(app_id: str, app_secret: str, timeout: int) -> list[dict[s
         timeout=timeout,
     )
     if result.get("code") != 0:
-        raise RuntimeError(f"Feishu list chats failed: {result}")
+        raise RuntimeError(f"飞书群组查询失败：{result}")
     return list(result.get("data", {}).get("items", []))
 
 
@@ -614,7 +623,7 @@ def list_feishu_messages(
     )
     result = feishu_app_request(app_id, app_secret, f"/im/v1/messages?{query}", timeout=timeout)
     if result.get("code") != 0:
-        raise RuntimeError(f"Feishu list messages failed: {result}")
+        raise RuntimeError(f"飞书消息查询失败：{result}")
     return list(result.get("data", {}).get("items", []))
 
 
@@ -707,27 +716,27 @@ def start_card(default_author_id: str, default_tid: str) -> dict[str, Any]:
     ]
     content = "\n".join(
         [
-            "**NGA watcher commands**",
+            "**NGA 监听命令**",
             "",
-            f"Default uid `{default_author_id}` = 狼大",
-            f"Default tid `{default_tid}` = 狼大贴",
+            f"默认 uid `{default_author_id}` = 狼大",
+            f"默认 tid `{default_tid}` = 狼大帖",
             "",
-            "`/history_r <uid|0> <count>` recent replies by uid",
-            "`/pack_r <uid|0> <count>` recent replies as txt",
-            "`/history_t <tid> <count>` latest thread posts",
-            "`/pack_t <tid> <count>` latest thread posts as txt",
+            "`/history_r <uid|0> <count>` 查询用户回复",
+            "`/pack_r <uid|0> <count>` 打包用户回复为 txt",
+            "`/history_t <tid> <count>` 查询帖子回复",
+            "`/pack_t <tid> <count>` 打包帖子回复为 txt",
             "",
-            "Examples:",
+            "示例：",
             *[f"`{cmd}`" for cmd in commands],
             "",
-            "Interactive input boxes need a Feishu callback URL; this card keeps the commands one tap away for now.",
+            "也可以直接点击下面的按钮快速发送常用命令。",
         ]
     )
     return {
         "config": {"wide_screen_mode": True},
         "header": {
             "template": "blue",
-            "title": {"tag": "plain_text", "content": "NGA watcher"},
+            "title": {"tag": "plain_text", "content": "NGA 监听"},
         },
         "elements": [
             {"tag": "div", "text": {"tag": "lark_md", "content": content}},
@@ -752,7 +761,7 @@ def start_form_card(default_author_id: str, default_tid: str) -> dict[str, Any]:
         "config": {"wide_screen_mode": True},
         "header": {
             "template": "blue",
-            "title": {"tag": "plain_text", "content": "NGA watcher"},
+            "title": {"tag": "plain_text", "content": "NGA 监听"},
         },
         "body": {
             "elements": [
@@ -785,10 +794,10 @@ def start_form_card(default_author_id: str, default_tid: str) -> dict[str, Any]:
 
 def preset_actions_elements(default_author_id: str, default_tid: str) -> list[dict[str, Any]]:
     return [
-        preset_button("回复卡片", "history_r", default_author_id, "10"),
-        preset_button("回复打包", "pack_r", default_author_id, "10"),
-        preset_button("帖子卡片", "history_t", default_tid, "100"),
-        preset_button("帖子打包", "pack_t", default_tid, "100"),
+        preset_button("查询用户回复", "history_r", default_author_id, "10"),
+        preset_button("打包用户回复", "pack_r", default_author_id, "10"),
+        preset_button("查询帖子回复", "history_t", default_tid, "100"),
+        preset_button("打包帖子回复", "pack_t", default_tid, "100"),
     ]
 
 
@@ -817,10 +826,10 @@ def preset_buttons_element_old(default_author_id: str, default_tid: str) -> dict
         "flex_mode": "none",
         "background_style": "default",
         "columns": [
-            preset_button_column("回复卡片", "history_r", default_author_id, "10"),
-            preset_button_column("回复打包", "pack_r", default_author_id, "10"),
-            preset_button_column("帖子卡片", "history_t", default_tid, "100"),
-            preset_button_column("帖子打包", "pack_t", default_tid, "100"),
+            preset_button_column("查询用户回复", "history_r", default_author_id, "10"),
+            preset_button_column("打包用户回复", "pack_r", default_author_id, "10"),
+            preset_button_column("查询帖子回复", "history_t", default_tid, "100"),
+            preset_button_column("打包帖子回复", "pack_t", default_tid, "100"),
         ],
     }
 
@@ -853,10 +862,10 @@ def preset_button_column(label: str, command: str, target_id: str, count: str) -
 
 def command_form_card(command: str, target_id: str, count: str) -> dict[str, Any]:
     labels = {
-        "history_r": "回复卡片",
-        "pack_r": "回复打包",
-        "history_t": "帖子卡片",
-        "pack_t": "帖子打包",
+        "history_r": "查询用户回复",
+        "pack_r": "打包用户回复",
+        "history_t": "查询帖子回复",
+        "pack_t": "打包帖子回复",
     }
     target_label = "uid" if command.endswith("_r") else "tid"
     return {
@@ -910,7 +919,7 @@ def command_form_card(command: str, target_id: str, count: str) -> dict[str, Any
 def push_feishu_card(args: argparse.Namespace, card: dict[str, Any]) -> None:
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     if not (app_id and app_secret and receive_id):
-        raise SystemExit("Missing FEISHU_APP_ID, FEISHU_APP_SECRET, or FEISHU_RECEIVE_ID.")
+        raise SystemExit("缺少 FEISHU_APP_ID、FEISHU_APP_SECRET 或 FEISHU_RECEIVE_ID。")
     result = feishu_app_request(
         app_id,
         app_secret,
@@ -920,7 +929,7 @@ def push_feishu_card(args: argparse.Namespace, card: dict[str, Any]) -> None:
         body={"receive_id": receive_id, "msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False)},
     )
     if result.get("code") != 0:
-        raise RuntimeError(f"Feishu card push failed: {result}")
+        raise RuntimeError(f"飞书卡片发送失败：{result}")
 
 
 def args_for_chat(args: argparse.Namespace, chat_id: str) -> argparse.Namespace:
@@ -937,14 +946,14 @@ def run_bot_command(args: argparse.Namespace, command: BotCommand) -> None:
 
     if command.target_type == "reply":
         posts = collect_replies_with_retries(args, command.target_id, command.count)
-        label = f"uid {command.target_id or 'any'}"
+        label = f"用户 {command.target_id or '任意'}"
     elif command.target_type == "thread":
         posts = collect_thread_tail_with_retries(args, command.target_id, command.count)
-        label = f"tid {command.target_id}"
+        label = f"帖子 {command.target_id}"
     else:
-        raise RuntimeError(f"Unknown command target: {command}")
+        raise RuntimeError(f"未知命令目标：{command}")
 
-    title = f"NGA {label} latest {len(posts)}"
+    title = f"NGA {label} 最新 {len(posts)} 条"
     if command.action == "pack":
         file_name = f"nga_{command.target_type}_{command.target_id or 'any'}_{len(posts)}_{int(time.time())}.txt"
         push_feishu_file(args, file_name, posts_to_txt(posts, title))
@@ -963,22 +972,22 @@ def run_bot_command(args: argparse.Namespace, command: BotCommand) -> None:
 def run_command_background(args: argparse.Namespace, command: BotCommand, label: str) -> None:
     def worker() -> None:
         try:
-            print(f"handling {label}: {command}")
+            print(f"开始处理 {label}: {command}")
             run_bot_command(args, command)
-            print(f"done {label}: {command}")
+            print(f"处理完成 {label}: {command}")
         except Exception as exc:
-            print(f"command failed {label}: {exc}", file=sys.stderr)
+            print(f"命令处理失败 {label}: {exc}", file=sys.stderr)
             try:
                 err_post = NgaPost(
                     key="ws-error",
-                    subject="Command failed",
+                    subject="命令处理失败",
                     content=str(exc),
                     url="https://bbs.nga.cn/",
                     post_time=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
                 )
-                push_feishu_app_posts(*feishu_credentials(args), [err_post], "NGA command failed", args.timeout, "text")
+                push_feishu_app_posts(*feishu_credentials(args), [err_post], "NGA 命令处理失败", args.timeout, "text")
             except Exception as nested:
-                print(f"failed to send error message: {nested}", file=sys.stderr)
+                print(f"发送错误消息失败: {nested}", file=sys.stderr)
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -1009,11 +1018,11 @@ def start_ws(args: argparse.Namespace) -> None:
         import lark_oapi as lark
         from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
     except ImportError as exc:
-        raise SystemExit("Missing lark-oapi. Install with: python -m pip install lark-oapi") from exc
+        raise SystemExit("缺少 lark-oapi。请执行：python -m pip install lark-oapi") from exc
 
     app_id, app_secret, receive_id, _receive_id_type = feishu_credentials(args)
     if not app_id or not app_secret:
-        raise SystemExit("Missing FEISHU_APP_ID or FEISHU_APP_SECRET.")
+        raise SystemExit("缺少 FEISHU_APP_ID 或 FEISHU_APP_SECRET。")
 
     def on_message(event: Any) -> None:
         msg = getattr(getattr(event, "event", None), "message", None)
@@ -1024,7 +1033,7 @@ def start_ws(args: argparse.Namespace) -> None:
         if command is None:
             return
         chat_id = getattr(msg, "chat_id", "") or receive_id
-        run_command_background(args_for_chat(args, chat_id), command, f"message:{getattr(msg, 'message_id', '')}")
+        run_command_background(args_for_chat(args, chat_id), command, f"飞书消息:{getattr(msg, 'message_id', '')}")
 
     def on_card_action(event: Any) -> Any:
         form = card_action_to_form(event)
@@ -1038,7 +1047,7 @@ def start_ws(args: argparse.Namespace) -> None:
                 push_feishu_card(args_for_chat(args, chat_id), command_form_card(command_name, target_id, count))
                 return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已打开预填表单"}})
             command = bot_command_from_form(form, args.default_author_id, args.default_tid)
-            run_command_background(args_for_chat(args, chat_id), command, "card-action")
+            run_command_background(args_for_chat(args, chat_id), command, "卡片操作")
             return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已收到，正在处理"}})
         except Exception as exc:
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": f"参数错误: {exc}"}})
@@ -1056,23 +1065,22 @@ def start_ws(args: argparse.Namespace) -> None:
                 try:
                     run_once(args)
                 except Exception as exc:
-                    print(f"watch loop failed: {exc}", file=sys.stderr)
+                    print(f"NGA 监听循环失败: {exc}", file=sys.stderr)
                 jitter = random.uniform(-args.jitter, args.jitter) if args.jitter > 0 else 0
                 time.sleep(max(1, args.interval + jitter))
 
         threading.Thread(target=watch_loop, daemon=True).start()
-        print("Started NGA watch loop in the background.")
+        print("已启动 NGA 后台监听循环。")
 
-    print("Starting Feishu WebSocket client. Press Ctrl+C to stop.")
-    print("Make sure the app uses event subscription via long connection and has message/card action events enabled.")
-    lark.ws.Client(app_id, app_secret, event_handler=handler, log_level=lark.LogLevel.INFO).start()
+    print("正在启动飞书 WebSocket 客户端。")
+    lark.ws.Client(app_id, app_secret, event_handler=handler, log_level=lark.LogLevel.ERROR).start()
 
 
 def send_test_message(args: argparse.Namespace) -> None:
     post = NgaPost(
         key="test",
-        subject="NGA watcher test",
-        content="This is a test message from nga_feishu_watch.py.",
+        subject="NGA 监听测试",
+        content="这是一条来自 NGA Wolf Watcher 的测试消息。",
         url="https://bbs.nga.cn/thread.php?searchpost=1&authorid=150058",
         post_time=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
     )
@@ -1084,13 +1092,13 @@ def send_test_message(args: argparse.Namespace) -> None:
             receive_id,
             receive_id_type,
             [post],
-            "NGA watcher test",
+            "NGA 监听测试",
             args.timeout,
             args.message_format,
         )
     else:
         push_to_feishu(args, post)
-    print("Sent test message.")
+    print("测试消息已发送。")
 
 
 def push_to_feishu(args: argparse.Namespace, post: NgaPost) -> None:
@@ -1100,12 +1108,12 @@ def push_to_feishu(args: argparse.Namespace, post: NgaPost) -> None:
 
     if app_id or app_secret or receive_id:
         if not (app_id and app_secret and receive_id):
-            raise SystemExit("Missing FEISHU_APP_ID, FEISHU_APP_SECRET, or FEISHU_RECEIVE_ID.")
+            raise SystemExit("缺少 FEISHU_APP_ID、FEISHU_APP_SECRET 或 FEISHU_RECEIVE_ID。")
         push_feishu_app(app_id, app_secret, receive_id, receive_id_type, post, args.timeout, args.message_format)
         return
 
     if not webhook:
-        raise SystemExit("Missing Feishu target. Set app credentials + receive id, or FEISHU_WEBHOOK.")
+        raise SystemExit("缺少飞书发送目标。请设置应用凭证和 Receive ID，或设置 FEISHU_WEBHOOK。")
     push_feishu(webhook, secret, post, args.timeout)
 
 
@@ -1151,18 +1159,18 @@ def with_retries(label: str, attempts: int, delay: float, fn: Any) -> Any:
             if attempt == attempts:
                 break
             sleep_for = delay * attempt + random.uniform(0, delay)
-            print(f"{label} failed ({attempt}/{attempts}): {exc}; retrying in {sleep_for:.1f}s", file=sys.stderr)
+            print(f"{label} 失败（{attempt}/{attempts}）：{exc}；{sleep_for:.1f} 秒后重试", file=sys.stderr)
             time.sleep(sleep_for)
-    raise RuntimeError(f"{label} failed after {attempts} attempts: {last_exc}")
+    raise RuntimeError(f"{label} 在 {attempts} 次尝试后仍失败：{last_exc}")
 
 
 def collect_posts_with_retries(args: argparse.Namespace, count_pages: int | None = None) -> list[NgaPost]:
     cookie = args.cookie or os.getenv("NGA_COOKIE", "")
     if not cookie:
-        raise SystemExit("Missing NGA_COOKIE. Copy Cookie from a logged-in bbs.nga.cn browser session.")
+        raise SystemExit("缺少 NGA_COOKIE。请从已登录 bbs.nga.cn 的浏览器会话复制 Cookie。")
     max_pages = count_pages if count_pages is not None else args.max_pages
     return with_retries(
-        "NGA fetch",
+        "NGA 监听抓取",
         args.retries,
         args.retry_delay,
         lambda: collect_posts(args.author_id, cookie, max_pages, args.timeout),
@@ -1172,9 +1180,9 @@ def collect_posts_with_retries(args: argparse.Namespace, count_pages: int | None
 def collect_replies_with_retries(args: argparse.Namespace, author_id: str, count: int) -> list[NgaPost]:
     cookie = args.cookie or os.getenv("NGA_COOKIE", "")
     if not cookie:
-        raise SystemExit("Missing NGA_COOKIE. Copy Cookie from a logged-in bbs.nga.cn browser session.")
+        raise SystemExit("缺少 NGA_COOKIE。请从已登录 bbs.nga.cn 的浏览器会话复制 Cookie。")
     return with_retries(
-        "NGA reply fetch",
+        "NGA 用户回复抓取",
         args.retries,
         args.retry_delay,
         lambda: collect_recent_replies(author_id, count, cookie, args.timeout),
@@ -1184,9 +1192,9 @@ def collect_replies_with_retries(args: argparse.Namespace, author_id: str, count
 def collect_thread_tail_with_retries(args: argparse.Namespace, tid: str, count: int) -> list[NgaPost]:
     cookie = args.cookie or os.getenv("NGA_COOKIE", "")
     if not cookie:
-        raise SystemExit("Missing NGA_COOKIE. Copy Cookie from a logged-in bbs.nga.cn browser session.")
+        raise SystemExit("缺少 NGA_COOKIE。请从已登录 bbs.nga.cn 的浏览器会话复制 Cookie。")
     return with_retries(
-        "NGA thread fetch",
+        "NGA 帖子回复抓取",
         args.retries,
         args.retry_delay,
         lambda: collect_thread_tail(tid, count, cookie, args.timeout),
@@ -1215,7 +1223,7 @@ def handle_feishu_commands(args: argparse.Namespace, state: dict[str, Any]) -> b
         except Exception as exc:
             err_post = NgaPost(
                 key="history-error",
-                subject="Command failed",
+                subject="命令处理失败",
                 content=str(exc),
                 url="https://bbs.nga.cn/thread.php?searchpost=1&authorid=150058",
                 post_time=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
@@ -1226,7 +1234,7 @@ def handle_feishu_commands(args: argparse.Namespace, state: dict[str, Any]) -> b
                 receive_id,
                 receive_id_type,
                 [err_post],
-                "NGA history failed",
+                "NGA 历史查询失败",
                 args.timeout,
                 "text",
             )
@@ -1242,7 +1250,7 @@ def handle_feishu_commands(args: argparse.Namespace, state: dict[str, Any]) -> b
 def run_once(args: argparse.Namespace) -> int:
     cookie = args.cookie or os.getenv("NGA_COOKIE", "")
     if not cookie:
-        raise SystemExit("Missing NGA_COOKIE. Copy Cookie from a logged-in bbs.nga.cn browser session.")
+        raise SystemExit("缺少 NGA_COOKIE。请从已登录 bbs.nga.cn 的浏览器会话复制 Cookie。")
 
     state_path = Path(args.state_path)
     state = read_json(state_path, {"seen": []})
@@ -1255,7 +1263,7 @@ def run_once(args: argparse.Namespace) -> int:
         state["seen"] = sorted(seen)
         state["updated_at"] = int(time.time())
         write_json(state_path, state)
-        print(f"Marked {len(posts)} fetched posts as seen.")
+        print(f"已标记 {len(posts)} 条已抓取回复为已读。")
         return len(posts)
 
     new_posts = [post for post in posts if post.key not in seen]
@@ -1263,7 +1271,7 @@ def run_once(args: argparse.Namespace) -> int:
 
     for post in new_posts:
         if args.dry_run:
-            print(f"[DRY-RUN] {post.subject} {post.url}\n{post.content[:500]}\n")
+            print(f"[试运行] {post.subject} {post.url}\n{post.content[:500]}\n")
         else:
             push_to_feishu(args, post)
             seen.add(post.key)
@@ -1272,7 +1280,7 @@ def run_once(args: argparse.Namespace) -> int:
         state["seen"] = sorted(seen)
         state["updated_at"] = int(time.time())
         write_json(state_path, state)
-    print(f"Fetched {len(posts)} posts, pushed {len(new_posts)} new posts.")
+    print(f"已抓取 {len(posts)} 条回复，已推送 {len(new_posts)} 条新回复。")
     return len(new_posts)
 
 
@@ -1292,19 +1300,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--feishu-id-type", default=os.getenv("FEISHU_ID_TYPE", "chat_id"))
     parser.add_argument("--timeout", type=int, default=20)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--mark-seen", action="store_true", help="Record current fetched posts without pushing.")
-    parser.add_argument("--list-feishu-chats", action="store_true", help="List chats visible to the Feishu app bot.")
-    parser.add_argument("--send-test", action="store_true", help="Send one Feishu test message and exit.")
+    parser.add_argument("--mark-seen", action="store_true", help="把当前抓取到的回复记为已读，不推送。")
+    parser.add_argument("--list-feishu-chats", action="store_true", help="列出飞书机器人可见的群组。")
+    parser.add_argument("--send-test", action="store_true", help="发送一条飞书测试消息后退出。")
     parser.add_argument("--message-format", choices=["card", "text"], default=os.getenv("FEISHU_MESSAGE_FORMAT", "card"))
-    parser.add_argument("--disable-commands", action="store_true", help="Do not poll Feishu group commands.")
+    parser.add_argument("--disable-commands", action="store_true", help="不轮询飞书群组普通消息命令。")
     parser.add_argument("--command-lookback", type=int, default=int(os.getenv("FEISHU_COMMAND_LOOKBACK", "600")))
     parser.add_argument("--retries", type=int, default=int(os.getenv("NGA_RETRIES", "10")))
     parser.add_argument("--retry-delay", type=float, default=float(os.getenv("NGA_RETRY_DELAY", "2")))
     parser.add_argument("--interval", type=int, default=int(os.getenv("NGA_INTERVAL", "60")))
     parser.add_argument("--jitter", type=int, default=int(os.getenv("NGA_JITTER", "20")))
-    parser.add_argument("--once", action="store_true", help="Run one polling cycle and exit.")
-    parser.add_argument("--ws", action="store_true", help="Use Feishu WebSocket events for messages and card actions.")
-    parser.add_argument("--ws-no-watch", action="store_true", help="In --ws mode, do not start the NGA watch loop.")
+    parser.add_argument("--once", action="store_true", help="只执行一次轮询后退出。")
+    parser.add_argument("--ws", action="store_true", help="使用飞书 WebSocket 接收消息和卡片操作。")
+    parser.add_argument("--ws-no-watch", action="store_true", help="在 WebSocket 模式下不启动 NGA 后台监听循环。")
     return parser.parse_args()
 
 
@@ -1317,7 +1325,7 @@ def main() -> None:
         app_id = args.feishu_app_id or os.getenv("FEISHU_APP_ID", "")
         app_secret = args.feishu_app_secret or os.getenv("FEISHU_APP_SECRET", "")
         if not app_id or not app_secret:
-            raise SystemExit("Missing FEISHU_APP_ID or FEISHU_APP_SECRET.")
+            raise SystemExit("缺少 FEISHU_APP_ID 或 FEISHU_APP_SECRET。")
         chats = list_feishu_chats(app_id, app_secret, args.timeout)
         for chat in chats:
             print(
@@ -1325,7 +1333,7 @@ def main() -> None:
                 f"{chat.get('name', '')}\t"
                 f"{chat.get('chat_type', '')}"
             )
-        print(f"Listed {len(chats)} chats.")
+        print(f"已列出 {len(chats)} 个群组。")
         return
     if args.send_test:
         send_test_message(args)
@@ -1342,10 +1350,10 @@ def main() -> None:
                 if handle_feishu_commands(args, state):
                     write_json(state_path, state)
             except Exception as exc:
-                print(f"Feishu command polling failed: {exc}", file=sys.stderr)
+                print(f"飞书命令轮询失败: {exc}", file=sys.stderr)
             run_once(args)
         except Exception as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
+            print(f"错误: {exc}", file=sys.stderr)
             if args.once:
                 raise SystemExit(1)
         if args.once:

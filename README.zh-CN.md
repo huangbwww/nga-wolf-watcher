@@ -19,7 +19,7 @@
 
 第一次启动前建议保持“首次启动前自动初始化已读”开启。它会先把当前抓到的 NGA 回复标记为已读，避免历史回复一次性刷到飞书。
 
-GUI 会把本地密钥保存到 EXE 同目录的 `nga_wolf_config.json`。不要外发这个文件。
+GUI 会把本地密钥保存到 `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`。不要外发这个文件。
 
 ## 飞书群命令
 
@@ -65,7 +65,7 @@ BAT 会自动安装 `lark-oapi`。第一次运行时，如果没有 `.nga_seen.j
 
 ```powershell
 cd D:\nga-wolf
-python -m pip install lark-oapi
+python -m pip install lark-oapi customtkinter
 ```
 
 设置必填环境变量：
@@ -156,7 +156,7 @@ python .\nga_feishu_watch.py --disable-commands
 
 ```powershell
 python -m pip install pyinstaller
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name NGA-Wolf-Watcher --collect-all lark_oapi .\nga_wolf_gui.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name NGA-Wolf-Watcher --icon .\assets\app_icon.ico --add-data ".\assets\app_icon.ico;assets" --add-data ".\assets\app_icon.png;assets" --collect-all lark_oapi --collect-all customtkinter .\nga_wolf_gui.py
 ```
 
 输出文件是 `dist\NGA-Wolf-Watcher.exe`。
