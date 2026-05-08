@@ -171,3 +171,9 @@ $env:FEISHU_WEBHOOK = 'https://open.feishu.cn/open-apis/bot/v2/hook/...'
 $env:FEISHU_SECRET = 'optional signing secret'
 python .\nga_feishu_watch.py
 ```
+
+## 免责声明
+
+本项目仅供个人技术研究和学习使用，使用者需自行承担使用风险。
+
+使用者应自行确认并遵守 NGA、飞书、所在组织以及当地法律法规和平台规则。自动化访问、消息转发、Cookie 使用、频繁轮询或机器人交互可能带来账号限制、封号、数据泄露、服务中断或其他不确定后果。项目作者不作任何保证，也不对因使用、修改、分发或部署本项目造成的损失、纠纷、账号处罚、法律后果或第三方索赔承担责任。
