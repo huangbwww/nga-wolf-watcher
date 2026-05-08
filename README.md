@@ -11,14 +11,11 @@ This path does not require editing code or running Python commands.
 1. Download `NGA-Wolf-Watcher.exe` from [Releases](https://github.com/huangbwww/nga-wolf-watcher/releases/latest).
 2. Open [Feishu Open Platform](https://open.feishu.cn/page/openclaw), create a bot app, and copy the app's `App ID` and `App Secret`.
 3. Add the bot to the target Feishu group.
-4. In the Feishu developer console, enable event subscription by long connection and subscribe to:
-   - `im.message.receive_v1`
-   - `card.action.trigger`
-5. If you want the bot to receive normal group messages such as `/start`, grant the group message permission. WebSocket only changes the delivery channel; it does not remove message permission requirements. If you only use card buttons and outgoing pushes, this permission may not be needed.
-6. Open `NGA-Wolf-Watcher.exe`, fill `Feishu App ID` and `Feishu App Secret`, then click `查询群组` / `List chats`.
-7. Copy the target group's `chat_id` into `Receive ID`.
-8. Log in to `https://bbs.nga.cn/`, open the watched page, copy the browser request `Cookie`, and paste it into `NGA Cookie`.
-9. Click `保存配置`, then click `启动监听`.
+4. If you want to use `/start` and other commands without mentioning the bot, grant `im:message.group_msg`.
+5. Open `NGA-Wolf-Watcher.exe`, fill `Feishu App ID` and `Feishu App Secret`, then click `查询群组` / `List chats`.
+6. Copy the target group's `chat_id` into `Receive ID`.
+7. Log in to `https://bbs.nga.cn/`, open the watched page, copy the browser request `Cookie`, and paste it into `NGA Cookie`.
+8. Click `保存配置`, then click `启动监听`.
 
 Keep the first-start mark-seen option enabled before the first launch. It marks currently fetched NGA replies as already seen, so old replies are not pushed to Feishu in bulk.
 
@@ -55,6 +52,8 @@ Command meanings:
 If you only want to use the EXE, you can stop reading here.
 
 ### Run With BAT
+
+This mode requires a local Python environment.
 
 Copy `start_local.example.bat` to `start_local.bat`, fill the empty `NGA_COOKIE` and Feishu values, then run it.
 
