@@ -1,130 +1,28 @@
-# NGA reply watcher -> Feishu
+# NGA Wolf Watcher
 
-Watch NGA replies, push new messages to Feishu, and use Feishu cards to fetch history or pack results into `.txt` files.
+English | [中文说明](README.zh-CN.md)
 
-## Getting Started
+Watch NGA replies, push new replies to Feishu, and use Feishu cards to fetch history or pack results into `.txt` files.
 
-### 1. Install dependencies
+## Use The EXE
 
-```powershell
-cd D:\nga-wolf
-python -m pip install lark-oapi
-```
+This path does not require editing code or running Python commands.
 
-### 2. Create a Feishu bot app
+1. Download `NGA-Wolf-Watcher.exe` from [Releases](https://github.com/huangbwww/nga-wolf-watcher/releases/latest).
+2. Open [Feishu Open Platform](https://open.feishu.cn/page/openclaw), create a bot app, and copy the app's `App ID` and `App Secret`.
+3. Add the bot to the target Feishu group.
+4. In the Feishu developer console, enable event subscription by long connection and subscribe to:
+   - `im.message.receive_v1`
+   - `card.action.trigger`
+5. If you want the bot to receive normal group messages such as `/start`, grant the group message permission. WebSocket only changes the delivery channel; it does not remove message permission requirements. If you only use card buttons and outgoing pushes, this permission may not be needed.
+6. Open `NGA-Wolf-Watcher.exe`, fill `Feishu App ID` and `Feishu App Secret`, then click `查询群组` / `List chats`.
+7. Copy the target group's `chat_id` into `Receive ID`.
+8. Log in to `https://bbs.nga.cn/`, open the watched page, copy the browser request `Cookie`, and paste it into `NGA Cookie`.
+9. Click `保存配置`, then click `启动监听`.
 
-Fastest path: open [Feishu OpenClaw](https://open.feishu.cn/page/openclaw) and create an intelligent agent app.
+Keep the first-start mark-seen option enabled before the first launch. It marks currently fetched NGA replies as already seen, so old replies are not pushed to Feishu in bulk.
 
-Then in the Feishu developer console:
-
-1. Enable the bot capability.
-2. Install/publish the app to your tenant.
-3. Add the app bot to the target group.
-4. For WebSocket interactive cards, enable event subscription by long connection.
-5. Subscribe to `im.message.receive_v1` and `card.action.trigger`.
-6. Make sure message/file permissions are enabled if Feishu asks for them, then re-publish/re-install.
-
-Copy the app credentials:
-
-```powershell
-$env:FEISHU_APP_ID = 'cli_xxx'
-$env:FEISHU_APP_SECRET = 'xxx'
-```
-
-### 3. Get the target Feishu group id
-
-After the bot is in the target group:
-
-```powershell
-python .\nga_feishu_watch.py --list-feishu-chats
-```
-
-The first column that starts with `oc_` is the group `chat_id`:
-
-```powershell
-$env:FEISHU_RECEIVE_ID = 'oc_xxx'
-```
-
-`FEISHU_ID_TYPE` defaults to `chat_id`, so this is optional:
-
-```powershell
-$env:FEISHU_ID_TYPE = 'chat_id'
-```
-
-Test Feishu sending:
-
-```powershell
-python .\nga_feishu_watch.py --send-test
-```
-
-### 4. Get the NGA Cookie
-
-1. Log in to `https://bbs.nga.cn/` in a browser.
-2. Open the target page, for example `https://bbs.nga.cn/thread.php?searchpost=1&authorid=150058`.
-3. Press `F12` -> `Network`.
-4. Refresh the page.
-5. Click the `thread.php?...` or `read.php?...` request.
-6. In `Request Headers`, copy the full `Cookie` header value.
-
-Set it:
-
-```powershell
-$env:NGA_COOKIE = 'ngaPassportUid=...; ngaPassportCid=...; ...'
-```
-
-NGA cookies expire. If the script reports login errors, copy a fresh cookie.
-
-### 5. Optional defaults
-
-```powershell
-$env:NGA_DEFAULT_AUTHOR_ID = '150058'
-$env:NGA_DEFAULT_TID = '45974302'
-$env:NGA_INTERVAL = '60'
-$env:NGA_JITTER = '20'
-$env:NGA_RETRIES = '10'
-```
-
-### 6. Run
-
-Initialize state if you do not want old replies pushed on first run:
-
-```powershell
-python .\nga_feishu_watch.py --mark-seen
-```
-
-Run with WebSocket card callbacks and periodic NGA watch:
-
-```powershell
-python .\nga_feishu_watch.py --ws
-```
-
-Only test card/message callbacks, without periodic watch:
-
-```powershell
-python .\nga_feishu_watch.py --ws --ws-no-watch
-```
-
-## Local Config File
-
-For a second machine or another account, create a local `.env.ps1`:
-
-```powershell
-$env:NGA_COOKIE = '...'
-$env:FEISHU_APP_ID = 'cli_xxx'
-$env:FEISHU_APP_SECRET = 'xxx'
-$env:FEISHU_RECEIVE_ID = 'oc_xxx'
-$env:NGA_DEFAULT_AUTHOR_ID = '150058'
-$env:NGA_DEFAULT_TID = '45974302'
-```
-
-Load and run:
-
-```powershell
-. .\.env.ps1
-python .\nga_feishu_watch.py --ws
-```
-
-Do not commit `.env.ps1`; it contains secrets.
+The GUI saves local secrets to `nga_wolf_config.json` next to the EXE. Do not share that file.
 
 ## Commands
 
@@ -152,7 +50,82 @@ Command meanings:
 
 `/pack_r 45974302 100` is accepted as a compatibility alias for packing the default wolf thread.
 
-## Useful Checks
+## Advanced Usage
+
+If you only want to use the EXE, you can stop reading here.
+
+### Run With BAT
+
+Copy `start_local.example.bat` to `start_local.bat`, fill the empty `NGA_COOKIE` and Feishu values, then run it.
+
+The BAT installs `lark-oapi` automatically. On the first run, if `.nga_seen.json` does not exist, it runs `--mark-seen` before starting the watcher to avoid pushing old replies.
+
+### Run From Source
+
+Install dependencies:
+
+```powershell
+cd D:\nga-wolf
+python -m pip install lark-oapi
+```
+
+Set required environment variables:
+
+```powershell
+$env:NGA_COOKIE = 'ngaPassportUid=...; ngaPassportCid=...; ...'
+$env:FEISHU_APP_ID = 'cli_xxx'
+$env:FEISHU_APP_SECRET = 'xxx'
+$env:FEISHU_RECEIVE_ID = 'oc_xxx'
+$env:FEISHU_ID_TYPE = 'chat_id'
+```
+
+Optional defaults:
+
+```powershell
+$env:NGA_DEFAULT_AUTHOR_ID = '150058'
+$env:NGA_DEFAULT_TID = '45974302'
+$env:NGA_INTERVAL = '60'
+$env:NGA_JITTER = '20'
+$env:NGA_RETRIES = '10'
+```
+
+Initialize state if you do not want old replies pushed on first run:
+
+```powershell
+python .\nga_feishu_watch.py --mark-seen
+```
+
+Run with WebSocket card callbacks and periodic NGA watch:
+
+```powershell
+python .\nga_feishu_watch.py --ws
+```
+
+Run the local GUI manager from source:
+
+```powershell
+python .\nga_wolf_gui.py
+```
+
+Only test message/card callbacks, without periodic NGA watch:
+
+```powershell
+python .\nga_feishu_watch.py --ws --ws-no-watch
+```
+
+List chats visible to the Feishu bot:
+
+```powershell
+python .\nga_feishu_watch.py --list-feishu-chats
+```
+
+Send one Feishu test message:
+
+```powershell
+python .\nga_feishu_watch.py --send-test
+```
+
+### Useful Checks
 
 Test NGA parsing:
 
@@ -179,6 +152,15 @@ python .\nga_feishu_watch.py --disable-commands
 ```
 
 The script stores pushed reply ids and handled command ids in `.nga_seen.json`.
+
+### Build The EXE
+
+```powershell
+python -m pip install pyinstaller
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name NGA-Wolf-Watcher --collect-all lark_oapi .\nga_wolf_gui.py
+```
+
+The output is `dist\NGA-Wolf-Watcher.exe`.
 
 ## Legacy Custom Bot Webhook
 
