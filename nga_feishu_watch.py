@@ -147,12 +147,25 @@ def fetch_nga_json(url: str, cookie: str, timeout: int, label: str) -> dict[str,
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
             charset = resp.headers.get_content_charset() or "gb18030"
+            status = getattr(resp, "status", 200)
+            content_type = resp.headers.get("Content-Type", "")
     except urllib.error.HTTPError as exc:
         raw = exc.read()
         charset = exc.headers.get_content_charset() or "gb18030"
+        status = exc.code
+        content_type = exc.headers.get("Content-Type", "")
 
     text = raw.decode(charset, errors="replace")
-    payload = json.loads(text, strict=False)
+    try:
+        payload = json.loads(text, strict=False)
+    except json.JSONDecodeError as exc:
+        preview = re.sub(r"\s+", " ", text[:300]).strip()
+        if not preview:
+            preview = "<empty response>"
+        raise RuntimeError(
+            f"NGA returned non-JSON response on {label}: "
+            f"status={status}, content-type={content_type}, preview={preview}"
+        ) from exc
     if payload.get("error"):
         err = payload["error"]
         message = err.get("0") if isinstance(err, dict) else str(err)
@@ -1243,7 +1256,7 @@ def run_once(args: argparse.Namespace) -> int:
         state["updated_at"] = int(time.time())
         write_json(state_path, state)
         print(f"Marked {len(posts)} fetched posts as seen.")
-        return 0
+        return len(posts)
 
     new_posts = [post for post in posts if post.key not in seen]
     new_posts.reverse()

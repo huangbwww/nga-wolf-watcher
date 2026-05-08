@@ -324,6 +324,7 @@ class App:
                 target()
                 self.root.after(0, lambda: self.status_var.set("未启动"))
             except Exception as exc:
+                self.append_log(f"{label}失败: {exc}")
                 self.root.after(0, lambda: self.status_var.set("操作失败"))
                 self.root.after(0, lambda: messagebox.showerror("操作失败", str(exc)))
 
