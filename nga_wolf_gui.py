@@ -24,6 +24,9 @@ CONFIG_FILE = "config.json"
 RUNTIME_CONFIG_FILE = "runtime_config.json"
 LOG_FILE = "watcher.log"
 ICON_FILE = "app_icon.ico"
+WATCHER_PID_FILE = "watcher.pid"
+LOG_POLL_MS = 1000
+MAX_LOG_LINES_PER_POLL = 200
 
 BG = "#f3f6fb"
 CARD = "#ffffff"
@@ -96,6 +99,10 @@ def watcher_config_path() -> Path:
 
 def log_path() -> Path:
     return data_dir() / LOG_FILE
+
+
+def watcher_pid_path() -> Path:
+    return data_dir() / WATCHER_PID_FILE
 
 
 def migrate_old_config() -> None:
@@ -234,6 +241,56 @@ def command_for_mode(*args: str) -> list[str]:
     return [sys.executable, "-u", str(Path(__file__).resolve()), *args]
 
 
+def find_watcher_process_ids() -> set[int]:
+    if sys.platform != "win32":
+        return set()
+    script = """
+$own = $PID
+Get-CimInstance Win32_Process | Where-Object {
+    $_.ProcessId -ne $own -and
+    ($_.Name -ieq 'python.exe' -or $_.Name -ieq 'pythonw.exe' -or $_.Name -ieq 'NGA-Wolf-Watcher.exe') -and
+    $_.CommandLine -like '*--watcher-config*'
+} | ForEach-Object { $_.ProcessId }
+"""
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        return set()
+    pids: set[int] = set()
+    for line in result.stdout.splitlines():
+        try:
+            pid = int(line.strip())
+        except ValueError:
+            continue
+        if pid and pid != os.getpid():
+            pids.add(pid)
+    return pids
+
+
+def kill_process_tree(pid: int) -> bool:
+    if pid <= 0 or pid == os.getpid():
+        return False
+    if sys.platform == "win32":
+        result = subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return result.returncode == 0
+    try:
+        os.kill(pid, 15)
+        return True
+    except OSError:
+        return False
+
+
 def run_watcher_from_config(path: Path, *, ws_no_watch: bool = False) -> None:
     with path.open("r", encoding="utf-8-sig") as f:
         config = json.load(f)
@@ -263,6 +320,9 @@ class App:
         self.process: subprocess.Popen[str] | None = None
         self.log_offset = 0
         self.ui_thread = threading.get_ident()
+        self.operation_lock = threading.Lock()
+        self.starting = False
+        self.stopping = False
 
         self.vars: dict[str, StringVar] = {
             key: StringVar(value=str(self.config.get(key) or ""))
@@ -287,6 +347,7 @@ class App:
         self.auto_init_var = BooleanVar(value=bool(self.config.get("auto_mark_seen_first_start", True)))
         self.status_var = StringVar(value="未启动")
         self.status_detail_var = StringVar(value="监听服务尚未运行")
+        self.action_feedback_var = StringVar(value="准备就绪")
         self.path_var = StringVar(value=str(config_path()))
 
         self.pages: dict[str, ctk.CTkBaseClass] = {}
@@ -298,6 +359,8 @@ class App:
         self.log_text: ctk.CTkTextbox
         self.status_dot: ctk.CTkLabel
         self.status_badge: ctk.CTkLabel
+        self.start_button: ctk.CTkButton
+        self.stop_button: ctk.CTkButton
 
         self.build_ui()
         self.poll_logs()
@@ -391,7 +454,7 @@ class App:
 
         ctk.CTkLabel(
             sidebar,
-            text="NGA Wolf Watcher\nv1.0.0",
+            text="NGA Wolf Watcher\nv1.0.2",
             justify="left",
             anchor="w",
             font=ctk.CTkFont(size=11),
@@ -549,7 +612,7 @@ class App:
             font=ctk.CTkFont(size=12),
             text_color=MUTED,
         ).grid(row=1, column=1, columnspan=2, sticky="nw", pady=(2, 18))
-        ctk.CTkButton(
+        self.start_button = ctk.CTkButton(
             frame,
             text="▶ 启动监听",
             width=118,
@@ -558,8 +621,9 @@ class App:
             fg_color=PRIMARY,
             hover_color=PRIMARY_HOVER,
             command=self.start_clicked,
-        ).grid(row=0, column=3, sticky="e", padx=(0, 16), pady=(16, 4))
-        ctk.CTkButton(
+        )
+        self.start_button.grid(row=0, column=3, sticky="e", padx=(0, 16), pady=(16, 4))
+        self.stop_button = ctk.CTkButton(
             frame,
             text="■ 停止监听",
             width=118,
@@ -569,7 +633,8 @@ class App:
             hover_color="#e2e8f0",
             text_color="#64748b",
             command=self.stop_clicked,
-        ).grid(row=1, column=3, sticky="e", padx=(0, 16), pady=(4, 16))
+        )
+        self.stop_button.grid(row=1, column=3, sticky="e", padx=(0, 16), pady=(4, 16))
         self.update_status_style()
 
     def feishu_card(self, parent: ctk.CTkFrame, row: int) -> None:
@@ -634,6 +699,26 @@ class App:
         self.action_tile(frame, 1, 1, "查询群组", "获取 chat_id", self.list_chats_clicked)
         self.action_tile(frame, 1, 2, "初始化已读", "避免历史刷屏", self.mark_seen_clicked)
         self.action_tile(frame, 1, 3, "发送测试", "验证飞书推送", self.send_test_clicked)
+        feedback = ctk.CTkFrame(frame, fg_color="#f8fafc", corner_radius=10, border_width=1, border_color=BORDER)
+        feedback.grid(row=2, column=0, columnspan=4, sticky="ew", padx=16, pady=(0, 16))
+        feedback.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            feedback,
+            text="状态",
+            width=42,
+            height=28,
+            corner_radius=8,
+            fg_color="#eef2ff",
+            text_color=PRIMARY,
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).grid(row=0, column=0, sticky="w", padx=10, pady=10)
+        ctk.CTkLabel(
+            feedback,
+            textvariable=self.action_feedback_var,
+            anchor="w",
+            text_color="#475569",
+            font=ctk.CTkFont(size=12),
+        ).grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=10)
 
     def action_tile(
         self,
@@ -805,12 +890,69 @@ class App:
         else:
             self.status_dot.configure(fg_color="#e2e8f0")
             self.status_badge.configure(fg_color="#f1f5f9", text_color="#334155")
+        self.update_control_states()
+
+    def update_control_states(self) -> None:
+        if not hasattr(self, "start_button") or not hasattr(self, "stop_button"):
+            return
+
+        process_running = bool(self.process and self.process.poll() is None)
+        pid_running = bool(self.known_watcher_pids(include_scan=False))
+
+        if self.starting:
+            self.start_button.configure(state="disabled", text="启动中")
+            self.stop_button.configure(state="disabled")
+            return
+        if self.stopping:
+            self.start_button.configure(state="disabled")
+            self.stop_button.configure(state="disabled", text="停止中")
+            return
+        if process_running or pid_running:
+            self.start_button.configure(state="disabled", text="▶ 启动监听")
+            self.stop_button.configure(state="normal", text="■ 停止监听")
+            return
+
+        self.start_button.configure(state="normal", text="▶ 启动监听")
+        self.stop_button.configure(state="disabled", text="■ 停止监听")
 
     def set_status(self, status: str, detail: str | None = None) -> None:
         self.status_var.set(status)
         if detail is not None:
             self.status_detail_var.set(detail)
         self.update_status_style()
+
+    def set_action_feedback(self, text: str) -> None:
+        self.action_feedback_var.set(text)
+
+    def known_watcher_pids(self, *, include_scan: bool = False) -> set[int]:
+        pids = find_watcher_process_ids() if include_scan else set()
+        if self.process and self.process.poll() is None:
+            pids.add(self.process.pid)
+        try:
+            raw = watcher_pid_path().read_text(encoding="utf-8").strip()
+            if raw:
+                pids.add(int(raw))
+        except (OSError, ValueError):
+            pass
+        pids.discard(os.getpid())
+        return pids
+
+    def stop_watcher_processes(self, *, include_scan: bool = True) -> list[int]:
+        stopped: list[int] = []
+        for pid in sorted(self.known_watcher_pids(include_scan=include_scan)):
+            if kill_process_tree(pid):
+                stopped.append(pid)
+        if self.process:
+            try:
+                self.process.wait(timeout=2)
+            except Exception:
+                pass
+        self.process = None
+        try:
+            watcher_pid_path().unlink()
+        except OSError:
+            pass
+        return stopped
 
     def save_from_ui(self, *, require_receive_id: bool = True, require_cookie: bool = True) -> bool:
         config = self.collect_config()
@@ -823,11 +965,13 @@ class App:
         self.append_log("配置已保存。")
         self.append_log(f"状态文件：{resolved_state_path(self.config)}")
         self.set_status(self.current_status_text(), "配置已保存")
+        self.set_action_feedback(f"配置已保存，状态文件：{resolved_state_path(self.config).name}")
         return True
 
     def run_background(self, label: str, target: Callable[[], None], *, preserve_status: bool = False) -> None:
         def wrapper() -> None:
             self.root.after(0, lambda: self.set_status(f"{label}中"))
+            self.root.after(0, lambda: self.set_action_feedback(f"{label}中..."))
             try:
                 target()
                 if not preserve_status:
@@ -835,6 +979,7 @@ class App:
             except Exception as exc:
                 self.append_log(f"{label}失败：{exc}")
                 self.root.after(0, lambda: self.set_status("操作失败", str(exc)))
+                self.root.after(0, lambda: self.set_action_feedback(f"{label}失败：{exc}"))
                 self.root.after(0, lambda: messagebox.showerror("操作失败", str(exc)))
 
         threading.Thread(target=wrapper, daemon=True).start()
@@ -846,6 +991,7 @@ class App:
         save_config(self.config)
         self.append_log(f"初始化已读完成，已标记 {count} 条。")
         self.status_detail_var.set(f"已标记 {count} 条历史回复")
+        self.root.after(0, lambda: self.set_action_feedback(f"初始化已读完成，已标记 {count} 条。"))
 
     def mark_seen_clicked(self) -> None:
         if not self.save_from_ui():
@@ -861,6 +1007,7 @@ class App:
             nga_feishu_watch.send_test_message(build_args(self.config))
             self.append_log("测试消息已发送。")
             self.status_detail_var.set("测试消息已发送")
+            self.root.after(0, lambda: self.set_action_feedback("测试消息已发送。"))
 
         self.run_background("发送测试", do_send)
 
@@ -877,6 +1024,7 @@ class App:
                 self.root.after(0, lambda: self.render_chat_results([]))
                 self.append_log("未查询到群组。请确认机器人已加入目标群。")
                 self.status_detail_var.set("未查询到群组")
+                self.root.after(0, lambda: self.set_action_feedback("未查询到群组，请确认机器人已加入目标群。"))
                 return
             for chat in chats:
                 self.append_log(
@@ -885,59 +1033,94 @@ class App:
             self.root.after(0, lambda found=chats: self.render_chat_results(found))
             self.append_log(f"共查询到 {len(chats)} 个群组。复制目标群 chat_id 到 Receive ID。")
             self.status_detail_var.set(f"查询到 {len(chats)} 个群组")
+            self.root.after(0, lambda: self.set_action_feedback(f"查询到 {len(chats)} 个群组，可在飞书配置卡片里点击“填入”。"))
 
         self.run_background("查询群组", do_list)
 
     def start_clicked(self) -> None:
-        if self.process and self.process.poll() is None:
-            messagebox.showinfo("已经启动", "监听已经在运行。")
-            return
+        with self.operation_lock:
+            if self.starting:
+                self.append_log("启动正在进行中，已忽略重复点击。")
+                return
+            if self.stopping:
+                self.append_log("停止正在进行中，请稍后再启动。")
+                return
+            if self.process and self.process.poll() is None:
+                messagebox.showinfo("已经启动", "监听已经在运行。")
+                return
+            self.starting = True
+        self.update_control_states()
+
         if not self.save_from_ui():
+            with self.operation_lock:
+                self.starting = False
+            self.update_control_states()
             return
 
         def do_start() -> None:
-            state_missing = not resolved_state_path(self.config).exists()
-            should_mark = bool(self.config.get("auto_mark_seen_first_start", True)) and (
-                state_missing or not bool(self.config.get("mark_seen_initialized", False))
-            )
-            if should_mark:
-                self.append_log("首次启动前先初始化已读，避免历史消息刷屏。")
-                self.mark_seen()
-            runtime_config = dict(self.config)
-            runtime_config["_log_path"] = str(log_path())
-            save_runtime_config(runtime_config)
-            log_path().write_text("", encoding="utf-8")
-            self.log_offset = 0
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            self.process = subprocess.Popen(
-                command_for_mode("--watcher-config", str(watcher_config_path())),
-                cwd=str(app_dir()),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                creationflags=creationflags,
-            )
-            pid = self.process.pid
-            self.append_log(f"监听已启动，PID {pid}。")
-            self.root.after(0, lambda: self.set_status(f"运行中 PID {pid}", "正在监听 NGA 回复和飞书卡片操作"))
+            try:
+                existing = self.stop_watcher_processes()
+                if existing:
+                    self.append_log(f"已清理遗留监听进程：{', '.join(str(pid) for pid in existing)}。")
+                state_missing = not resolved_state_path(self.config).exists()
+                should_mark = bool(self.config.get("auto_mark_seen_first_start", True)) and (
+                    state_missing or not bool(self.config.get("mark_seen_initialized", False))
+                )
+                if should_mark:
+                    self.append_log("首次启动前先初始化已读，避免历史消息刷屏。")
+                    self.mark_seen()
+                runtime_config = dict(self.config)
+                runtime_config["_log_path"] = str(log_path())
+                save_runtime_config(runtime_config)
+                log_path().write_text("", encoding="utf-8")
+                self.log_offset = 0
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                process = subprocess.Popen(
+                    command_for_mode("--watcher-config", str(watcher_config_path())),
+                    cwd=str(app_dir()),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    creationflags=creationflags,
+                )
+                self.process = process
+                pid = process.pid
+                watcher_pid_path().write_text(str(pid), encoding="utf-8")
+                self.append_log(f"监听已启动，PID {pid}。")
+                self.root.after(0, lambda: self.set_status(f"运行中 PID {pid}", "正在监听 NGA 回复和飞书卡片操作"))
+            finally:
+                with self.operation_lock:
+                    self.starting = False
+                self.root.after(0, self.update_control_states)
 
         self.run_background("启动", do_start, preserve_status=True)
 
     def stop_clicked(self) -> None:
-        if not self.process or self.process.poll() is not None:
-            self.set_status("未启动", "监听未运行")
-            self.append_log("监听未运行。")
-            return
-        pid = self.process.pid
-        self.process.terminate()
-        try:
-            self.process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
-            self.process.wait(timeout=5)
-        self.process = None
-        self.set_status("已停止", "监听已停止")
-        self.append_log(f"监听已停止，PID {pid}。")
+        with self.operation_lock:
+            if self.stopping:
+                self.append_log("停止正在进行中，已忽略重复点击。")
+                return
+            if self.starting:
+                self.append_log("启动正在进行中，请稍后再停止。")
+                return
+            self.stopping = True
+        self.update_control_states()
+
+        def do_stop() -> None:
+            try:
+                stopped = self.stop_watcher_processes(include_scan=True)
+                if stopped:
+                    self.root.after(0, lambda: self.set_status("已停止", "监听已停止"))
+                    self.append_log(f"监听已停止，PID {', '.join(str(pid) for pid in stopped)}。")
+                else:
+                    self.root.after(0, lambda: self.set_status("未启动", "监听未运行"))
+                    self.append_log("监听未运行。")
+            finally:
+                with self.operation_lock:
+                    self.stopping = False
+                self.root.after(0, self.update_control_states)
+
+        self.run_background("停止", do_stop, preserve_status=True)
 
     def append_log(self, text: str) -> None:
         if threading.get_ident() != self.ui_thread:
@@ -959,11 +1142,16 @@ class App:
                     f.seek(self.log_offset)
                     text = f.read()
                     self.log_offset = f.tell()
-                for line in text.splitlines():
+                lines = text.splitlines()
+                if len(lines) > MAX_LOG_LINES_PER_POLL:
+                    skipped = len(lines) - MAX_LOG_LINES_PER_POLL
+                    lines = lines[-MAX_LOG_LINES_PER_POLL:]
+                    self.append_log(f"日志更新较多，已跳过前 {skipped} 行。")
+                for line in lines:
                     self.append_log(line)
             except OSError:
                 pass
-        self.root.after(250, self.poll_logs)
+        self.root.after(LOG_POLL_MS, self.poll_logs)
 
     def poll_process(self) -> None:
         if self.process and self.process.poll() is not None:
@@ -974,10 +1162,17 @@ class App:
         self.root.after(1000, self.poll_process)
 
     def on_close(self) -> None:
-        if self.process and self.process.poll() is None:
+        should_prompt = bool(self.known_watcher_pids(include_scan=False))
+        if should_prompt:
             if not messagebox.askyesno("退出", "监听仍在运行，是否停止并退出？"):
                 return
-            self.stop_clicked()
+
+            def stop_then_destroy() -> None:
+                self.stop_watcher_processes(include_scan=True)
+                self.root.after(0, self.root.destroy)
+
+            threading.Thread(target=stop_then_destroy, daemon=True).start()
+            return
         self.root.destroy()
 
 

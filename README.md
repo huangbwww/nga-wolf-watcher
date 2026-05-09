@@ -14,12 +14,24 @@ This path does not require editing code or running Python commands.
 4. If you want to use `/start` and other commands without mentioning the bot, grant `im:message.group_msg`.
 5. Open `NGA-Wolf-Watcher.exe`, fill `Feishu App ID` and `Feishu App Secret`, then click `查询群组` / `List chats`.
 6. Copy the target group's `chat_id` into `Receive ID`.
-7. Log in to `https://bbs.nga.cn/`, open the watched page, copy the browser request `Cookie`, and paste it into `NGA Cookie`.
+7. Log in to `https://bbs.nga.cn/`, copy the browser request `Cookie`, and paste it into `NGA Cookie`.
 8. Click `保存配置`, then click `启动监听`.
 
 Keep the first-start mark-seen option enabled before the first launch. It marks currently fetched NGA replies as already seen, so old replies are not pushed to Feishu in bulk.
 
 The GUI saves local secrets under `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`. Do not share that file.
+
+### How To Copy NGA Cookie
+
+1. Open `https://bbs.nga.cn/` in your browser and log in to the NGA account that can view the target content.
+2. Open the NGA page you want to watch, or any NGA page under `bbs.nga.cn` after logging in.
+3. Press `F12` to open Developer Tools, then switch to the `Network` tab.
+4. Refresh the page with Developer Tools open.
+5. Click a request sent to `bbs.nga.cn`, for example `thread.php`, `read.php`, or another request with status `200`.
+6. In `Headers` / `Request Headers`, find `Cookie`.
+7. Copy the full `Cookie` value, paste it into the GUI's `NGA Cookie` field, then click `保存配置`.
+
+The cookie is equivalent to a temporary login credential. Do not post it in issues, chats, screenshots, logs, or release files. If NGA fetching returns empty data or JSON parsing errors, copy the cookie again from a logged-in `bbs.nga.cn` request.
 
 ## Commands
 
@@ -27,16 +39,17 @@ In the target Feishu group, mention the bot or use the card:
 
 ```text
 /start
-/history_r 150058 10
-/pack_r 150058 10
-/history_t 45974302 100
-/pack_t 45974302 100
+/history_r 150058 5
+/pack_r 150058 5
+/history_t 45974302 10
+/pack_t 45974302 10
 ```
 
 Defaults:
 
 - `150058` = wolf uid
 - `45974302` = wolf thread id
+- When `<count>` is omitted, user-reply commands default to `5`, and thread-reply commands default to `10`.
 
 Command meanings:
 
@@ -45,7 +58,7 @@ Command meanings:
 - `/history_t <tid> <count>` fetch latest posts from a thread and send cards.
 - `/pack_t <tid> <count>` fetch latest posts from a thread and send a `.txt` file.
 
-`/pack_r 45974302 100` is accepted as a compatibility alias for packing the default wolf thread.
+`/pack_r 45974302 10` is accepted as a compatibility alias for packing the default wolf thread.
 
 ## Advanced Usage
 

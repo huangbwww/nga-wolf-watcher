@@ -44,10 +44,13 @@ NGA_READ_ENDPOINT = "https://bbs.nga.cn/read.php"
 FEISHU_API = "https://open.feishu.cn/open-apis"
 DEFAULT_AUTHOR_ID = "150058"
 DEFAULT_TID = "45974302"
+DEFAULT_REPLY_COUNT = 5
+DEFAULT_THREAD_COUNT = 10
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
+QUOTE_END_MARKER = "__NGA_QUOTE_END__"
 
 
 @dataclass(frozen=True)
@@ -67,7 +70,7 @@ class BotCommand:
     action: str
     target_type: str = ""
     target_id: str = ""
-    count: int = 20
+    count: int = DEFAULT_REPLY_COUNT
 
     def __str__(self) -> str:
         action_labels = {"start": "开始菜单", "history": "查询", "pack": "打包"}
@@ -204,7 +207,9 @@ def strip_markup(value: str) -> str:
     value = html.unescape(value)
     value = re.sub(r"<br\s*/?>", "\n", value, flags=re.I)
     value = re.sub(r"<[^>]+>", "", value)
-    value = re.sub(r"\[/?(?:quote|collapse|color|size|b|i|u|url|img|align)[^\]]*\]", "", value, flags=re.I)
+    value = re.sub(r"\[quote[^\]]*\]", "", value, flags=re.I)
+    value = re.sub(r"\[/quote\]", f"\n\n{QUOTE_END_MARKER}\n\n", value, flags=re.I)
+    value = re.sub(r"\[/?(?:collapse|color|size|b|i|u|url|img|align)[^\]]*\]", "", value, flags=re.I)
     value = re.sub(r"\n{3,}", "\n\n", value)
     return value.strip()
 
@@ -371,32 +376,114 @@ def lark_md_escape(value: str) -> str:
     return value.replace("<", "&lt;").replace(">", "&gt;")
 
 
+def truncate_text(value: str, limit: int) -> str:
+    value = value.strip()
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 1)].rstrip() + "…"
+
+
+def split_quoted_reply(content: str) -> tuple[str, str, str] | None:
+    match = re.match(
+        r"^\s*(\[[^\]\n]*pid[^\]\n]*\]\s*Reply\s*\[/pid\]\s*Post by\s+.*?(?:\([^)\n]*\))?:)\s*(.*)$",
+        content,
+        flags=re.I | re.S,
+    )
+    if not match:
+        return None
+
+    quote_header = match.group(1).strip()
+    rest = match.group(2).strip()
+    if not rest:
+        return None
+
+    if QUOTE_END_MARKER in rest:
+        quote_body, reply_body = rest.split(QUOTE_END_MARKER, 1)
+        quote_body = quote_body.strip()
+        reply_body = reply_body.strip()
+        if reply_body:
+            return quote_header, quote_body, reply_body
+        if quote_body:
+            return quote_header, "", quote_body
+
+    parts = re.split(r"\n\s*\n", rest, maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        return quote_header, "", rest
+    return quote_header, parts[0].strip(), parts[1].strip()
+
+
+def lark_quote(value: str) -> str:
+    escaped = lark_md_escape(value.strip())
+    if not escaped:
+        return ""
+    return "\n".join(f"> {line}" if line else ">" for line in escaped.splitlines())
+
+
 def post_card_element(post: NgaPost) -> list[dict[str, Any]]:
-    excerpt = lark_md_escape(post.content.replace("\n", "\n\n")[:700])
     title = lark_md_escape(post.subject)
     time_text = lark_md_escape(post.post_time or "unknown")
     author_text = lark_md_escape(post.author or post.author_id or "unknown")
     floor_text = f" | #{lark_md_escape(post.floor)}" if post.floor else ""
-    return [
+    elements: list[dict[str, Any]] = [
         {
             "tag": "div",
             "text": {
                 "tag": "lark_md",
-                "content": f"**{title}**\n{time_text} | {author_text}{floor_text}\n\n{excerpt}",
+                "content": f"**{title}**\n{time_text} | {author_text}{floor_text}",
             },
         },
+    ]
+
+    quoted = split_quoted_reply(post.content)
+    if quoted:
+        quote_header, quote_body, reply_body = quoted
+        quote_lines = [quote_header]
+        if quote_body:
+            quote_lines.extend(["", truncate_text(quote_body, 420)])
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**被回复内容**\n{lark_quote(chr(10).join(quote_lines))}",
+                },
+            }
+        )
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**本次回复**\n{lark_md_escape(truncate_text(reply_body, 700)).replace(chr(10), chr(10) + chr(10))}",
+                },
+            }
+        )
+    else:
+        excerpt = lark_md_escape(truncate_text(post.content, 850)).replace("\n", "\n\n")
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**回复内容**\n{excerpt}",
+                },
+            }
+        )
+
+    elements.append(
         {
             "tag": "action",
             "actions": [
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "Open in NGA"},
+                    "text": {"tag": "plain_text", "content": "打开 NGA"},
                     "url": post.url,
                     "type": "default",
                 }
             ],
         },
-    ]
+    )
+    return elements
 
 
 def feishu_posts_card(posts: list[NgaPost], title: str) -> dict[str, Any]:
@@ -657,6 +744,10 @@ def clamp_count(value: str | None, default: int = 20, maximum: int = 200) -> int
     return max(1, min(count, maximum))
 
 
+def default_command_count(command_name: str) -> int:
+    return DEFAULT_THREAD_COUNT if command_name.endswith("_t") else DEFAULT_REPLY_COUNT
+
+
 def parse_bot_command(text: str, default_author_id: str, default_tid: str) -> BotCommand | None:
     compact = " ".join(text.split())
     if re.search(r"(?:^|\s)/start(?:\s|$)", compact):
@@ -668,7 +759,7 @@ def parse_bot_command(text: str, default_author_id: str, default_tid: str) -> Bo
             action="history",
             target_type="reply",
             target_id=default_author_id,
-            count=clamp_count(legacy.group(1), 20, 50),
+            count=clamp_count(legacy.group(1), DEFAULT_REPLY_COUNT, 50),
         )
 
     match = re.search(r"(?:^|\s)/(history_r|pack_r|history_t|pack_t)(?:\s+(\d+))?(?:\s+(\d{1,4}))?(?:\s|$)", compact)
@@ -677,10 +768,10 @@ def parse_bot_command(text: str, default_author_id: str, default_tid: str) -> Bo
 
     name, raw_target, raw_count = match.groups()
     target = raw_target or (default_tid if name.endswith("_t") else default_author_id)
-    count = clamp_count(raw_count, 20, 500 if name.startswith("pack_") else 100)
+    count = clamp_count(raw_count, default_command_count(name), 500 if name.startswith("pack_") else 100)
     target_type = "thread" if name.endswith("_t") else "reply"
 
-    # Compatibility for the requested "/pack_r 45974302 100" spelling.
+    # Compatibility for the older "/pack_r <default tid> <count>" spelling.
     if name == "pack_r" and target == default_tid:
         target_type = "thread"
 
@@ -695,7 +786,7 @@ def bot_command_from_form(form: dict[str, Any], default_author_id: str, default_
     if raw_name not in {"history_r", "pack_r", "history_t", "pack_t"}:
         raw_name = "history_r"
     target = raw_target or (default_tid if raw_name.endswith("_t") else default_author_id)
-    count = clamp_count(raw_count or None, 10, 500 if raw_name.startswith("pack_") else 100)
+    count = clamp_count(raw_count or None, default_command_count(raw_name), 500 if raw_name.startswith("pack_") else 100)
     target_type = "thread" if raw_name.endswith("_t") else "reply"
     action = "pack" if raw_name.startswith("pack_") else "history"
     if raw_name == "pack_r" and target == default_tid:
@@ -709,10 +800,10 @@ def form_action_name(form: dict[str, Any]) -> str:
 
 def start_card(default_author_id: str, default_tid: str) -> dict[str, Any]:
     commands = [
-        f"/history_r {default_author_id} 10",
-        f"/pack_r {default_author_id} 10",
-        f"/history_t {default_tid} 100",
-        f"/pack_t {default_tid} 100",
+        f"/history_r {default_author_id} {DEFAULT_REPLY_COUNT}",
+        f"/pack_r {default_author_id} {DEFAULT_REPLY_COUNT}",
+        f"/history_t {default_tid} {DEFAULT_THREAD_COUNT}",
+        f"/pack_t {default_tid} {DEFAULT_THREAD_COUNT}",
     ]
     content = "\n".join(
         [
@@ -781,10 +872,10 @@ def start_form_card(default_author_id: str, default_tid: str) -> dict[str, Any]:
                     "tag": "markdown",
                     "content": (
                         "也可以直接发命令：\n"
-                        f"`/history_r {default_author_id} 10`\n"
-                        f"`/pack_r {default_author_id} 10`\n"
-                        f"`/history_t {default_tid} 100`\n"
-                        f"`/pack_t {default_tid} 100`"
+                        f"`/history_r {default_author_id} {DEFAULT_REPLY_COUNT}`\n"
+                        f"`/pack_r {default_author_id} {DEFAULT_REPLY_COUNT}`\n"
+                        f"`/history_t {default_tid} {DEFAULT_THREAD_COUNT}`\n"
+                        f"`/pack_t {default_tid} {DEFAULT_THREAD_COUNT}`"
                     ),
                 },
             ]
@@ -794,10 +885,10 @@ def start_form_card(default_author_id: str, default_tid: str) -> dict[str, Any]:
 
 def preset_actions_elements(default_author_id: str, default_tid: str) -> list[dict[str, Any]]:
     return [
-        preset_button("查询用户回复", "history_r", default_author_id, "10"),
-        preset_button("打包用户回复", "pack_r", default_author_id, "10"),
-        preset_button("查询帖子回复", "history_t", default_tid, "100"),
-        preset_button("打包帖子回复", "pack_t", default_tid, "100"),
+        preset_button("查询用户回复", "history_r", default_author_id, str(DEFAULT_REPLY_COUNT)),
+        preset_button("打包用户回复", "pack_r", default_author_id, str(DEFAULT_REPLY_COUNT)),
+        preset_button("查询帖子回复", "history_t", default_tid, str(DEFAULT_THREAD_COUNT)),
+        preset_button("打包帖子回复", "pack_t", default_tid, str(DEFAULT_THREAD_COUNT)),
     ]
 
 
@@ -826,10 +917,10 @@ def preset_buttons_element_old(default_author_id: str, default_tid: str) -> dict
         "flex_mode": "none",
         "background_style": "default",
         "columns": [
-            preset_button_column("查询用户回复", "history_r", default_author_id, "10"),
-            preset_button_column("打包用户回复", "pack_r", default_author_id, "10"),
-            preset_button_column("查询帖子回复", "history_t", default_tid, "100"),
-            preset_button_column("打包帖子回复", "pack_t", default_tid, "100"),
+            preset_button_column("查询用户回复", "history_r", default_author_id, str(DEFAULT_REPLY_COUNT)),
+            preset_button_column("打包用户回复", "pack_r", default_author_id, str(DEFAULT_REPLY_COUNT)),
+            preset_button_column("查询帖子回复", "history_t", default_tid, str(DEFAULT_THREAD_COUNT)),
+            preset_button_column("打包帖子回复", "pack_t", default_tid, str(DEFAULT_THREAD_COUNT)),
         ],
     }
 
@@ -1043,7 +1134,7 @@ def start_ws(args: argparse.Namespace) -> None:
             if action == "open_preset_form":
                 command_name = str(form.get("command") or "history_r")
                 target_id = str(form.get("target_id") or (args.default_tid if command_name.endswith("_t") else args.default_author_id))
-                count = str(form.get("count") or ("100" if command_name.endswith("_t") else "10"))
+                count = str(form.get("count") or default_command_count(command_name))
                 push_feishu_card(args_for_chat(args, chat_id), command_form_card(command_name, target_id, count))
                 return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已打开预填表单"}})
             command = bot_command_from_form(form, args.default_author_id, args.default_tid)
