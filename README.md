@@ -2,7 +2,12 @@
 
 English | [中文说明](README.zh-CN.md)
 
-Watch NGA replies, push new replies to Feishu, and use Feishu cards to fetch history or pack results into `.txt` files.
+Watch a specified NGA user's replies, push new replies to Feishu, and use Feishu cards to fetch history or pack results into `.txt` files.
+
+## Features
+
+- Continuous monitoring: after you click `启动监听` / `Start Watcher`, the app keeps checking the configured `Default User ID` for new NGA replies and pushes newly found replies to the target Feishu group.
+- Manual Feishu actions: in the Feishu group, you can use commands or card buttons to fetch recent user replies, fetch thread replies, or pack results into `.txt` files.
 
 ## Use The EXE
 
