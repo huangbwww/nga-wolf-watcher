@@ -9,6 +9,12 @@ Watch a specified NGA user's replies, push new replies to Feishu, and use Feishu
 - Continuous monitoring: after you click `启动监听` / `Start Watcher`, the app keeps checking the configured `Default User ID` for new NGA replies and pushes newly found replies to the target Feishu group.
 - Manual Feishu actions: in the Feishu group, you can use commands or card buttons to fetch recent user replies, fetch thread replies, or pack results into `.txt` files.
 
+## Feedback
+
+If you run into bugs or usage problems, please open an [Issue](https://github.com/huangbwww/nga-wolf-watcher/issues).
+
+Feature ideas are also welcome. They can be related to NGA, stock-related workflows, or other adjacent personal tools. I check issues periodically and update when I have time.
+
 ## Use The EXE
 
 This path does not require editing code or running Python commands.
