@@ -8,6 +8,7 @@ Watch a specified NGA user's replies, push new replies to Feishu, and use Feishu
 
 - Continuous monitoring: after you click `启动监听` / `Start Watcher`, the app keeps checking the configured `Default User ID` for new NGA replies and pushes newly found replies to the target Feishu group.
 - Manual Feishu actions: in the Feishu group, you can use commands or card buttons to fetch recent user replies, fetch thread replies, or pack results into `.txt` files.
+- Do-not-disturb hours: automatic monitoring can be muted for a continuous weekly range, such as Friday 18:00 to Monday 08:00. Muted replies can either be ignored or summarized after the quiet period ends.
 
 ## Feedback
 
@@ -30,7 +31,16 @@ This path does not require editing code or running Python commands.
 
 Keep the first-start mark-seen option enabled before the first launch. It marks currently fetched NGA replies as already seen, so old replies are not pushed to Feishu in bulk.
 
-The GUI saves local secrets under `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`. Do not share that file.
+The GUI saves local secrets under `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`. Runtime state is stored next to it as `.nga_seen.json` by default. Do not share these files.
+
+### Do-Not-Disturb Hours
+
+In `运行设置` / `Settings`, enable `免打扰时段` if you do not want automatic monitoring pushes during a weekly time range. Set a start weekday/time and an end weekday/time, for example `周五 18:00 -> 周一 08:00`. The time uses hour/minute dropdowns to avoid manual `HH:MM` input. Manual Feishu commands, packing, chat lookup, and test messages are not affected.
+
+Do-not-disturb handling has two modes:
+
+- `忽略新回复`: new replies found during the muted period are marked as seen and will not be sent later.
+- `暂存并在免打扰结束后汇总推送`: new replies found during the muted period are stored and sent as one summary card after the muted period ends.
 
 ### How To Copy NGA Cookie
 
@@ -174,7 +184,7 @@ Disable command polling in non-WebSocket mode:
 python .\nga_feishu_watch.py --disable-commands
 ```
 
-The script stores pushed reply ids and handled command ids in `.nga_seen.json`.
+The script stores pushed reply ids, handled command ids, and deferred quiet-hour replies in `.nga_seen.json`. In the EXE GUI, the default file lives under `%LOCALAPPDATA%\NGA Wolf Watcher\`, next to `config.json`. It is separate from config because it is runtime state and is written frequently; deleting it resets the watcher’s seen/handled history.
 
 ### Build The EXE
 

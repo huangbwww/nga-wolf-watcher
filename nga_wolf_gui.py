@@ -56,7 +56,74 @@ DEFAULT_CONFIG = {
     "state_path": ".nga_seen.json",
     "auto_mark_seen_first_start": True,
     "mark_seen_initialized": False,
+    "quiet_hours_enabled": False,
+    "quiet_start_day": "5",
+    "quiet_end_day": "0",
+    "quiet_start_time": "00:00",
+    "quiet_end_time": "00:00",
+    "quiet_policy": "ignore",
 }
+
+
+WEEKDAY_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+HOUR_OPTIONS = [f"{hour:02d}" for hour in range(24)]
+MINUTE_OPTIONS = [f"{minute:02d}" for minute in range(60)]
+
+
+def weekday_label(day: int) -> str:
+    if day < 0 or day > 6:
+        return WEEKDAY_LABELS[0]
+    return WEEKDAY_LABELS[day]
+
+
+def weekday_index(label: str) -> int:
+    try:
+        return WEEKDAY_LABELS.index(label)
+    except ValueError:
+        return 0
+
+
+def split_hhmm(value: object, default: str) -> tuple[str, str]:
+    text = str(value or default).strip()
+    try:
+        minutes = nga_feishu_watch.parse_hhmm(text)
+    except ValueError:
+        minutes = nga_feishu_watch.parse_hhmm(default)
+    return f"{minutes // 60:02d}", f"{minutes % 60:02d}"
+
+
+class HoverTooltip:
+    def __init__(self, widget: ctk.CTkBaseClass, text: str) -> None:
+        self.widget = widget
+        self.text = text
+        self.window: ctk.CTkToplevel | None = None
+        widget.bind("<Enter>", self.show)
+        widget.bind("<Leave>", self.hide)
+
+    def show(self, _event: object | None = None) -> None:
+        if self.window is not None:
+            return
+        x = self.widget.winfo_rootx() + 20
+        y = self.widget.winfo_rooty() + 24
+        self.window = ctk.CTkToplevel(self.widget)
+        self.window.overrideredirect(True)
+        self.window.geometry(f"+{x}+{y}")
+        ctk.CTkLabel(
+            self.window,
+            text=self.text,
+            justify="left",
+            wraplength=340,
+            fg_color="#0f172a",
+            text_color="#ffffff",
+            corner_radius=8,
+            width=360,
+            height=72,
+        ).grid(row=0, column=0)
+
+    def hide(self, _event: object | None = None) -> None:
+        if self.window is not None:
+            self.window.destroy()
+            self.window = None
 
 
 def app_dir() -> Path:
@@ -200,6 +267,13 @@ def build_args(
         retry_delay=float_value(config, "retry_delay", 2.0),
         interval=int_value(config, "interval", 60),
         jitter=int_value(config, "jitter", 20),
+        quiet_hours_enabled=bool(config.get("quiet_hours_enabled", False)),
+        quiet_start_day=int(str(config.get("quiet_start_day", "5") or "5")),
+        quiet_end_day=int(str(config.get("quiet_end_day", "0") or "0")),
+        quiet_days=list(config.get("quiet_days") or [5, 6]),
+        quiet_start_time=str(config.get("quiet_start_time") or "00:00").strip(),
+        quiet_end_time=str(config.get("quiet_end_time") or "00:00").strip(),
+        quiet_policy=str(config.get("quiet_policy") or "ignore").strip(),
         once=False,
         ws=ws,
         ws_no_watch=ws_no_watch,
@@ -232,6 +306,25 @@ def validate_config(
             float_value(config, key, 0)
         except ValueError:
             errors.append(f"{label}必须是数字")
+    if bool(config.get("quiet_hours_enabled", False)):
+        try:
+            nga_feishu_watch.parse_weekday(config.get("quiet_start_day"), 5)
+        except ValueError:
+            errors.append("免打扰开始星期无效")
+        try:
+            nga_feishu_watch.parse_weekday(config.get("quiet_end_day"), 0)
+        except ValueError:
+            errors.append("免打扰结束星期无效")
+        try:
+            nga_feishu_watch.parse_hhmm(str(config.get("quiet_start_time") or ""))
+        except ValueError:
+            errors.append("免打扰开始时间必须是 HH:MM")
+        try:
+            nga_feishu_watch.parse_hhmm(str(config.get("quiet_end_time") or ""))
+        except ValueError:
+            errors.append("免打扰结束时间必须是 HH:MM")
+        if str(config.get("quiet_policy") or "") not in {"ignore", "defer"}:
+            errors.append("免打扰处理方式无效")
     return errors
 
 
@@ -345,10 +438,24 @@ class App:
             self.vars["feishu_id_type"].set("chat_id")
 
         self.auto_init_var = BooleanVar(value=bool(self.config.get("auto_mark_seen_first_start", True)))
+        self.quiet_enabled_var = BooleanVar(value=bool(self.config.get("quiet_hours_enabled", False)))
+        quiet_start_day = nga_feishu_watch.parse_weekday(self.config.get("quiet_start_day", 5), 5)
+        quiet_end_day = nga_feishu_watch.parse_weekday(self.config.get("quiet_end_day", 0), 0)
+        self.quiet_start_day_var = StringVar(value=weekday_label(quiet_start_day))
+        self.quiet_end_day_var = StringVar(value=weekday_label(quiet_end_day))
+        start_hour, start_minute = split_hhmm(self.config.get("quiet_start_time"), "00:00")
+        end_hour, end_minute = split_hhmm(self.config.get("quiet_end_time"), "00:00")
+        self.quiet_start_hour_var = StringVar(value=start_hour)
+        self.quiet_start_minute_var = StringVar(value=start_minute)
+        self.quiet_end_hour_var = StringVar(value=end_hour)
+        self.quiet_end_minute_var = StringVar(value=end_minute)
+        self.quiet_policy_var = StringVar(value=str(self.config.get("quiet_policy") or "ignore"))
         self.status_var = StringVar(value="未启动")
         self.status_detail_var = StringVar(value="监听服务尚未运行")
         self.action_feedback_var = StringVar(value="准备就绪")
+        self.save_state_var = StringVar(value="配置已保存")
         self.path_var = StringVar(value=str(config_path()))
+        self.dirty = False
 
         self.pages: dict[str, ctk.CTkBaseClass] = {}
         self.nav_buttons: dict[str, ctk.CTkButton] = {}
@@ -361,6 +468,9 @@ class App:
         self.status_badge: ctk.CTkLabel
         self.start_button: ctk.CTkButton
         self.stop_button: ctk.CTkButton
+        self.global_save_button: ctk.CTkButton
+        self.save_state_label: ctk.CTkLabel
+        self.minute_picker: ctk.CTkToplevel | None = None
 
         self.build_ui()
         self.poll_logs()
@@ -402,11 +512,63 @@ class App:
         self.build_nga_page()
         self.build_log_page()
         self.build_settings_page()
+        self.build_global_action_bar()
+        self.watch_config_changes()
         self.show_page("quick")
 
         self.append_log(f"配置文件：{config_path()}")
         self.append_log(f"状态文件：{resolved_state_path(self.config)}")
         self.append_log(f"日志文件：{log_path()}")
+
+    def build_global_action_bar(self) -> None:
+        bar = ctk.CTkFrame(self.main, fg_color="#ffffff", corner_radius=0, border_width=1, border_color=BORDER)
+        bar.grid(row=1, column=0, sticky="ew")
+        bar.grid_columnconfigure(0, weight=1)
+        self.save_state_label = ctk.CTkLabel(
+            bar,
+            textvariable=self.save_state_var,
+            anchor="w",
+            text_color=MUTED,
+            font=ctk.CTkFont(size=12),
+        )
+        self.save_state_label.grid(row=0, column=0, sticky="ew", padx=18, pady=12)
+        self.global_save_button = ctk.CTkButton(
+            bar,
+            text="保存配置",
+            width=112,
+            height=34,
+            corner_radius=10,
+            fg_color=PRIMARY,
+            hover_color=PRIMARY_HOVER,
+            command=self.save_from_ui,
+        )
+        self.global_save_button.grid(row=0, column=1, sticky="e", padx=(0, 18), pady=10)
+
+    def watch_config_changes(self) -> None:
+        variables: list[object] = [
+            *self.vars.values(),
+            self.auto_init_var,
+            self.quiet_enabled_var,
+            self.quiet_start_day_var,
+            self.quiet_end_day_var,
+            self.quiet_start_hour_var,
+            self.quiet_start_minute_var,
+            self.quiet_end_hour_var,
+            self.quiet_end_minute_var,
+            self.quiet_policy_var,
+        ]
+        for var in variables:
+            var.trace_add("write", lambda *_args: self.mark_dirty())
+
+    def mark_dirty(self) -> None:
+        if self.dirty:
+            return
+        self.dirty = True
+        self.save_state_var.set("有未保存修改")
+        if hasattr(self, "save_state_label"):
+            self.save_state_label.configure(text_color="#b45309")
+        if hasattr(self, "global_save_button"):
+            self.global_save_button.configure(fg_color="#f59e0b", hover_color="#d97706")
 
     def build_sidebar(self) -> None:
         sidebar = ctk.CTkFrame(self.root, width=154, fg_color=SIDEBAR, corner_radius=0)
@@ -454,7 +616,7 @@ class App:
 
         ctk.CTkLabel(
             sidebar,
-            text="NGA Wolf Watcher\nv1.0.2",
+            text="NGA Wolf Watcher\nv1.0.3",
             justify="left",
             anchor="w",
             font=ctk.CTkFont(size=11),
@@ -548,7 +710,205 @@ class App:
             hover_color=PRIMARY_HOVER,
             border_color="#cbd5e1",
         ).grid(row=len(fields), column=1, sticky="w", padx=(0, 16), pady=(12, 16))
-        self.path_card(page, 2)
+        self.quiet_hours_card(page, 2)
+        self.path_card(page, 3)
+
+    def quiet_hours_card(self, parent: ctk.CTkFrame, row: int) -> None:
+        frame = self.card(parent, row)
+        frame.grid_columnconfigure(1, weight=1)
+        frame.grid_columnconfigure(2, weight=1)
+        frame.grid_columnconfigure(3, weight=1)
+        header = ctk.CTkFrame(frame, fg_color="transparent")
+        header.grid(row=0, column=0, columnspan=4, sticky="ew", padx=16, pady=(14, 4))
+        header.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            header,
+            text="免打扰时段",
+            anchor="w",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color=TEXT,
+        ).grid(row=0, column=0, sticky="w")
+        help_label = ctk.CTkLabel(
+            header,
+            text="?",
+            width=22,
+            height=22,
+            corner_radius=11,
+            fg_color="#e0e7ff",
+            text_color=PRIMARY,
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+        help_label.grid(row=0, column=2, sticky="e")
+        HoverTooltip(
+            help_label,
+            "忽略新回复：免打扰时段内仍会监听并标记已读，免打扰结束后不会补发。\n\n"
+            "暂存并汇总推送：免打扰时段内的新回复会先暂存，免打扰结束后发送一张汇总卡片。\n\n"
+            "示例：周五 18:00 到周一 08:00，会覆盖周五晚上、周六、周日和周一早上。",
+        )
+        ctk.CTkLabel(
+            frame,
+            text="设置一个连续免打扰区间。区间内不会向飞书推送自动监听的新回复，手动查询和打包不受影响。",
+            anchor="w",
+            justify="left",
+            wraplength=640,
+            text_color=MUTED,
+            font=ctk.CTkFont(size=12),
+        ).grid(row=1, column=0, columnspan=4, sticky="ew", padx=16, pady=(0, 10))
+        ctk.CTkSwitch(
+            frame,
+            text="启用免打扰时段",
+            variable=self.quiet_enabled_var,
+            fg_color="#cbd5e1",
+            progress_color=PRIMARY,
+            button_color="#ffffff",
+            text_color=TEXT,
+        ).grid(row=2, column=0, columnspan=4, sticky="w", padx=16, pady=(2, 12))
+
+        ctk.CTkLabel(frame, text="开始", anchor="w", text_color=TEXT).grid(row=3, column=0, sticky="w", padx=16, pady=(6, 8))
+        start_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        start_frame.grid(row=3, column=1, columnspan=3, sticky="ew", padx=(0, 16), pady=(0, 8))
+        start_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkOptionMenu(
+            start_frame,
+            values=WEEKDAY_LABELS,
+            variable=self.quiet_start_day_var,
+            width=112,
+            fg_color="#f8fafc",
+            button_color="#e2e8f0",
+            button_hover_color="#cbd5e1",
+            text_color=TEXT,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 10))
+        self.time_select(start_frame, self.quiet_start_hour_var, self.quiet_start_minute_var).grid(row=0, column=1, sticky="w")
+
+        ctk.CTkLabel(frame, text="结束", anchor="w", text_color=TEXT).grid(row=4, column=0, sticky="w", padx=16, pady=(6, 8))
+        end_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        end_frame.grid(row=4, column=1, columnspan=3, sticky="ew", padx=(0, 16), pady=(0, 8))
+        end_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkOptionMenu(
+            end_frame,
+            values=WEEKDAY_LABELS,
+            variable=self.quiet_end_day_var,
+            width=112,
+            fg_color="#f8fafc",
+            button_color="#e2e8f0",
+            button_hover_color="#cbd5e1",
+            text_color=TEXT,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 10))
+        self.time_select(end_frame, self.quiet_end_hour_var, self.quiet_end_minute_var).grid(row=0, column=1, sticky="w")
+
+        ctk.CTkLabel(
+            frame,
+            text="例：周五 18:00 → 周一 08:00",
+            anchor="w",
+            text_color=MUTED,
+            font=ctk.CTkFont(size=12),
+        ).grid(row=5, column=1, columnspan=3, sticky="ew", padx=(0, 16), pady=(0, 8))
+
+        ctk.CTkLabel(frame, text="免打扰期间的新回复", anchor="w", text_color=TEXT).grid(
+            row=6, column=0, sticky="nw", padx=16, pady=(8, 16)
+        )
+        policy_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        policy_frame.grid(row=6, column=1, columnspan=3, sticky="ew", padx=(0, 16), pady=(2, 16))
+        ctk.CTkRadioButton(
+            policy_frame,
+            text="忽略新回复",
+            value="ignore",
+            variable=self.quiet_policy_var,
+            fg_color=PRIMARY,
+            hover_color=PRIMARY_HOVER,
+            text_color=TEXT,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 18), pady=5)
+        ctk.CTkRadioButton(
+            policy_frame,
+            text="暂存并在免打扰结束后汇总推送",
+            value="defer",
+            variable=self.quiet_policy_var,
+            fg_color=PRIMARY,
+            hover_color=PRIMARY_HOVER,
+            text_color=TEXT,
+        ).grid(row=0, column=1, sticky="w", pady=5)
+
+    def time_select(self, parent: ctk.CTkFrame, hour_var: StringVar, minute_var: StringVar) -> ctk.CTkFrame:
+        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        ctk.CTkOptionMenu(
+            frame,
+            values=HOUR_OPTIONS,
+            variable=hour_var,
+            width=76,
+            fg_color="#f8fafc",
+            button_color="#e2e8f0",
+            button_hover_color="#cbd5e1",
+            text_color=TEXT,
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(frame, text=":", text_color=MUTED, width=18).grid(row=0, column=1)
+        self.minute_button(frame, minute_var).grid(row=0, column=2, sticky="w")
+        return frame
+
+    def minute_button(self, parent: ctk.CTkFrame, minute_var: StringVar) -> ctk.CTkButton:
+        button = ctk.CTkButton(
+            parent,
+            text=minute_var.get(),
+            width=76,
+            height=34,
+            corner_radius=8,
+            fg_color="#f8fafc",
+            hover_color="#e2e8f0",
+            text_color=TEXT,
+            border_width=1,
+            border_color=BORDER,
+            command=lambda: self.open_minute_picker(button, minute_var),
+        )
+        minute_var.trace_add("write", lambda *_args: button.configure(text=minute_var.get()))
+        return button
+
+    def open_minute_picker(self, anchor: ctk.CTkButton, minute_var: StringVar) -> None:
+        if self.minute_picker is not None:
+            try:
+                self.minute_picker.destroy()
+            except Exception:
+                pass
+            self.minute_picker = None
+            return
+        picker = ctk.CTkToplevel(self.root)
+        self.minute_picker = picker
+        picker.overrideredirect(True)
+        picker.attributes("-topmost", True)
+        x = anchor.winfo_rootx()
+        y = anchor.winfo_rooty() + anchor.winfo_height() + 4
+        picker.geometry(f"+{x}+{y}")
+        panel = ctk.CTkFrame(picker, fg_color="#ffffff", corner_radius=12, border_width=1, border_color=BORDER)
+        panel.grid(row=0, column=0, padx=1, pady=1)
+
+        def close_picker() -> None:
+            if self.minute_picker is picker:
+                self.minute_picker = None
+            try:
+                picker.destroy()
+            except Exception:
+                pass
+
+        def choose(value: str) -> None:
+            minute_var.set(value)
+            close_picker()
+
+        current = minute_var.get()
+        for index, value in enumerate(MINUTE_OPTIONS):
+            selected = value == current
+            ctk.CTkButton(
+                panel,
+                text=value,
+                width=42,
+                height=28,
+                corner_radius=7,
+                fg_color=PRIMARY if selected else "#f8fafc",
+                hover_color=PRIMARY_HOVER if selected else "#e2e8f0",
+                text_color="#ffffff" if selected else TEXT,
+                command=lambda v=value: choose(v),
+            ).grid(row=index // 10, column=index % 10, padx=3, pady=3)
+        picker.bind("<Escape>", lambda _event: close_picker())
+        picker.bind("<FocusOut>", lambda _event: self.root.after(120, close_picker))
+        picker.protocol("WM_DELETE_WINDOW", close_picker)
+        picker.focus_force()
 
     def page_title(self, parent: ctk.CTkFrame, title: str, subtitle: str, row: int) -> None:
         header = ctk.CTkFrame(parent, fg_color="transparent")
@@ -695,10 +1055,9 @@ class App:
         frame = self.card(parent, row)
         frame.grid_columnconfigure((0, 1, 2, 3), weight=1, uniform="actions")
         self.card_title(frame, "功能操作")
-        self.action_tile(frame, 1, 0, "保存配置", "写入本地 AppData", self.save_from_ui)
-        self.action_tile(frame, 1, 1, "查询群组", "获取 chat_id", self.list_chats_clicked)
-        self.action_tile(frame, 1, 2, "初始化已读", "避免历史刷屏", self.mark_seen_clicked)
-        self.action_tile(frame, 1, 3, "发送测试", "验证飞书推送", self.send_test_clicked)
+        self.action_tile(frame, 1, 0, "查询群组", "获取 chat_id", self.list_chats_clicked)
+        self.action_tile(frame, 1, 1, "初始化已读", "避免历史刷屏", self.mark_seen_clicked)
+        self.action_tile(frame, 1, 2, "发送测试", "验证飞书推送", self.send_test_clicked)
         feedback = ctk.CTkFrame(frame, fg_color="#f8fafc", corner_radius=10, border_width=1, border_color=BORDER)
         feedback.grid(row=2, column=0, columnspan=4, sticky="ew", padx=16, pady=(0, 16))
         feedback.grid_columnconfigure(1, weight=1)
@@ -801,6 +1160,7 @@ class App:
                     continue
                 box.delete("1.0", "end")
                 box.insert("1.0", text)
+            self.mark_dirty()
         finally:
             self.syncing_cookie = False
 
@@ -865,6 +1225,12 @@ class App:
         for key, var in self.vars.items():
             config[key] = var.get().strip()
         config["auto_mark_seen_first_start"] = self.auto_init_var.get()
+        config["quiet_hours_enabled"] = self.quiet_enabled_var.get()
+        config["quiet_start_day"] = str(weekday_index(self.quiet_start_day_var.get()))
+        config["quiet_end_day"] = str(weekday_index(self.quiet_end_day_var.get()))
+        config["quiet_start_time"] = f"{self.quiet_start_hour_var.get()}:{self.quiet_start_minute_var.get()}"
+        config["quiet_end_time"] = f"{self.quiet_end_hour_var.get()}:{self.quiet_end_minute_var.get()}"
+        config["quiet_policy"] = self.quiet_policy_var.get()
         return config
 
     def current_status_text(self) -> str:
@@ -965,7 +1331,15 @@ class App:
         self.append_log("配置已保存。")
         self.append_log(f"状态文件：{resolved_state_path(self.config)}")
         self.set_status(self.current_status_text(), "配置已保存")
-        self.set_action_feedback(f"配置已保存，状态文件：{resolved_state_path(self.config).name}")
+        self.dirty = False
+        self.save_state_var.set("配置已保存")
+        self.save_state_label.configure(text_color=MUTED)
+        self.global_save_button.configure(fg_color=PRIMARY, hover_color=PRIMARY_HOVER)
+        feedback = f"配置已保存，状态文件：{resolved_state_path(self.config).name}"
+        if self.known_watcher_pids(include_scan=False):
+            feedback += "。免打扰配置会在下次启动监听后生效。"
+            self.append_log("免打扰配置会在下次启动监听后生效。")
+        self.set_action_feedback(feedback)
         return True
 
     def run_background(self, label: str, target: Callable[[], None], *, preserve_status: bool = False) -> None:
@@ -1162,6 +1536,9 @@ class App:
         self.root.after(1000, self.poll_process)
 
     def on_close(self) -> None:
+        if self.dirty:
+            if not messagebox.askyesno("未保存配置", "当前有未保存配置，是否放弃修改并退出？"):
+                return
         should_prompt = bool(self.known_watcher_pids(include_scan=False))
         if should_prompt:
             if not messagebox.askyesno("退出", "监听仍在运行，是否停止并退出？"):

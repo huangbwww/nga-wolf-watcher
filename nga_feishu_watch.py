@@ -34,9 +34,10 @@ import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 
 NGA_ENDPOINT = "https://bbs.nga.cn/thread.php"
@@ -46,6 +47,12 @@ DEFAULT_AUTHOR_ID = "150058"
 DEFAULT_TID = "45974302"
 DEFAULT_REPLY_COUNT = 5
 DEFAULT_THREAD_COUNT = 10
+DEFAULT_QUIET_START_DAY = 5
+DEFAULT_QUIET_END_DAY = 0
+DEFAULT_QUIET_DAYS = [5, 6]
+DEFAULT_QUIET_START_TIME = "00:00"
+DEFAULT_QUIET_END_TIME = "00:00"
+DEFAULT_QUIET_POLICY = "ignore"
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -126,6 +133,82 @@ def write_json(path: Path, value: Any) -> None:
         json.dump(value, f, ensure_ascii=False, indent=2, sort_keys=True)
         f.write("\n")
     tmp.replace(path)
+
+
+def parse_hhmm(value: str) -> int:
+    match = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)", str(value).strip())
+    if not match:
+        raise ValueError(f"时间格式无效：{value}，请使用 HH:MM")
+    return int(match.group(1)) * 60 + int(match.group(2))
+
+
+def parse_quiet_days(value: Any) -> list[int]:
+    if value is None or value == "":
+        return list(DEFAULT_QUIET_DAYS)
+    if isinstance(value, str):
+        raw_items = [item.strip() for item in value.split(",") if item.strip()]
+    elif isinstance(value, Iterable):
+        raw_items = list(value)
+    else:
+        raw_items = [value]
+    days: list[int] = []
+    for raw in raw_items:
+        day = int(raw)
+        if day < 0 or day > 6:
+            raise ValueError("免打扰星期必须在 0-6 之间")
+        if day not in days:
+            days.append(day)
+    return sorted(days)
+
+
+def parse_weekday(value: Any, default: int) -> int:
+    try:
+        day = int(value)
+    except (TypeError, ValueError):
+        day = default
+    if day < 0 or day > 6:
+        raise ValueError("免打扰星期必须在 0-6 之间")
+    return day
+
+
+def is_weekly_range_time(start_day: int, start_minute: int, end_day: int, end_minute: int, now: time.struct_time) -> bool:
+    current = now.tm_wday * 1440 + now.tm_hour * 60 + now.tm_min
+    start = start_day * 1440 + start_minute
+    end = end_day * 1440 + end_minute
+    if start == end:
+        return True
+    if start < end:
+        return start <= current < end
+    return current >= start or current < end
+
+
+def is_legacy_quiet_time(args: argparse.Namespace, now: time.struct_time) -> bool:
+    days = parse_quiet_days(getattr(args, "quiet_days", DEFAULT_QUIET_DAYS))
+    if not days:
+        return False
+    start = parse_hhmm(str(getattr(args, "quiet_start_time", DEFAULT_QUIET_START_TIME)))
+    end = parse_hhmm(str(getattr(args, "quiet_end_time", "23:59")))
+    today = now.tm_wday
+    minute = now.tm_hour * 60 + now.tm_min
+    if start == end:
+        return today in days
+    if start < end:
+        return today in days and start <= minute <= end
+    previous_day = (today - 1) % 7
+    return (today in days and minute >= start) or (previous_day in days and minute <= end)
+
+
+def is_quiet_time(args: argparse.Namespace, now: time.struct_time | None = None) -> bool:
+    if not bool(getattr(args, "quiet_hours_enabled", False)):
+        return False
+    local_now = now or time.localtime()
+    if not hasattr(args, "quiet_start_day") and not hasattr(args, "quiet_end_day"):
+        return is_legacy_quiet_time(args, local_now)
+    start_day = parse_weekday(getattr(args, "quiet_start_day", DEFAULT_QUIET_START_DAY), DEFAULT_QUIET_START_DAY)
+    end_day = parse_weekday(getattr(args, "quiet_end_day", DEFAULT_QUIET_END_DAY), DEFAULT_QUIET_END_DAY)
+    start = parse_hhmm(str(getattr(args, "quiet_start_time", DEFAULT_QUIET_START_TIME)))
+    end = parse_hhmm(str(getattr(args, "quiet_end_time", DEFAULT_QUIET_END_TIME)))
+    return is_weekly_range_time(start_day, start, end_day, end, local_now)
 
 
 def fetch_nga_page(author_id: str, page: int, cookie: str, timeout: int) -> dict[str, Any]:
@@ -266,6 +349,25 @@ def format_time(value: str) -> str:
     return value
 
 
+def parse_post_time(value: str) -> time.struct_time | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M"):
+        try:
+            return time.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def post_in_quiet_range(args: argparse.Namespace, post: NgaPost) -> bool:
+    post_time = parse_post_time(post.post_time)
+    if post_time is None:
+        return False
+    return is_quiet_time(args, post_time)
+
+
 def extract_posts(payload: dict[str, Any]) -> list[NgaPost]:
     seen: set[str] = set()
     posts: list[NgaPost] = []
@@ -383,6 +485,10 @@ def truncate_text(value: str, limit: int) -> str:
     return value[: max(0, limit - 1)].rstrip() + "…"
 
 
+def display_text(value: str) -> str:
+    return value.replace(QUOTE_END_MARKER, "").strip()
+
+
 def split_quoted_reply(content: str) -> tuple[str, str, str] | None:
     match = re.match(
         r"^\s*(\[[^\]\n]*pid[^\]\n]*\]\s*Reply\s*\[/pid\]\s*Post by\s+.*?(?:\([^)\n]*\))?:)\s*(.*)$",
@@ -439,7 +545,7 @@ def post_card_element(post: NgaPost) -> list[dict[str, Any]]:
         quote_header, quote_body, reply_body = quoted
         quote_lines = [quote_header]
         if quote_body:
-            quote_lines.extend(["", truncate_text(quote_body, 420)])
+            quote_lines.extend(["", truncate_text(display_text(quote_body), 420)])
         elements.append(
             {
                 "tag": "div",
@@ -454,12 +560,12 @@ def post_card_element(post: NgaPost) -> list[dict[str, Any]]:
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"**本次回复**\n{lark_md_escape(truncate_text(reply_body, 700)).replace(chr(10), chr(10) + chr(10))}",
+                    "content": f"**本次回复**\n{lark_md_escape(truncate_text(display_text(reply_body), 700)).replace(chr(10), chr(10) + chr(10))}",
                 },
             }
         )
     else:
-        excerpt = lark_md_escape(truncate_text(post.content, 850)).replace("\n", "\n\n")
+        excerpt = lark_md_escape(truncate_text(display_text(post.content), 850)).replace("\n", "\n\n")
         elements.append(
             {
                 "tag": "div",
@@ -502,6 +608,93 @@ def feishu_posts_card(posts: list[NgaPost], title: str) -> dict[str, Any]:
         },
         "elements": elements,
     }
+
+
+def feishu_deferred_summary_card(posts: list[NgaPost], total_count: int) -> dict[str, Any]:
+    shown = posts[:20]
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    f"免打扰期间暂存了 **{total_count}** 条新回复。\n"
+                    f"推送时间：{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}"
+                ),
+            },
+        }
+    ]
+    if shown:
+        elements.append({"tag": "hr"})
+    for idx, post in enumerate(shown, 1):
+        if idx > 1:
+            elements.append({"tag": "hr"})
+        elements.extend(post_card_element(post))
+    remaining = total_count - len(shown)
+    if remaining > 0:
+        elements.append({"tag": "hr"})
+        elements.append(
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": f"还有 **{remaining}** 条未在卡片中展开，请打开 NGA 查看。"},
+            }
+        )
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": "免打扰期间新回复汇总"},
+        },
+        "elements": elements,
+    }
+
+
+def serialize_post(post: NgaPost) -> dict[str, str]:
+    return {key: str(value) for key, value in asdict(post).items()}
+
+
+def deserialize_post(value: Any) -> NgaPost | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        return NgaPost(
+            key=str(value.get("key") or ""),
+            subject=str(value.get("subject") or "(无标题)"),
+            content=str(value.get("content") or ""),
+            url=str(value.get("url") or "https://bbs.nga.cn/"),
+            post_time=str(value.get("post_time") or ""),
+            author=str(value.get("author") or ""),
+            author_id=str(value.get("author_id") or ""),
+            floor=str(value.get("floor") or ""),
+        )
+    except Exception:
+        return None
+
+
+def deferred_posts_from_state(state: dict[str, Any]) -> list[NgaPost]:
+    posts: list[NgaPost] = []
+    for item in state.get("deferred_posts", []):
+        post = deserialize_post(item)
+        if post and post.key:
+            posts.append(post)
+    return posts
+
+
+def append_deferred_posts(state: dict[str, Any], posts: list[NgaPost]) -> int:
+    existing = deferred_posts_from_state(state)
+    seen_keys = {post.key for post in existing}
+    added = 0
+    for post in posts:
+        if post.key in seen_keys:
+            continue
+        existing.append(post)
+        seen_keys.add(post.key)
+        added += 1
+    if added:
+        state["deferred_posts"] = [serialize_post(post) for post in existing]
+        state.setdefault("deferred_started_at", int(time.time()))
+        state["deferred_updated_at"] = int(time.time())
+    return added
 
 
 def push_feishu(webhook: str, secret: str | None, post: NgaPost, timeout: int) -> None:
@@ -676,6 +869,26 @@ def push_feishu_app_posts(
     )
     if result.get("code") != 0:
         raise RuntimeError(f"飞书应用消息推送失败：{result}")
+
+
+def push_feishu_app_card(
+    app_id: str,
+    app_secret: str,
+    receive_id: str,
+    receive_id_type: str,
+    card: dict[str, Any],
+    timeout: int,
+) -> None:
+    result = feishu_app_request(
+        app_id,
+        app_secret,
+        f"/im/v1/messages?receive_id_type={urllib.parse.quote(receive_id_type)}",
+        timeout=timeout,
+        method="POST",
+        body={"receive_id": receive_id, "msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False)},
+    )
+    if result.get("code") != 0:
+        raise RuntimeError(f"飞书卡片发送失败：{result}")
 
 
 def list_feishu_chats(app_id: str, app_secret: str, timeout: int) -> list[dict[str, Any]]:
@@ -1192,6 +1405,40 @@ def send_test_message(args: argparse.Namespace) -> None:
     print("测试消息已发送。")
 
 
+def push_deferred_summary(args: argparse.Namespace, posts: list[NgaPost]) -> None:
+    if not posts:
+        return
+    app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
+    webhook = args.webhook or os.getenv("FEISHU_WEBHOOK", "")
+    secret = args.secret or os.getenv("FEISHU_SECRET")
+    title = f"免打扰期间新回复汇总（{len(posts)} 条）"
+    if app_id or app_secret or receive_id:
+        if not (app_id and app_secret and receive_id):
+            raise SystemExit("缺少 FEISHU_APP_ID、FEISHU_APP_SECRET 或 FEISHU_RECEIVE_ID。")
+        if args.message_format == "text":
+            push_feishu_app_posts(app_id, app_secret, receive_id, receive_id_type, posts, title, args.timeout, "text")
+        else:
+            push_feishu_app_card(
+                app_id,
+                app_secret,
+                receive_id,
+                receive_id_type,
+                feishu_deferred_summary_card(posts, len(posts)),
+                args.timeout,
+            )
+        return
+    if not webhook:
+        raise SystemExit("缺少飞书发送目标。请设置应用凭证和 Receive ID，或设置 FEISHU_WEBHOOK。")
+    summary = NgaPost(
+        key="deferred-summary",
+        subject=title,
+        content=feishu_history_text(posts[:20], title),
+        url=posts[0].url if posts else "https://bbs.nga.cn/",
+        post_time=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+    )
+    push_feishu(webhook, secret, summary, args.timeout)
+
+
 def push_to_feishu(args: argparse.Namespace, post: NgaPost) -> None:
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     webhook = args.webhook or os.getenv("FEISHU_WEBHOOK", "")
@@ -1360,7 +1607,48 @@ def run_once(args: argparse.Namespace) -> int:
     new_posts = [post for post in posts if post.key not in seen]
     new_posts.reverse()
 
+    quiet_now = is_quiet_time(args)
+    quiet_policy = str(getattr(args, "quiet_policy", DEFAULT_QUIET_POLICY) or DEFAULT_QUIET_POLICY).strip().lower()
+    if quiet_policy not in {"ignore", "defer"}:
+        quiet_policy = DEFAULT_QUIET_POLICY
+
+    quiet_posts = [post for post in new_posts if post_in_quiet_range(args, post)]
+    deliver_posts = [post for post in new_posts if post not in quiet_posts]
+
+    if quiet_posts:
+        for post in quiet_posts:
+            seen.add(post.key)
+        if args.dry_run:
+            print(f"[试运行] {len(quiet_posts)} 条新回复属于免打扰时段，不会立即推送。")
+        elif quiet_policy == "defer":
+            added = append_deferred_posts(state, quiet_posts)
+            print(f"已暂存 {added} 条免打扰时段新回复。")
+        else:
+            print(f"已忽略 {len(quiet_posts)} 条免打扰时段新回复。")
+
+    if not quiet_now:
+        deferred_posts = deferred_posts_from_state(state)
+        if deferred_posts and not args.dry_run:
+            push_deferred_summary(args, deferred_posts)
+            state.pop("deferred_posts", None)
+            state.pop("deferred_started_at", None)
+            state.pop("deferred_updated_at", None)
+            state["seen"] = sorted(seen)
+            state["updated_at"] = int(time.time())
+            write_json(state_path, state)
+            print(f"已推送免打扰期间新回复汇总：{len(deferred_posts)} 条。")
+    elif deliver_posts:
+        for post in deliver_posts:
+            seen.add(post.key)
+        if args.dry_run:
+            print(f"[试运行] 当前处于免打扰时段，本轮 {len(deliver_posts)} 条新回复不会推送。")
+        else:
+            print(f"当前处于免打扰时段，已标记 {len(deliver_posts)} 条非免打扰区间旧回复为已读，不纳入汇总。")
+        deliver_posts = []
+
     for post in new_posts:
+        if post not in deliver_posts:
+            continue
         if args.dry_run:
             print(f"[试运行] {post.subject} {post.url}\n{post.content[:500]}\n")
         else:
@@ -1371,7 +1659,8 @@ def run_once(args: argparse.Namespace) -> int:
         state["seen"] = sorted(seen)
         state["updated_at"] = int(time.time())
         write_json(state_path, state)
-    print(f"已抓取 {len(posts)} 条回复，已推送 {len(new_posts)} 条新回复。")
+    pushed_count = 0 if quiet_now else len(deliver_posts)
+    print(f"已抓取 {len(posts)} 条回复，已推送 {pushed_count} 条新回复。")
     return len(new_posts)
 
 
@@ -1401,6 +1690,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--retry-delay", type=float, default=float(os.getenv("NGA_RETRY_DELAY", "2")))
     parser.add_argument("--interval", type=int, default=int(os.getenv("NGA_INTERVAL", "60")))
     parser.add_argument("--jitter", type=int, default=int(os.getenv("NGA_JITTER", "20")))
+    parser.add_argument("--quiet-hours-enabled", action="store_true", default=os.getenv("NGA_QUIET_HOURS_ENABLED", "").lower() in {"1", "true", "yes", "on"})
+    parser.add_argument("--quiet-start-day", type=int, default=int(os.getenv("NGA_QUIET_START_DAY", str(DEFAULT_QUIET_START_DAY))))
+    parser.add_argument("--quiet-end-day", type=int, default=int(os.getenv("NGA_QUIET_END_DAY", str(DEFAULT_QUIET_END_DAY))))
+    parser.add_argument("--quiet-days", default=os.getenv("NGA_QUIET_DAYS", ",".join(str(day) for day in DEFAULT_QUIET_DAYS)))
+    parser.add_argument("--quiet-start-time", default=os.getenv("NGA_QUIET_START_TIME", DEFAULT_QUIET_START_TIME))
+    parser.add_argument("--quiet-end-time", default=os.getenv("NGA_QUIET_END_TIME", DEFAULT_QUIET_END_TIME))
+    parser.add_argument("--quiet-policy", choices=["ignore", "defer"], default=os.getenv("NGA_QUIET_POLICY", DEFAULT_QUIET_POLICY))
     parser.add_argument("--once", action="store_true", help="只执行一次轮询后退出。")
     parser.add_argument("--ws", action="store_true", help="使用飞书 WebSocket 接收消息和卡片操作。")
     parser.add_argument("--ws-no-watch", action="store_true", help="在 WebSocket 模式下不启动 NGA 后台监听循环。")
