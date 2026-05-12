@@ -44,6 +44,8 @@ GUI 会把本地密钥保存到 `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`。
 
 ### 如何复制 NGA Cookie
 
+也可以参考 [Issue #1](https://github.com/huangbwww/nga-wolf-watcher/issues/1) 里的具体示例。
+
 1. 用浏览器打开 `https://bbs.nga.cn/`，登录能看到目标内容的 NGA 账号。
 2. 打开要监听的 NGA 页面，或者登录后任意一个 `bbs.nga.cn` 下的页面。
 3. 按 `F12` 打开开发者工具，切到 `网络` / `Network` 面板。

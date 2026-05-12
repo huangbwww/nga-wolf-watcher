@@ -44,6 +44,8 @@ Do-not-disturb handling has two modes:
 
 ### How To Copy NGA Cookie
 
+You can also refer to [Issue #1](https://github.com/huangbwww/nga-wolf-watcher/issues/1) for a concrete example.
+
 1. Open `https://bbs.nga.cn/` in your browser and log in to the NGA account that can view the target content.
 2. Open the NGA page you want to watch, or any NGA page under `bbs.nga.cn` after logging in.
 3. Press `F12` to open Developer Tools, then switch to the `Network` tab.
