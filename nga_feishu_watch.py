@@ -24,6 +24,7 @@ import hmac
 import html
 import json
 import os
+import queue
 import random
 import re
 import copy
@@ -37,7 +38,9 @@ import urllib.request
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+import ai_analysis
 
 
 NGA_ENDPOINT = "https://bbs.nga.cn/thread.php"
@@ -53,11 +56,48 @@ DEFAULT_QUIET_DAYS = [5, 6]
 DEFAULT_QUIET_START_TIME = "00:00"
 DEFAULT_QUIET_END_TIME = "00:00"
 DEFAULT_QUIET_POLICY = "ignore"
+DEFAULT_NGA_PAGE_DELAY = 2.0
+DEFAULT_NGA_UNAVAILABLE_RETRIES = 3
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 QUOTE_END_MARKER = "__NGA_QUOTE_END__"
+_AI_MANAGERS: dict[tuple[str, str], ai_analysis.AIManager] = {}
+_AI_FEISHU_QUEUES: dict[tuple[str, str], "queue.Queue[Callable[[], None]]"] = {}
+_AI_FEISHU_QUEUE_LOCK = threading.Lock()
+
+
+class NgaTemporaryUnavailable(RuntimeError):
+    pass
+
+
+def is_nga_temporary_unavailable(exc: Exception) -> bool:
+    text = str(exc)
+    return isinstance(exc, NgaTemporaryUnavailable) or any(
+        marker in text for marker in ("状态码=429", "状态码=500", "状态码=502", "状态码=503", "状态码=504")
+    )
+
+
+@dataclass(frozen=True)
+class FeishuFileRef:
+    file_key: str
+    file_name: str = ""
+    resource_type: str = "file"
+    source_message_id: str = ""
+
+
+@dataclass(frozen=True)
+class FeishuImageRef:
+    image_key: str
+    source_message_id: str = ""
+
+
+@dataclass(frozen=True)
+class FeishuReplyContext:
+    text: str = ""
+    image_refs: tuple[FeishuImageRef, ...] = ()
+    file_refs: tuple[FeishuFileRef, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -70,6 +110,7 @@ class NgaPost:
     author: str = ""
     author_id: str = ""
     floor: str = ""
+    image_urls: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -257,7 +298,8 @@ def fetch_nga_json(url: str, cookie: str, timeout: int, label: str) -> dict[str,
         preview = re.sub(r"\s+", " ", text[:300]).strip()
         if not preview:
             preview = "<空响应>"
-        raise RuntimeError(
+        error_cls = NgaTemporaryUnavailable if status in {429, 500, 502, 503, 504} else RuntimeError
+        raise error_cls(
             f"NGA 在 {label} 返回的不是 JSON："
             f"状态码={status}，内容类型={content_type}，响应预览={preview}"
         ) from exc
@@ -289,6 +331,8 @@ def first_str(item: dict[str, Any], *names: str) -> str:
 def strip_markup(value: str) -> str:
     value = html.unescape(value)
     value = re.sub(r"<br\s*/?>", "\n", value, flags=re.I)
+    value = re.sub(r"<img[^>]*>", "", value, flags=re.I)
+    value = re.sub(r"\[img[^\]]*\].*?\[/img\]", "", value, flags=re.I | re.S)
     value = re.sub(r"<[^>]+>", "", value)
     value = re.sub(r"\[quote[^\]]*\]", "", value, flags=re.I)
     value = re.sub(r"\[/quote\]", f"\n\n{QUOTE_END_MARKER}\n\n", value, flags=re.I)
@@ -297,14 +341,72 @@ def strip_markup(value: str) -> str:
     return value.strip()
 
 
+IMAGE_EXT_RE = r"(?:jpg|jpeg|png|gif|webp|bmp)"
+
+
+def normalize_nga_image_url(value: str) -> str:
+    url = html.unescape(str(value or "")).strip().strip("'\"")
+    url = re.sub(r"^\[img[^\]]*\]", "", url, flags=re.I)
+    url = re.sub(r"\[/img\]$", "", url, flags=re.I).strip().strip("'\"")
+    if not url:
+        return ""
+    if url.startswith("//"):
+        return "https:" + url
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    if url.startswith("./"):
+        url = url[2:]
+    if url.startswith("/attachments/"):
+        return "https://img.nga.178.com" + url
+    if url.startswith("attachments/"):
+        return "https://img.nga.178.com/" + url
+    if url.startswith("mon_"):
+        return "https://img.nga.178.com/attachments/" + url
+    return url
+
+
+def extract_image_urls(raw_content: str, item: dict[str, Any] | None = None) -> tuple[str, ...]:
+    candidates: list[str] = []
+    values = [raw_content or ""]
+    if item:
+        for name in ("attachments", "attachs", "attach", "images", "image", "img"):
+            raw = item.get(name)
+            if isinstance(raw, str):
+                values.append(raw)
+            elif isinstance(raw, dict):
+                values.extend(str(v) for v in raw.values() if isinstance(v, (str, int, float)))
+            elif isinstance(raw, list):
+                values.extend(str(v) for v in raw if isinstance(v, (str, int, float, dict)))
+
+    for value in values:
+        text = str(value)
+        candidates.extend(re.findall(r"<img[^>]+src=[\"']([^\"']+)", text, flags=re.I))
+        candidates.extend(re.findall(r"\[img[^\]]*\](.*?)\[/img\]", text, flags=re.I | re.S))
+        candidates.extend(re.findall(r"https?://[^\s\]\"']+\." + IMAGE_EXT_RE + r"(?:\?[^\s\]\"']*)?", text, flags=re.I))
+        candidates.extend(re.findall(r"//[^\s\]\"']+\." + IMAGE_EXT_RE + r"(?:\?[^\s\]\"']*)?", text, flags=re.I))
+        candidates.extend(re.findall(r"(?:\./)?(?:attachments/)?mon_[^\s\]\"']+\." + IMAGE_EXT_RE + r"(?:\?[^\s\]\"']*)?", text, flags=re.I))
+
+    seen: set[str] = set()
+    urls: list[str] = []
+    for candidate in candidates:
+        url = normalize_nga_image_url(candidate)
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return tuple(urls)
+
+
 def make_post(item: dict[str, Any], fallback_subject: str = "") -> NgaPost | None:
     raw_content = first_str(item, "content", "postcontent", "post_content", "message")
     if not raw_content:
         return None
 
+    image_urls = extract_image_urls(raw_content, item)
     content = strip_markup(raw_content)
     if not content:
-        return None
+        if not image_urls:
+            return None
+        content = "[image reply]"
 
     tid = first_str(item, "tid", "threadid", "topic_id")
     pid = first_str(item, "pid", "postid", "reply_id")
@@ -332,6 +434,7 @@ def make_post(item: dict[str, Any], fallback_subject: str = "") -> NgaPost | Non
         author=author,
         author_id=author_id,
         floor=floor,
+        image_urls=image_urls,
     )
 
 
@@ -439,6 +542,8 @@ def feishu_message_text(post: NgaPost) -> str:
         "",
         post.content[:1800],
     ]
+    if post.image_urls:
+        lines.extend(["", "Images:", *[f"- {url}" for url in post.image_urls]])
     return "\n".join(lines)
 
 
@@ -454,6 +559,8 @@ def feishu_history_text(posts: list[NgaPost], title: str) -> str:
             meta += f" | #{post.floor}"
         lines.append(f"{meta} {post.url}")
         lines.append(excerpt)
+        if post.image_urls:
+            lines.append("Images: " + ", ".join(post.image_urls[:5]))
     return "\n".join(lines)
 
 
@@ -468,6 +575,8 @@ def posts_to_txt(posts: list[NgaPost], title: str) -> str:
         ]
         if post.floor:
             meta.append(f"floor: {post.floor}")
+        if post.image_urls:
+            meta.extend(f"image: {url}" for url in post.image_urls)
         chunks.append("\n".join(meta))
         chunks.append(post.content)
         chunks.append("-" * 60)
@@ -576,6 +685,15 @@ def post_card_element(post: NgaPost) -> list[dict[str, Any]]:
             }
         )
 
+    if post.image_urls:
+        image_lines = "\n".join(f"[image {idx}]({lark_md_escape(url)})" for idx, url in enumerate(post.image_urls[:6], 1))
+        elements.append(
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": f"**Images**\n{image_lines}"},
+            }
+        )
+
     elements.append(
         {
             "tag": "action",
@@ -607,6 +725,57 @@ def feishu_posts_card(posts: list[NgaPost], title: str) -> dict[str, Any]:
             "title": {"tag": "plain_text", "content": title[:60]},
         },
         "elements": elements,
+    }
+
+
+def split_text_chunks(text: str, limit: int) -> list[str]:
+    text = str(text or "")
+    if not text:
+        return [""]
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+        split_at = remaining.rfind("\n## ", 0, limit)
+        if split_at < max(300, limit // 3):
+            split_at = remaining.rfind("\n", 0, limit)
+        if split_at < max(200, limit // 4):
+            split_at = limit
+        chunks.append(remaining[:split_at].rstrip())
+        remaining = remaining[split_at:].lstrip()
+    return chunks or [""]
+
+
+def ai_result_title(task_type: str) -> str:
+    if task_type == "new_post_analysis":
+        return "AI 新帖分析"
+    if task_type == "scheduled_analysis":
+        return "AI 定时分析"
+    if task_type == "manual_ask":
+        return "AI 回复"
+    return "AI 分析"
+
+
+def feishu_ai_markdown_card(title: str, markdown: str, part: int = 1, total: int = 1, *, is_error: bool = False) -> dict[str, Any]:
+    suffix = f" ({part}/{total})" if total > 1 else ""
+    content = (str(markdown or "").strip() or "(empty)").replace("<", "&lt;")
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "red" if is_error else "blue",
+            "title": {"tag": "plain_text", "content": (title + suffix)[:60]},
+        },
+        "elements": [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": content,
+                },
+            }
+        ],
     }
 
 
@@ -649,13 +818,22 @@ def feishu_deferred_summary_card(posts: list[NgaPost], total_count: int) -> dict
     }
 
 
-def serialize_post(post: NgaPost) -> dict[str, str]:
-    return {key: str(value) for key, value in asdict(post).items()}
+def serialize_post(post: NgaPost) -> dict[str, Any]:
+    data = asdict(post)
+    data["image_urls"] = list(post.image_urls or ())
+    return data
 
 
 def deserialize_post(value: Any) -> NgaPost | None:
     if not isinstance(value, dict):
         return None
+    raw_images = value.get("image_urls") or ()
+    if isinstance(raw_images, str):
+        image_urls = tuple(url.strip() for url in raw_images.splitlines() if url.strip())
+    elif isinstance(raw_images, (list, tuple)):
+        image_urls = tuple(str(url) for url in raw_images if str(url).strip())
+    else:
+        image_urls = ()
     try:
         return NgaPost(
             key=str(value.get("key") or ""),
@@ -666,6 +844,7 @@ def deserialize_post(value: Any) -> NgaPost | None:
             author=str(value.get("author") or ""),
             author_id=str(value.get("author_id") or ""),
             floor=str(value.get("floor") or ""),
+            image_urls=image_urls,
         )
     except Exception:
         return None
@@ -843,6 +1022,668 @@ def push_feishu_file(args: argparse.Namespace, file_name: str, text: str) -> Non
         raise RuntimeError(f"飞书文件消息发送失败：{result}")
 
 
+def push_feishu_text(args: argparse.Namespace, title: str, text: str) -> None:
+    post = NgaPost(
+        key=f"ai-{int(time.time())}",
+        subject=title,
+        content=text,
+        url="https://bbs.nga.cn/",
+        post_time=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+    )
+    app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
+    if app_id and app_secret and receive_id:
+        push_feishu_app_posts(app_id, app_secret, receive_id, receive_id_type, [post], title, args.timeout, "text")
+        return
+    push_to_feishu(args, post)
+
+
+def push_feishu_raw_text(args: argparse.Namespace, text: str) -> None:
+    app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
+    webhook = args.webhook or os.getenv("FEISHU_WEBHOOK", "")
+    secret = args.secret or os.getenv("FEISHU_SECRET")
+    if app_id and app_secret and receive_id:
+        result = feishu_app_request(
+            app_id,
+            app_secret,
+            f"/im/v1/messages?receive_id_type={urllib.parse.quote(receive_id_type)}",
+            timeout=args.timeout,
+            method="POST",
+            body={"receive_id": receive_id, "msg_type": "text", "content": json.dumps({"text": text}, ensure_ascii=False)},
+        )
+        if result.get("code") != 0:
+            raise RuntimeError(f"飞书应用文本消息发送失败：{result}")
+        return
+    if not webhook:
+        raise SystemExit("缺少飞书发送目标。请设置应用凭证和 Receive ID，或设置 FEISHU_WEBHOOK。")
+    body: dict[str, Any] = {"msg_type": "text", "content": {"text": text}}
+    if secret:
+        timestamp = str(int(time.time()))
+        body["timestamp"] = timestamp
+        body["sign"] = feishu_sign(secret, timestamp)
+    result = http_json(webhook, method="POST", body=body, timeout=args.timeout)
+    if result.get("code") not in (None, 0):
+        raise RuntimeError(f"飞书 Webhook 文本发送失败：{result}")
+
+
+def push_feishu_raw_card(args: argparse.Namespace, card: dict[str, Any]) -> None:
+    app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
+    webhook = args.webhook or os.getenv("FEISHU_WEBHOOK", "")
+    secret = args.secret or os.getenv("FEISHU_SECRET")
+    if app_id and app_secret and receive_id:
+        result = feishu_app_request(
+            app_id,
+            app_secret,
+            f"/im/v1/messages?receive_id_type={urllib.parse.quote(receive_id_type)}",
+            timeout=args.timeout,
+            method="POST",
+            body={"receive_id": receive_id, "msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False)},
+        )
+        if result.get("code") != 0:
+            raise RuntimeError(f"Feishu app card message failed: {result}")
+        return
+    if not webhook:
+        raise SystemExit("Missing Feishu target. Set app credentials and Receive ID, or FEISHU_WEBHOOK.")
+    body: dict[str, Any] = {"msg_type": "interactive", "card": card}
+    if secret:
+        timestamp = str(int(time.time()))
+        body["timestamp"] = timestamp
+        body["sign"] = feishu_sign(secret, timestamp)
+    result = http_json(webhook, method="POST", body=body, timeout=args.timeout)
+    if result.get("code") not in (None, 0):
+        raise RuntimeError(f"Feishu webhook card message failed: {result}")
+
+
+def create_feishu_reaction(args: argparse.Namespace, message_id: str, emoji_type: str = "WITTY") -> str:
+    if not message_id:
+        return ""
+    app_id, app_secret, _receive_id, _receive_id_type = feishu_credentials(args)
+    if not (app_id and app_secret):
+        return ""
+    token = get_feishu_tenant_access_token(app_id, app_secret, args.timeout)
+    result = http_json(
+        f"{FEISHU_API}/im/v1/messages/{urllib.parse.quote(message_id, safe='')}/reactions",
+        method="POST",
+        headers={"Authorization": f"Bearer {token}"},
+        body={"reaction_type": {"emoji_type": emoji_type}},
+        timeout=args.timeout,
+    )
+    if result.get("code") != 0:
+        raise RuntimeError(f"Feishu reaction create failed: {result}")
+    data = result.get("data", {})
+    reaction = data.get("reaction", {}) if isinstance(data, dict) else {}
+    if not isinstance(reaction, dict):
+        reaction = {}
+    return str(data.get("reaction_id") or reaction.get("reaction_id") or "")
+
+
+def delete_feishu_reaction(args: argparse.Namespace, message_id: str, reaction_id: str) -> None:
+    if not message_id or not reaction_id:
+        return
+    app_id, app_secret, _receive_id, _receive_id_type = feishu_credentials(args)
+    if not (app_id and app_secret):
+        return
+    token = get_feishu_tenant_access_token(app_id, app_secret, args.timeout)
+    result = http_json(
+        f"{FEISHU_API}/im/v1/messages/{urllib.parse.quote(message_id, safe='')}/reactions/{urllib.parse.quote(reaction_id, safe='')}",
+        method="DELETE",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=args.timeout,
+    )
+    if result.get("code") != 0:
+        raise RuntimeError(f"Feishu reaction delete failed: {result}")
+
+
+def get_feishu_message(args: argparse.Namespace, message_id: str) -> dict[str, Any]:
+    app_id, app_secret, _receive_id, _receive_id_type = feishu_credentials(args)
+    if not (message_id and app_id and app_secret):
+        return {}
+    result = feishu_app_request(
+        app_id,
+        app_secret,
+        f"/im/v1/messages/{urllib.parse.quote(message_id, safe='')}",
+        timeout=args.timeout,
+    )
+    if result.get("code") != 0:
+        raise RuntimeError(f"飞书消息读取失败：{result}")
+    data = result.get("data", {})
+    if isinstance(data, dict):
+        if isinstance(data.get("item"), dict):
+            return data["item"]
+        if isinstance(data.get("message"), dict):
+            return data["message"]
+        items = data.get("items")
+        if isinstance(items, list) and items and isinstance(items[0], dict):
+            return items[0]
+        if "body" in data or "content" in data:
+            return data
+    return {}
+
+
+def with_file_source(file_refs: Iterable[FeishuFileRef], message_id: str) -> list[FeishuFileRef]:
+    result: list[FeishuFileRef] = []
+    for ref in file_refs:
+        result.append(
+            FeishuFileRef(
+                file_key=ref.file_key,
+                file_name=ref.file_name,
+                resource_type=ref.resource_type,
+                source_message_id=ref.source_message_id or message_id,
+            )
+        )
+    return result
+
+
+def with_image_source(image_keys: Iterable[str], message_id: str) -> list[FeishuImageRef]:
+    return [
+        FeishuImageRef(image_key=str(key or "").strip(), source_message_id=message_id)
+        for key in image_keys
+        if str(key or "").strip()
+    ]
+
+
+def card_summary_text(message: dict[str, Any]) -> str:
+    if str(message.get("msg_type") or message.get("message_type") or "").lower() != "interactive":
+        return ""
+    body = message.get("body", {})
+    raw = body.get("content") if isinstance(body, dict) else message.get("content", "")
+    value = parse_feishu_content(raw)
+    lines: list[str] = []
+    header = value.get("header") if isinstance(value.get("header"), dict) else {}
+    title = header.get("title") if isinstance(header.get("title"), dict) else {}
+    title_text = str(title.get("content") or title.get("text") or "").strip()
+    if title_text:
+        lines.append(title_text)
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            tag = str(node.get("tag") or "").lower()
+            if tag in {"plain_text", "lark_md", "markdown"}:
+                content = str(node.get("content") or node.get("text") or "").strip()
+                if content:
+                    lines.append(content)
+            elif isinstance(node.get("text"), str):
+                content = str(node.get("text") or "").strip()
+                if content:
+                    lines.append(content)
+            for child in node.values():
+                walk(child)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(value.get("elements"))
+    walk(value.get("body"))
+    return "\n".join(list(dict.fromkeys(strip_feishu_mentions(line) for line in lines if strip_feishu_mentions(line)))[:20])
+
+
+def enrich_reply_context(
+    args: argparse.Namespace,
+    current_message_id: str,
+    image_keys: list[str],
+    file_refs: list[FeishuFileRef],
+    parent_id: str = "",
+    root_id: str = "",
+) -> tuple[FeishuReplyContext, list[FeishuImageRef], list[FeishuFileRef]]:
+    image_refs = with_image_source(image_keys, current_message_id)
+    refs = with_file_source(file_refs, current_message_id)
+    seen_images = {(ref.source_message_id, ref.image_key) for ref in image_refs}
+    seen_files = {(ref.source_message_id, ref.file_key) for ref in refs}
+    reply_texts: list[str] = []
+    for related_id in dict.fromkeys([parent_id, root_id]):
+        related_id = str(related_id or "").strip()
+        if not related_id or related_id == current_message_id:
+            continue
+        try:
+            related = get_feishu_message(args, related_id)
+            related_text, related_images, related_files = message_parts(related)
+            if not related_text:
+                related_text = card_summary_text(related)
+            if related_text:
+                reply_texts.append(f"[引用消息 {related_id}]\n{related_text}")
+            for ref in with_image_source(related_images, related_id):
+                marker = (ref.source_message_id, ref.image_key)
+                if marker not in seen_images:
+                    image_refs.append(ref)
+                    seen_images.add(marker)
+            for ref in with_file_source(related_files, related_id):
+                marker = (ref.source_message_id, ref.file_key)
+                if marker not in seen_files:
+                    refs.append(ref)
+                    seen_files.add(marker)
+        except Exception as exc:
+            print(f"读取飞书回复上下文失败 {related_id}: {exc}", file=sys.stderr)
+    return FeishuReplyContext(text="\n\n".join(reply_texts), image_refs=tuple(image_refs), file_refs=tuple(refs)), image_refs, refs
+
+
+def enrich_reply_file_refs(args: argparse.Namespace, current_message_id: str, file_refs: list[FeishuFileRef], parent_id: str = "", root_id: str = "") -> list[FeishuFileRef]:
+    refs = with_file_source(file_refs, current_message_id)
+    seen = {(ref.source_message_id, ref.file_key) for ref in refs}
+    for related_id in dict.fromkeys([parent_id, root_id]):
+        related_id = str(related_id or "").strip()
+        if not related_id or related_id == current_message_id:
+            continue
+        try:
+            related = get_feishu_message(args, related_id)
+            _text, _images, related_files = message_parts(related)
+            for ref in with_file_source(related_files, related_id):
+                marker = (ref.source_message_id, ref.file_key)
+                if marker not in seen:
+                    refs.append(ref)
+                    seen.add(marker)
+        except Exception as exc:
+            print(f"读取飞书回复关联文件失败 {related_id}: {exc}", file=sys.stderr)
+    return refs
+
+
+def with_ai_reply_status(args: argparse.Namespace, message_id: str, label: str, fn: Callable[[], None]) -> None:
+    reaction_id = ""
+    emoji_type = os.getenv("AI_REPLY_STATUS_EMOJI", "WITTY").strip().upper() or "WITTY"
+    try:
+        app_id, app_secret, _receive_id, _receive_id_type = feishu_credentials(args)
+        if message_id and app_id and app_secret:
+            try:
+                reaction_id = create_feishu_reaction(args, message_id, emoji_type)
+            except Exception as exc:
+                print(f"AI 回复状态添加失败 {label}: {exc}", file=sys.stderr)
+        fn()
+    finally:
+        if reaction_id:
+            try:
+                delete_feishu_reaction(args, message_id, reaction_id)
+            except Exception as exc:
+                print(f"AI 回复状态清理失败 {label}: {exc}", file=sys.stderr)
+
+
+def download_feishu_message_resource(args: argparse.Namespace, message_id: str, file_key: str, resource_type: str = "image") -> tuple[bytes, str]:
+    app_id, app_secret, _receive_id, _receive_id_type = feishu_credentials(args)
+    if not (app_id and app_secret):
+        raise RuntimeError("缺少 FEISHU_APP_ID 或 FEISHU_APP_SECRET，无法下载飞书图片。")
+    token = get_feishu_tenant_access_token(app_id, app_secret, args.timeout)
+    query = urllib.parse.urlencode({"type": resource_type})
+    url = (
+        f"{FEISHU_API}/im/v1/messages/{urllib.parse.quote(message_id, safe='')}"
+        f"/resources/{urllib.parse.quote(file_key, safe='')}?{query}"
+    )
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"}, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=args.timeout) as resp:
+            data = resp.read()
+            content_type = str(resp.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+            return data, content_type
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"飞书资源下载失败 HTTP {exc.code}: {detail}") from exc
+
+
+def image_extension(data: bytes, content_type: str = "") -> str:
+    if content_type == "image/jpeg" or data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if content_type == "image/gif" or data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return ".gif"
+    if content_type == "image/webp" or (len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"):
+        return ".webp"
+    if content_type == "image/bmp" or data.startswith(b"BM"):
+        return ".bmp"
+    if content_type == "image/png" or data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    return ".png"
+
+
+def safe_attachment_name(raw_name: str, fallback_stem: str) -> str:
+    name = Path(str(raw_name or "")).name.strip()
+    if not name or name in {".", ".."}:
+        return ai_analysis.safe_key(fallback_stem)
+    stem = ai_analysis.safe_key(Path(name).stem) or ai_analysis.safe_key(fallback_stem)
+    suffix = Path(name).suffix
+    if not re.fullmatch(r"\.[A-Za-z0-9]{1,12}", suffix or ""):
+        suffix = ""
+    return stem + suffix
+
+
+def prepare_ai_message_for_agent(
+    args: argparse.Namespace,
+    text: str,
+    message_id: str = "",
+    image_keys: Iterable[str | FeishuImageRef] | None = None,
+    file_refs: Iterable[FeishuFileRef] | None = None,
+    reply_context: FeishuReplyContext | None = None,
+) -> tuple[str, list[Path], list[Path]]:
+    prompt = str(text or "").strip()
+    image_refs: list[FeishuImageRef] = []
+    seen_image_refs: set[tuple[str, str]] = set()
+    for item in image_keys or []:
+        if isinstance(item, FeishuImageRef):
+            ref = item
+        else:
+            ref = FeishuImageRef(image_key=str(item or "").strip(), source_message_id=message_id)
+        if not ref.image_key:
+            continue
+        marker = (ref.source_message_id or message_id, ref.image_key)
+        if marker not in seen_image_refs:
+            image_refs.append(ref)
+            seen_image_refs.add(marker)
+    files = list(file_refs or [])
+    quoted_text = (reply_context.text if reply_context else "").strip()
+    if quoted_text:
+        prompt = (prompt + "\n\n" if prompt else "") + "[被回复/引用的飞书消息]\n" + quoted_text
+    if not image_refs and not files:
+        return prompt, [], []
+
+    manager = ai_manager_for_args(args)
+    manager.ensure_ready()
+    timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+    attachment_dir = manager.config.work_dir / "attachments" / timestamp
+    attachment_dir.mkdir(parents=True, exist_ok=True)
+
+    image_paths: list[Path] = []
+    file_paths: list[Path] = []
+    failures: list[str] = []
+    for index, image_ref in enumerate(image_refs, start=1):
+        try:
+            source_message_id = image_ref.source_message_id or message_id
+            data, content_type = download_feishu_message_resource(args, source_message_id, image_ref.image_key, "image")
+            ext = image_extension(data, content_type)
+            file_name = f"feishu_image_{index}_{ai_analysis.safe_key(image_ref.image_key)}{ext}"
+            path = attachment_dir / file_name
+            path.write_bytes(data)
+            image_paths.append(path.resolve())
+        except Exception as exc:
+            failures.append(f"- {image_ref.image_key}: {exc}")
+
+    for index, file_ref in enumerate(files, start=1):
+        if not file_ref.file_key:
+            continue
+        try:
+            source_message_id = file_ref.source_message_id or message_id
+            data, _content_type = download_feishu_message_resource(args, source_message_id, file_ref.file_key, file_ref.resource_type or "file")
+            file_name = safe_attachment_name(file_ref.file_name, f"feishu_file_{index}_{file_ref.file_key}")
+            path = attachment_dir / file_name
+            path.write_bytes(data)
+            file_paths.append(path.resolve())
+        except Exception as exc:
+            failures.append(f"- {file_ref.file_name or file_ref.file_key}: {exc}")
+
+    if image_paths or file_paths:
+        if not prompt:
+            prompt = "请分析我发送的附件。"
+    if image_paths:
+        image_lines = "\n".join(f"- {path}" for path in image_paths)
+        prompt += "\n\n[飞书图片附件已下载到本机，必要时请直接读取这些图片文件]\n" + image_lines
+    if file_paths:
+        file_lines = "\n".join(f"- {path}" for path in file_paths)
+        prompt += "\n\n[飞书文件附件已下载到本机，必要时请直接读取这些文件]\n" + file_lines
+    elif files and not prompt:
+        prompt = "我发送了文件，但程序未能下载文件附件，无法直接读取。"
+    if failures:
+        prompt += "\n\n[附件下载失败]\n" + "\n".join(failures)
+    return prompt, image_paths, file_paths
+
+
+def push_ai_markdown(args: argparse.Namespace, title: str, markdown: str, *, is_error: bool = False) -> None:
+    chunks = split_text_chunks(markdown, 2800)
+    total = len(chunks)
+    try:
+        for index, chunk in enumerate(chunks, start=1):
+            push_feishu_raw_card(args, feishu_ai_markdown_card(title, chunk, index, total, is_error=is_error))
+            if index < total:
+                time.sleep(0.25)
+    except Exception as exc:
+        print(f"AI card send failed, falling back to text chunks: {exc}", file=sys.stderr)
+        fallback_chunks = split_text_chunks(markdown, max(1000, getattr(args, "ai_max_feishu_chars", 3500)))
+        for index, chunk in enumerate(fallback_chunks, start=1):
+            prefix = f"{title} ({index}/{len(fallback_chunks)})\n\n" if len(fallback_chunks) > 1 else ""
+            push_feishu_raw_text(args, prefix + chunk)
+            if index < len(fallback_chunks):
+                time.sleep(0.25)
+
+
+def push_ai_result(args: argparse.Namespace, result: ai_analysis.AIResult) -> None:
+    if result.ok:
+        push_ai_markdown(args, ai_result_title(result.task_type), result.text)
+        return
+    push_ai_markdown(args, "AI 任务失败", f"AI task failed: {result.error}", is_error=True)
+
+
+def ai_manager_for_args(args: argparse.Namespace) -> ai_analysis.AIManager:
+    config = ai_analysis.AIConfig.from_namespace(args)
+    key = (str(config.work_dir.resolve()), getattr(args, "feishu_receive_id", "") or "")
+    manager = _AI_MANAGERS.get(key)
+    if manager is not None:
+        manager.config = config
+        return manager
+
+    def send_text(text: str) -> None:
+        push_feishu_text(args, "AI analysis", text)
+
+    def send_file(file_name: str, text: str) -> None:
+        push_feishu_file(args, file_name, text)
+
+    def send_result(result: ai_analysis.AIResult) -> None:
+        push_ai_result(args, result)
+
+    manager = ai_analysis.AIManager(config, send_text=send_text, send_file=send_file, send_result=send_result)
+    _AI_MANAGERS[key] = manager
+    return manager
+
+
+def sender_id_from_message(message: dict[str, Any]) -> str:
+    sender = message.get("sender", {})
+    sender_id = sender.get("sender_id", {}) if isinstance(sender, dict) else {}
+    if isinstance(sender_id, dict):
+        for key in ("open_id", "user_id", "union_id"):
+            value = str(sender_id.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def is_feishu_bot_message(message: dict[str, Any]) -> bool:
+    sender = message.get("sender", {})
+    sender_type = str(sender.get("sender_type") or "").lower() if isinstance(sender, dict) else ""
+    return sender_type in {"app", "bot"}
+
+
+def object_sender_id(value: Any) -> str:
+    for owner_name in ("sender", "operator"):
+        owner = getattr(value, owner_name, None)
+        sender_id = getattr(owner, "sender_id", None) if owner is not None else None
+        if sender_id is None:
+            continue
+        for key in ("open_id", "user_id", "union_id"):
+            found = getattr(sender_id, key, "")
+            if found:
+                return str(found)
+    return ""
+
+
+def should_forward_plain_text_to_ai(
+    args: argparse.Namespace,
+    text: str,
+    sender_id: str = "",
+    image_keys: Iterable[str] | None = None,
+    file_refs: Iterable[FeishuFileRef] | None = None,
+) -> bool:
+    has_image = any(str(item or "").strip() for item in (image_keys or []))
+    has_file = any(bool(item.file_key) for item in (file_refs or []))
+    if not text.strip() and not has_image and not has_file:
+        return False
+    manager = ai_manager_for_args(args)
+    return manager.effective_enabled() and manager.is_authorized(sender_id)
+
+
+def ai_feishu_queue_for_args(args: argparse.Namespace) -> "queue.Queue[Callable[[], None]]":
+    config = ai_analysis.AIConfig.from_namespace(args)
+    key = (str(config.work_dir.resolve()), getattr(args, "feishu_receive_id", "") or "")
+    with _AI_FEISHU_QUEUE_LOCK:
+        existing = _AI_FEISHU_QUEUES.get(key)
+        if existing is not None:
+            return existing
+        task_queue: "queue.Queue[Callable[[], None]]" = queue.Queue(maxsize=32)
+        _AI_FEISHU_QUEUES[key] = task_queue
+
+        def worker() -> None:
+            while True:
+                job = task_queue.get()
+                try:
+                    job()
+                except Exception as exc:
+                    print(f"AI 飞书队列任务失败: {exc}", file=sys.stderr)
+                finally:
+                    task_queue.task_done()
+
+        threading.Thread(target=worker, daemon=True).start()
+        return task_queue
+
+
+def enqueue_ai_feishu_job(args: argparse.Namespace, label: str, job: Callable[[], None]) -> bool:
+    task_queue = ai_feishu_queue_for_args(args)
+    try:
+        task_queue.put_nowait(job)
+        queued_ahead = task_queue.qsize() - 1
+        if queued_ahead > 0:
+            print(f"AI 飞书任务已排队 {label}: 前面还有 {queued_ahead} 个任务")
+        return True
+    except queue.Full:
+        print(f"AI 飞书任务队列已满 {label}", file=sys.stderr)
+        try:
+            if ai_analysis.AIConfig.from_namespace(args).send_errors_to_feishu:
+                push_feishu_text(args, "AI queue full", "AI task queue is full, please retry later.")
+        except Exception as exc:
+            print(f"发送 AI 队列已满提示失败: {exc}", file=sys.stderr)
+        return False
+
+
+def run_ai_command(
+    args: argparse.Namespace,
+    text: str,
+    sender_id: str = "",
+    image_paths: list[Path] | None = None,
+    file_paths: list[Path] | None = None,
+) -> None:
+    manager = ai_manager_for_args(args)
+    parsed = ai_analysis.parse_ai_command(text)
+    if parsed and parsed[0] == "mode" and not parsed[1].strip():
+        try:
+            push_feishu_card(args, ai_mode_card(manager))
+        except Exception as exc:
+            print(f"AI mode card send failed, falling back to text: {exc}", file=sys.stderr)
+            push_feishu_raw_text(args, ai_mode_text(manager))
+        return
+    response = manager.handle_command(text, sender_id, image_paths=image_paths, file_paths=file_paths)
+    if response:
+        if parsed and parsed[0] in {"ask", "latest", "last"}:
+            push_ai_markdown(args, "AI 回复" if parsed[0] == "ask" else "AI 新帖分析", response)
+            return
+        config = manager.config
+        if len(response) > config.max_feishu_chars:
+            summary = response[: config.max_feishu_chars] + "\n\n[truncated]"
+            if config.upload_long_result:
+                try:
+                    push_feishu_raw_text(args, summary + "\n\nFull result uploaded as `ai_command_result.md`.")
+                    push_feishu_file(args, "ai_command_result.md", response)
+                except Exception as exc:
+                    print(f"AI 长结果上传失败，改为截断发送: {exc}", file=sys.stderr)
+                    push_feishu_raw_text(args, summary)
+                return
+            response = summary
+        push_feishu_raw_text(args, response)
+
+
+def run_ai_plain_text(
+    args: argparse.Namespace,
+    text: str,
+    sender_id: str = "",
+    image_paths: list[Path] | None = None,
+    file_paths: list[Path] | None = None,
+) -> None:
+    manager = ai_manager_for_args(args)
+    if not manager.effective_enabled():
+        return
+    if not manager.is_authorized(sender_id):
+        return
+    task = manager.make_task("manual_ask", text.strip(), "chat", image_paths=image_paths, file_paths=file_paths)
+    result = manager.run_task(task)
+    push_ai_result(args, result)
+
+
+def run_ai_command_background(
+    args: argparse.Namespace,
+    text: str,
+    sender_id: str,
+    label: str,
+    message_id: str = "",
+    image_keys: Iterable[str | FeishuImageRef] | None = None,
+    file_refs: Iterable[FeishuFileRef] | None = None,
+    reply_context: FeishuReplyContext | None = None,
+) -> None:
+    def queued_job() -> None:
+        try:
+            print(f"开始处理 {label}: /ai")
+            def job() -> None:
+                parsed = ai_analysis.parse_ai_command(text)
+                if parsed and parsed[0] == "ask":
+                    prompt, image_paths, file_paths = prepare_ai_message_for_agent(args, text, message_id, image_keys, file_refs, reply_context)
+                else:
+                    prompt, image_paths, file_paths = text, [], []
+                run_ai_command(args, prompt, sender_id, image_paths, file_paths)
+
+            with_ai_reply_status(args, message_id, label, job)
+            print(f"处理完成 {label}: /ai")
+        except Exception as exc:
+            print(f"AI 命令处理失败 {label}: {exc}", file=sys.stderr)
+            try:
+                if ai_analysis.AIConfig.from_namespace(args).send_errors_to_feishu:
+                    push_feishu_text(args, "AI command failed", str(exc))
+            except Exception as nested:
+                print(f"发送 AI 错误消息失败: {nested}", file=sys.stderr)
+
+    enqueue_ai_feishu_job(args, label, queued_job)
+
+
+def run_ai_plain_text_background(
+    args: argparse.Namespace,
+    text: str,
+    sender_id: str,
+    label: str,
+    message_id: str = "",
+    image_keys: Iterable[str | FeishuImageRef] | None = None,
+    file_refs: Iterable[FeishuFileRef] | None = None,
+    reply_context: FeishuReplyContext | None = None,
+) -> None:
+    def queued_job() -> None:
+        try:
+            print(f"开始处理 {label}: AI conversation")
+            def job() -> None:
+                prompt, image_paths, file_paths = prepare_ai_message_for_agent(args, text, message_id, image_keys, file_refs, reply_context)
+                run_ai_plain_text(args, prompt, sender_id, image_paths, file_paths)
+
+            with_ai_reply_status(args, message_id, label, job)
+            print(f"处理完成 {label}: AI conversation")
+        except Exception as exc:
+            print(f"AI 对话处理失败 {label}: {exc}", file=sys.stderr)
+            try:
+                if ai_analysis.AIConfig.from_namespace(args).send_errors_to_feishu:
+                    push_feishu_text(args, "AI conversation failed", str(exc))
+            except Exception as nested:
+                print(f"发送 AI 错误消息失败: {nested}", file=sys.stderr)
+
+    enqueue_ai_feishu_job(args, label, queued_job)
+
+
+def after_posts_pushed_for_ai(args: argparse.Namespace, posts: list[NgaPost]) -> None:
+    try:
+        ai_manager_for_args(args).maybe_auto_analyze_posts(posts)
+    except Exception as exc:
+        print(f"AI 新帖保存/分析失败: {exc}", file=sys.stderr)
+
+
+def maybe_run_ai_schedule(args: argparse.Namespace) -> None:
+    try:
+        ai_manager_for_args(args).maybe_scheduled_analysis()
+    except Exception as exc:
+        print(f"AI 定时分析检查失败: {exc}", file=sys.stderr)
+
+
 def push_feishu_app_posts(
     app_id: str,
     app_secret: str,
@@ -928,28 +1769,112 @@ def list_feishu_messages(
 
 
 def message_text(message: dict[str, Any]) -> str:
+    text, _image_keys, _file_refs = message_parts(message)
+    return text
+
+
+def strip_feishu_mentions(text: str) -> str:
+    text = re.sub(r"<at[^>]*>.*?</at>", "", str(text or ""), flags=re.I)
+    return html.unescape(text).strip()
+
+
+def parse_feishu_content(content: Any) -> dict[str, Any]:
+    if isinstance(content, dict):
+        return content
+    try:
+        parsed = json.loads(content or "{}")
+    except json.JSONDecodeError:
+        return {"text": str(content or "")}
+    return parsed if isinstance(parsed, dict) else {"text": str(parsed or "")}
+
+
+def post_text_and_image_keys(value: dict[str, Any]) -> tuple[str, list[str]]:
+    def post_lang_items(raw: dict[str, Any]) -> tuple[str, list[Any]]:
+        return str(raw.get("title") or ""), raw.get("content") if isinstance(raw.get("content"), list) else []
+
+    candidates: list[dict[str, Any]] = []
+    if isinstance(value.get("content"), list):
+        candidates.append(value)
+    for item in value.values():
+        if isinstance(item, dict) and isinstance(item.get("content"), list):
+            candidates.append(item)
+
+    texts: list[str] = []
+    image_keys: list[str] = []
+    for candidate in candidates[:1]:
+        title, lines = post_lang_items(candidate)
+        if title:
+            texts.append(title)
+        for line in lines:
+            elements = line if isinstance(line, list) else [line]
+            for element in elements:
+                if not isinstance(element, dict):
+                    continue
+                tag = str(element.get("tag") or "").lower()
+                if tag in {"text", "a", "markdown"}:
+                    text = str(element.get("text") or "").strip()
+                    if text:
+                        texts.append(text)
+                elif tag == "code_block":
+                    text = str(element.get("text") or "").strip()
+                    if text:
+                        language = str(element.get("language") or "")
+                        texts.append(f"```{language}\n{text}\n```")
+                elif tag == "at":
+                    user_name = str(element.get("user_name") or element.get("user_id") or "").strip()
+                    if user_name and user_name != "all":
+                        texts.append("@" + user_name)
+                elif tag in {"img", "image"}:
+                    image_key = str(element.get("image_key") or "").strip()
+                    if image_key:
+                        image_keys.append(image_key)
+    return strip_feishu_mentions("\n".join(texts)), image_keys
+
+
+def content_parts(message_type: str, content: Any) -> tuple[str, list[str], list[FeishuFileRef]]:
+    value = parse_feishu_content(content)
+    msg_type = str(message_type or value.get("msg_type") or value.get("message_type") or "").lower()
+    if msg_type == "post" or isinstance(value.get("content"), list) or any(isinstance(v, dict) and isinstance(v.get("content"), list) for v in value.values()):
+        text, image_keys = post_text_and_image_keys(value)
+        return text, image_keys, []
+    text = strip_feishu_mentions(str(value.get("text") or ""))
+    image_keys: list[str] = []
+    image_key = str(value.get("image_key") or "").strip()
+    if image_key:
+        image_keys.append(image_key)
+    file_refs: list[FeishuFileRef] = []
+    file_key = str(value.get("file_key") or "").strip()
+    if file_key:
+        file_refs.append(
+            FeishuFileRef(
+                file_key=file_key,
+                file_name=str(value.get("file_name") or value.get("name") or "").strip(),
+                resource_type="file",
+            )
+        )
+    return text, image_keys, file_refs
+
+
+def content_text_and_image_keys(message_type: str, content: Any) -> tuple[str, list[str]]:
+    text, image_keys, _file_refs = content_parts(message_type, content)
+    return text, image_keys
+
+
+def message_parts(message: dict[str, Any]) -> tuple[str, list[str], list[FeishuFileRef]]:
     body = message.get("body", {})
     content = body.get("content") if isinstance(body, dict) else message.get("content", "")
-    if isinstance(content, dict):
-        value = content
-    else:
-        try:
-            value = json.loads(content or "{}")
-        except json.JSONDecodeError:
-            return str(content or "")
-    text = str(value.get("text", ""))
-    text = re.sub(r"<at[^>]*>.*?</at>", "", text, flags=re.I)
-    return html.unescape(text).strip()
+    message_type = str(message.get("msg_type") or message.get("message_type") or "")
+    return content_parts(message_type, content)
+
+
+def message_text_and_image_keys(message: dict[str, Any]) -> tuple[str, list[str]]:
+    text, image_keys, _file_refs = message_parts(message)
+    return text, image_keys
 
 
 def content_text(content: str) -> str:
-    try:
-        value = json.loads(content or "{}")
-    except json.JSONDecodeError:
-        return content or ""
-    text = str(value.get("text", ""))
-    text = re.sub(r"<at[^>]*>.*?</at>", "", text, flags=re.I)
-    return html.unescape(text).strip()
+    text, _image_keys, _file_refs = content_parts("", content)
+    return text
 
 
 def clamp_count(value: str | None, default: int = 20, maximum: int = 200) -> int:
@@ -965,6 +1890,8 @@ def parse_bot_command(text: str, default_author_id: str, default_tid: str) -> Bo
     compact = " ".join(text.split())
     if re.search(r"(?:^|\s)/start(?:\s|$)", compact):
         return BotCommand(action="start")
+    if re.search(r"(?:^|\s)/setting(?:s)?(?:\s|$)", compact):
+        return BotCommand(action="setting")
 
     legacy = re.search(r"(?:^|\s)/history(?:\s+(\d{1,3}))?(?:\s|$)", compact)
     if legacy:
@@ -1009,6 +1936,76 @@ def bot_command_from_form(form: dict[str, Any], default_author_id: str, default_
 
 def form_action_name(form: dict[str, Any]) -> str:
     return str(form.get("action") or "")
+
+
+def card_callback_value(action: str, **values: Any) -> dict[str, Any]:
+    return {"action": action, **{key: value for key, value in values.items() if value is not None}}
+
+
+def callback_button(label: str, action: str, button_type: str = "default", **values: Any) -> dict[str, Any]:
+    return {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": label},
+        "type": button_type,
+        "behaviors": [{"type": "callback", "value": card_callback_value(action, **values)}],
+    }
+
+
+def callback_action_row(*buttons: dict[str, Any]) -> dict[str, Any]:
+    columns: list[dict[str, Any]] = []
+    for button in buttons:
+        columns.append(
+            {
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "elements": [button],
+            }
+        )
+    return {
+        "tag": "column_set",
+        "flex_mode": "none",
+        "background_style": "default",
+        "columns": columns,
+    }
+
+
+def menu_back_row(action: str = "open_main_menu") -> dict[str, Any]:
+    return callback_action_row(callback_button("← 返回", action))
+
+
+def main_menu_card(args: argparse.Namespace, manager: ai_analysis.AIManager) -> dict[str, Any]:
+    return {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "blue", "title": {"tag": "plain_text", "content": "NGA Wolf Watcher"}},
+        "body": {
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"默认 uid `{args.default_author_id}`，默认 tid `{args.default_tid}`\n\n"
+                        f"AI：`{'开' if manager.effective_enabled() else '关'}` | "
+                        f"自动分析：`{'开' if manager.effective_auto() else '关'}` | "
+                        f"定时分析：`{'开' if manager.effective_schedule() else '关'}`"
+                    ),
+                },
+                callback_action_row(
+                    callback_button("拉取信息", "open_fetch_menu", "primary"),
+                    callback_button("设置", "open_settings"),
+                ),
+                callback_action_row(
+                    callback_button("对话权限", "open_mode_settings"),
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "打开 NGA"},
+                        "url": f"https://bbs.nga.cn/read.php?tid={args.default_tid}",
+                        "type": "default",
+                    },
+                ),
+            ]
+        },
+    }
 
 
 def start_card(default_author_id: str, default_tid: str) -> dict[str, Any]:
@@ -1059,40 +2056,44 @@ def start_card(default_author_id: str, default_tid: str) -> dict[str, Any]:
     }
 
 
-def start_form_card(default_author_id: str, default_tid: str) -> dict[str, Any]:
+def start_form_card(default_author_id: str, default_tid: str, *, show_back: bool = False) -> dict[str, Any]:
+    elements: list[dict[str, Any]] = []
+    if show_back:
+        elements.append(menu_back_row("open_main_menu"))
+    elements.extend(
+        [
+            {
+                "tag": "markdown",
+                "content": (
+                    f"默认 uid `{default_author_id}` = 狼大\n"
+                    f"默认 tid `{default_tid}` = 狼大贴\n\n"
+                    "先选一个功能，机器人会在当前卡片打开已预填默认参数的执行表单。"
+                ),
+            },
+            *preset_actions_elements(default_author_id, default_tid),
+            {
+                "tag": "hr",
+            },
+            {
+                "tag": "markdown",
+                "content": (
+                    "也可以直接发命令：\n"
+                    f"`/history_r {default_author_id} {DEFAULT_REPLY_COUNT}`\n"
+                    f"`/pack_r {default_author_id} {DEFAULT_REPLY_COUNT}`\n"
+                    f"`/history_t {default_tid} {DEFAULT_THREAD_COUNT}`\n"
+                    f"`/pack_t {default_tid} {DEFAULT_THREAD_COUNT}`"
+                ),
+            },
+        ]
+    )
     return {
         "schema": "2.0",
         "config": {"wide_screen_mode": True},
         "header": {
             "template": "blue",
-            "title": {"tag": "plain_text", "content": "NGA 监听"},
+            "title": {"tag": "plain_text", "content": "拉取信息"},
         },
-        "body": {
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": (
-                        f"默认 uid `{default_author_id}` = 狼大\n"
-                        f"默认 tid `{default_tid}` = 狼大贴\n\n"
-                        "先选一个功能，机器人会发出已预填默认参数的执行卡片。"
-                    ),
-                },
-                *preset_actions_elements(default_author_id, default_tid),
-                {
-                    "tag": "hr",
-                },
-                {
-                    "tag": "markdown",
-                    "content": (
-                        "也可以直接发命令：\n"
-                        f"`/history_r {default_author_id} {DEFAULT_REPLY_COUNT}`\n"
-                        f"`/pack_r {default_author_id} {DEFAULT_REPLY_COUNT}`\n"
-                        f"`/history_t {default_tid} {DEFAULT_THREAD_COUNT}`\n"
-                        f"`/pack_t {default_tid} {DEFAULT_THREAD_COUNT}`"
-                    ),
-                },
-            ]
-        },
+        "body": {"elements": elements},
     }
 
 
@@ -1181,6 +2182,7 @@ def command_form_card(command: str, target_id: str, count: str) -> dict[str, Any
         },
         "body": {
             "elements": [
+                menu_back_row("open_fetch_menu"),
                 {
                     "tag": "form",
                     "name": "nga_command_form",
@@ -1220,6 +2222,188 @@ def command_form_card(command: str, target_id: str, count: str) -> dict[str, Any
     }
 
 
+def ai_settings_card(manager: ai_analysis.AIManager) -> dict[str, Any]:
+    effective = manager.effective_config()
+    state = manager.read_state()
+    current_mode = manager.effective_permission_mode()
+    mode_options = ai_analysis.permission_mode_options(manager.config.provider)
+    schedule_prompt = str(state.get("schedule_prompt") or effective.schedule_prompt or ai_analysis.DEFAULT_SCHEDULED_ANALYSIS_PROMPT)
+    auto_prompt = str(state.get("auto_analysis_prompt") or effective.auto_analysis_prompt or ai_analysis.DEFAULT_AUTO_ANALYSIS_PROMPT)
+    return {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "blue", "title": {"tag": "plain_text", "content": "设置"}},
+        "body": {
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"AI：`{'开' if effective.enabled else '关'}` | "
+                        f"自动新帖分析：`{'开' if effective.auto_analyze_new_post else '关'}` | "
+                        f"定时分析：`{'开' if effective.schedule_enabled else '关'}`\n"
+                        f"定时间隔：`{effective.schedule_interval_minutes}` 分钟\n"
+                        f"时间窗口：`{effective.schedule_windows}`\n"
+                        f"权限模式：`{manager.effective_permission_mode()}`"
+                    ),
+                },
+                callback_action_row(
+                    callback_button("AI 开", "set_ai_enabled", "primary" if effective.enabled else "default", enabled=True),
+                    callback_button("AI 关", "set_ai_enabled", "primary" if not effective.enabled else "default", enabled=False),
+                ),
+                callback_action_row(
+                    callback_button("自动分析开", "set_ai_auto", "primary" if effective.auto_analyze_new_post else "default", enabled=True),
+                    callback_button("自动分析关", "set_ai_auto", "primary" if not effective.auto_analyze_new_post else "default", enabled=False),
+                ),
+                callback_action_row(
+                    callback_button("定时分析开", "set_ai_schedule", "primary" if effective.schedule_enabled else "default", enabled=True),
+                    callback_button("定时分析关", "set_ai_schedule", "primary" if not effective.schedule_enabled else "default", enabled=False),
+                ),
+                {"tag": "hr"},
+                {
+                    "tag": "form",
+                    "name": "ai_settings_form",
+                    "elements": [
+                        {
+                            "tag": "markdown",
+                            "content": "**对话权限模式**\n控制本地 agent 执行工具和修改文件时的权限。`default` 最保守；`yolo`/`bypassPermissions` 风险最高。",
+                        },
+                        {
+                            "tag": "select_static",
+                            "name": "permission_mode",
+                            "placeholder": {"tag": "plain_text", "content": "选择对话权限模式"},
+                            "options": [
+                                {"text": {"tag": "plain_text", "content": mode}, "value": mode}
+                                for mode, _desc in mode_options
+                            ],
+                        },
+                        {
+                            "tag": "markdown",
+                            "content": "**定时分析频率（分钟）**\n每隔多少分钟在命中时间窗口时触发一次定时分析。",
+                        },
+                        {
+                            "tag": "input",
+                            "name": "schedule_interval",
+                            "placeholder": {"tag": "plain_text", "content": "定时间隔分钟"},
+                            "default_value": str(effective.schedule_interval_minutes),
+                        },
+                        {
+                            "tag": "markdown",
+                            "content": "**定时分析时间窗口**\n默认 A 股开市时间：`weekday:09:30-11:30,13:00-15:00`。",
+                        },
+                        {
+                            "tag": "input",
+                            "name": "schedule_windows",
+                            "placeholder": {"tag": "plain_text", "content": "定时窗口，例如 weekday:09:30-11:30,13:00-15:00"},
+                            "default_value": effective.schedule_windows,
+                        },
+                        {
+                            "tag": "markdown",
+                            "content": "**定时分析提示词**\n定时任务触发时发给本地 agent 的内容。",
+                        },
+                        {
+                            "tag": "input",
+                            "name": "schedule_prompt",
+                            "placeholder": {"tag": "plain_text", "content": "定时分析提示词"},
+                            "default_value": schedule_prompt,
+                        },
+                        {
+                            "tag": "markdown",
+                            "content": "**新帖自动分析提示词**\n监听到 NGA 新回复且自动分析开启时发给本地 agent 的内容。",
+                        },
+                        {
+                            "tag": "input",
+                            "name": "auto_prompt",
+                            "placeholder": {"tag": "plain_text", "content": "新帖自动分析提示词"},
+                            "default_value": auto_prompt,
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "保存设置"},
+                            "type": "primary",
+                            "name": "save",
+                            "behaviors": [{"type": "callback", "value": {"action": "save_ai_settings"}}],
+                            "form_action_type": "submit",
+                        },
+                    ],
+                },
+            ]
+        },
+    }
+
+
+def processing_card(title: str, detail: str, back_action: str = "open_main_menu") -> dict[str, Any]:
+    return {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "blue", "title": {"tag": "plain_text", "content": title}},
+        "body": {"elements": [menu_back_row(back_action), {"tag": "markdown", "content": detail}]},
+    }
+
+
+def ai_mode_card(manager: ai_analysis.AIManager, *, back_action: str = "open_main_menu") -> dict[str, Any]:
+    provider = manager.config.provider
+    current = manager.effective_permission_mode()
+    options = ai_analysis.permission_mode_options(provider)
+    return {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "orange" if current == "yolo" or current == "bypassPermissions" else "blue",
+            "title": {"tag": "plain_text", "content": "AI 权限模式"},
+        },
+        "body": {
+            "elements": [
+                menu_back_row(back_action),
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"Provider: `{provider}`\n"
+                        f"Current: `{current}`\n\n"
+                        + "\n".join(f"- `{mode}`: {desc}" for mode, desc in options)
+                    ),
+                },
+                {
+                    "tag": "form",
+                    "name": "ai_mode_form",
+                    "elements": [
+                        {
+                            "tag": "select_static",
+                            "name": "mode",
+                            "placeholder": {"tag": "plain_text", "content": "选择权限模式"},
+                            "options": [
+                                {"text": {"tag": "plain_text", "content": mode}, "value": mode}
+                                for mode, _desc in options
+                            ],
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "保存权限模式"},
+                            "type": "primary",
+                            "name": "save",
+                            "behaviors": [{"type": "callback", "value": {"action": "set_ai_mode"}}],
+                            "form_action_type": "submit",
+                        },
+                    ],
+                },
+            ]
+        },
+    }
+
+
+def ai_mode_text(manager: ai_analysis.AIManager) -> str:
+    provider = manager.config.provider
+    current = manager.effective_permission_mode()
+    lines = [
+        "AI permission modes",
+        f"provider: {provider}",
+        f"current: {current}",
+        "",
+        "Use `/mode <name>` to switch:",
+    ]
+    lines.extend(f"- {mode}: {desc}" for mode, desc in ai_analysis.permission_mode_options(provider))
+    return "\n".join(lines)
+
+
 def push_feishu_card(args: argparse.Namespace, card: dict[str, Any]) -> None:
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     if not (app_id and app_secret and receive_id):
@@ -1247,6 +2431,9 @@ def run_bot_command(args: argparse.Namespace, command: BotCommand) -> None:
     if command.action == "start":
         push_feishu_card(args, start_form_card(args.default_author_id, args.default_tid))
         return
+    if command.action == "setting":
+        push_feishu_card(args, ai_settings_card(ai_manager_for_args(args)))
+        return
 
     if command.target_type == "reply":
         posts = collect_replies_with_retries(args, command.target_id, command.count)
@@ -1258,6 +2445,8 @@ def run_bot_command(args: argparse.Namespace, command: BotCommand) -> None:
         raise RuntimeError(f"未知命令目标：{command}")
 
     title = f"NGA {label} 最新 {len(posts)} 条"
+    if len(posts) < command.count:
+        title += f"（请求 {command.count} 条，NGA 临时限流时会先返回已获取部分）"
     if command.action == "pack":
         file_name = f"nga_{command.target_type}_{command.target_id or 'any'}_{len(posts)}_{int(time.time())}.txt"
         push_feishu_file(args, file_name, posts_to_txt(posts, title))
@@ -1317,6 +2506,11 @@ def card_action_chat_id(event: Any, fallback: str) -> str:
     return chat_id or fallback
 
 
+def card_action_sender_id(event: Any) -> str:
+    event_body = getattr(event, "event", None)
+    return object_sender_id(event_body)
+
+
 def start_ws(args: argparse.Namespace) -> None:
     try:
         import lark_oapi as lark
@@ -1329,32 +2523,105 @@ def start_ws(args: argparse.Namespace) -> None:
         raise SystemExit("缺少 FEISHU_APP_ID 或 FEISHU_APP_SECRET。")
 
     def on_message(event: Any) -> None:
-        msg = getattr(getattr(event, "event", None), "message", None)
+        event_body = getattr(event, "event", None)
+        msg = getattr(event_body, "message", None)
         if msg is None:
             return
-        text = content_text(getattr(msg, "content", "") or "")
+        text, image_keys, file_refs = content_parts(
+            getattr(msg, "message_type", "") or getattr(msg, "msg_type", "") or "",
+            getattr(msg, "content", "") or "",
+        )
+        chat_id = getattr(msg, "chat_id", "") or receive_id
+        sender_id = object_sender_id(event_body)
+        message_id = getattr(msg, "message_id", "") or ""
+        parent_id = getattr(msg, "parent_id", "") or getattr(msg, "root_id", "") or ""
+        root_id = getattr(msg, "root_id", "") or ""
+        reply_context, image_refs, file_refs = enrich_reply_context(args_for_chat(args, chat_id), message_id, image_keys, file_refs, parent_id, root_id)
+        if ai_analysis.parse_ai_command(text) is not None:
+            run_ai_command_background(args_for_chat(args, chat_id), text, sender_id, f"飞书消息:{message_id}", message_id, image_refs, file_refs, reply_context)
+            return
         command = parse_bot_command(text, args.default_author_id, args.default_tid)
         if command is None:
+            if should_forward_plain_text_to_ai(args_for_chat(args, chat_id), text, sender_id, image_keys, file_refs):
+                run_ai_plain_text_background(args_for_chat(args, chat_id), text, sender_id, f"飞书消息:{message_id}", message_id, image_refs, file_refs, reply_context)
             return
         chat_id = getattr(msg, "chat_id", "") or receive_id
-        run_command_background(args_for_chat(args, chat_id), command, f"飞书消息:{getattr(msg, 'message_id', '')}")
+        run_command_background(args_for_chat(args, chat_id), command, f"飞书消息:{message_id}")
 
     def on_card_action(event: Any) -> Any:
         form = card_action_to_form(event)
         chat_id = card_action_chat_id(event, receive_id)
+        sender_id = card_action_sender_id(event)
+
+        def card_response(card: dict[str, Any] | None = None, content: str = "已更新", toast_type: str = "info") -> Any:
+            payload: dict[str, Any] = {"toast": {"type": toast_type, "content": content}}
+            if card is not None:
+                payload["card"] = {"type": "raw", "data": card}
+            return P2CardActionTriggerResponse(payload)
+
         try:
             action = form_action_name(form)
+            scoped_args = args_for_chat(args, chat_id)
+            manager = ai_manager_for_args(scoped_args)
+            if action == "open_main_menu":
+                return card_response(start_form_card(args.default_author_id, args.default_tid), "已返回查询菜单")
+            if action == "open_fetch_menu":
+                return card_response(start_form_card(args.default_author_id, args.default_tid, show_back=True), "已打开拉取信息")
+            if action == "open_settings":
+                return card_response(ai_settings_card(manager), "已打开设置")
+            if action == "open_mode_settings":
+                return card_response(ai_mode_card(manager, back_action="open_settings"), "已打开权限设置")
+            if action == "set_ai_enabled":
+                if not manager.is_authorized(sender_id):
+                    return card_response(None, "AI command rejected: sender is not authorized.", "error")
+                enabled = ai_analysis.bool_value(form.get("enabled"))
+                manager.handle_command("/ai on" if enabled else "/ai off", sender_id)
+                return card_response(ai_settings_card(manager), "AI 已开启" if enabled else "AI 已关闭")
+            if action == "set_ai_auto":
+                if not manager.is_authorized(sender_id):
+                    return card_response(None, "AI command rejected: sender is not authorized.", "error")
+                enabled = ai_analysis.bool_value(form.get("enabled"))
+                manager.handle_command("/ai auto on" if enabled else "/ai auto off", sender_id)
+                return card_response(ai_settings_card(manager), "自动分析已开启" if enabled else "自动分析已关闭")
+            if action == "set_ai_schedule":
+                if not manager.is_authorized(sender_id):
+                    return card_response(None, "AI command rejected: sender is not authorized.", "error")
+                enabled = ai_analysis.bool_value(form.get("enabled"))
+                manager.handle_command("/ai schedule on" if enabled else "/ai schedule off", sender_id)
+                return card_response(ai_settings_card(manager), "定时分析已开启" if enabled else "定时分析已关闭")
+            if action == "save_ai_settings":
+                if not manager.is_authorized(sender_id):
+                    return card_response(None, "AI command rejected: sender is not authorized.", "error")
+                interval = str(form.get("schedule_interval") or "").strip()
+                windows = str(form.get("schedule_windows") or "").strip()
+                schedule_prompt = str(form.get("schedule_prompt") or "").strip()
+                auto_prompt = str(form.get("auto_prompt") or "").strip()
+                mode = str(form.get("permission_mode") or "").strip()
+                if mode:
+                    manager.handle_command(f"/mode {mode}", sender_id)
+                if interval:
+                    manager.handle_command(f"/ai schedule every {interval}", sender_id)
+                if windows:
+                    manager.handle_command(f"/ai schedule windows {windows}", sender_id)
+                manager.handle_command(f"/ai schedule prompt {schedule_prompt}", sender_id)
+                manager.handle_command(f"/ai auto prompt {auto_prompt}", sender_id)
+                return card_response(ai_settings_card(manager), "AI 设置已保存")
+            if action == "set_ai_mode":
+                mode = str(form.get("mode") or "")
+                if not manager.is_authorized(sender_id):
+                    return card_response(None, "AI command rejected: sender is not authorized.", "error")
+                manager.handle_command(f"/mode {mode}", sender_id)
+                return card_response(ai_mode_card(manager, back_action="open_settings"), f"AI mode set to {manager.effective_permission_mode()}")
             if action == "open_preset_form":
                 command_name = str(form.get("command") or "history_r")
                 target_id = str(form.get("target_id") or (args.default_tid if command_name.endswith("_t") else args.default_author_id))
                 count = str(form.get("count") or default_command_count(command_name))
-                push_feishu_card(args_for_chat(args, chat_id), command_form_card(command_name, target_id, count))
-                return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已打开预填表单"}})
+                return card_response(command_form_card(command_name, target_id, count), "已打开预填表单")
             command = bot_command_from_form(form, args.default_author_id, args.default_tid)
-            run_command_background(args_for_chat(args, chat_id), command, "卡片操作")
-            return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "已收到，正在处理"}})
+            run_command_background(scoped_args, command, "卡片操作")
+            return card_response(processing_card("正在处理", f"已收到 `{command}`，结果会发送到当前群。", "open_fetch_menu"), "已收到，正在处理")
         except Exception as exc:
-            return P2CardActionTriggerResponse({"toast": {"type": "error", "content": f"参数错误: {exc}"}})
+            return card_response(None, f"参数错误: {exc}", "error")
 
     handler = (
         lark.EventDispatcherHandler.builder("", "")
@@ -1368,6 +2635,7 @@ def start_ws(args: argparse.Namespace) -> None:
             while True:
                 try:
                     run_once(args)
+                    maybe_run_ai_schedule(args)
                 except Exception as exc:
                     print(f"NGA 监听循环失败: {exc}", file=sys.stderr)
                 jitter = random.uniform(-args.jitter, args.jitter) if args.jitter > 0 else 0
@@ -1376,8 +2644,14 @@ def start_ws(args: argparse.Namespace) -> None:
         threading.Thread(target=watch_loop, daemon=True).start()
         print("已启动 NGA 后台监听循环。")
 
-    print("正在启动飞书 WebSocket 客户端。")
-    lark.ws.Client(app_id, app_secret, event_handler=handler, log_level=lark.LogLevel.ERROR).start()
+    while True:
+        try:
+            print("正在启动飞书 WebSocket 客户端。")
+            lark.ws.Client(app_id, app_secret, event_handler=handler, log_level=lark.LogLevel.ERROR).start()
+            print("飞书 WebSocket 客户端已退出，5 秒后重连。", file=sys.stderr)
+        except Exception as exc:
+            print(f"飞书 WebSocket 客户端异常退出，5 秒后重连: {exc}", file=sys.stderr)
+        time.sleep(5)
 
 
 def send_test_message(args: argparse.Namespace) -> None:
@@ -1455,24 +2729,75 @@ def push_to_feishu(args: argparse.Namespace, post: NgaPost) -> None:
     push_feishu(webhook, secret, post, args.timeout)
 
 
-def collect_posts(author_id: str, cookie: str, max_pages: int, timeout: int) -> list[NgaPost]:
+def sleep_between_nga_pages(page_delay: float) -> None:
+    if page_delay <= 0:
+        return
+    time.sleep(page_delay + random.uniform(0, page_delay * 0.5))
+
+
+def collect_posts(
+    author_id: str,
+    cookie: str,
+    max_pages: int,
+    timeout: int,
+    attempts: int = 1,
+    retry_delay: float = 0,
+    page_delay: float = DEFAULT_NGA_PAGE_DELAY,
+    allow_partial: bool = False,
+) -> list[NgaPost]:
     posts: list[NgaPost] = []
     for page in range(1, max_pages + 1):
-        payload = fetch_nga_page(author_id, page, cookie, timeout)
+        try:
+            payload = with_retries(
+                f"NGA 用户回复第 {page} 页",
+                attempts,
+                retry_delay,
+                lambda page=page: fetch_nga_page(author_id, page, cookie, timeout),
+            )
+        except Exception as exc:
+            if allow_partial and posts and is_nga_temporary_unavailable(exc):
+                print(f"NGA 用户回复第 {page} 页临时不可用，返回已抓到的 {len(posts)} 条。", file=sys.stderr)
+                break
+            raise
         page_posts = extract_posts(payload)
         if page > 1 and not page_posts:
             break
         posts.extend(page_posts)
+        if page < max_pages:
+            sleep_between_nga_pages(page_delay)
     return posts
 
 
-def collect_recent_replies(author_id: str, count: int, cookie: str, timeout: int) -> list[NgaPost]:
+def collect_recent_replies(
+    author_id: str,
+    count: int,
+    cookie: str,
+    timeout: int,
+    attempts: int = 1,
+    retry_delay: float = 0,
+    page_delay: float = DEFAULT_NGA_PAGE_DELAY,
+    allow_partial: bool = False,
+) -> list[NgaPost]:
     pages = max(1, (count + 19) // 20)
-    return collect_posts(author_id, cookie, pages, timeout)[:count]
+    return collect_posts(author_id, cookie, pages, timeout, attempts, retry_delay, page_delay, allow_partial)[:count]
 
 
-def collect_thread_tail(tid: str, count: int, cookie: str, timeout: int) -> list[NgaPost]:
-    first_payload = fetch_nga_thread_page(tid, 99999, cookie, timeout)
+def collect_thread_tail(
+    tid: str,
+    count: int,
+    cookie: str,
+    timeout: int,
+    attempts: int = 1,
+    retry_delay: float = 0,
+    page_delay: float = DEFAULT_NGA_PAGE_DELAY,
+    allow_partial: bool = False,
+) -> list[NgaPost]:
+    first_payload = with_retries(
+        f"NGA 帖子 {tid} 最新页",
+        attempts,
+        retry_delay,
+        lambda: fetch_nga_thread_page(tid, 99999, cookie, timeout),
+    )
     first_posts, last_page = extract_thread_posts(first_payload)
     if not last_page:
         last_page = 1
@@ -1480,7 +2805,19 @@ def collect_thread_tail(tid: str, count: int, cookie: str, timeout: int) -> list
     posts_by_page: list[NgaPost] = list(first_posts)
     page = last_page - 1
     while len(posts_by_page) < count and page >= 1:
-        payload = fetch_nga_thread_page(tid, page, cookie, timeout)
+        sleep_between_nga_pages(page_delay)
+        try:
+            payload = with_retries(
+                f"NGA 帖子 {tid} 第 {page} 页",
+                attempts,
+                retry_delay,
+                lambda page=page: fetch_nga_thread_page(tid, page, cookie, timeout),
+            )
+        except Exception as exc:
+            if allow_partial and posts_by_page and is_nga_temporary_unavailable(exc):
+                print(f"NGA 帖子 {tid} 第 {page} 页临时不可用，返回已抓到的 {len(posts_by_page)} 条。", file=sys.stderr)
+                break
+            raise
         page_posts, _ = extract_thread_posts(payload)
         posts_by_page = page_posts + posts_by_page
         page -= 1
@@ -1489,17 +2826,25 @@ def collect_thread_tail(tid: str, count: int, cookie: str, timeout: int) -> list
 
 def with_retries(label: str, attempts: int, delay: float, fn: Any) -> Any:
     last_exc: Exception | None = None
+    unavailable_limit = max(1, int(os.getenv("NGA_UNAVAILABLE_RETRIES", str(DEFAULT_NGA_UNAVAILABLE_RETRIES))))
     for attempt in range(1, attempts + 1):
         try:
             return fn()
         except Exception as exc:
             last_exc = exc
-            if attempt == attempts:
+            effective_attempts = min(attempts, unavailable_limit) if is_nga_temporary_unavailable(exc) else attempts
+            if attempt >= effective_attempts:
                 break
-            sleep_for = delay * attempt + random.uniform(0, delay)
-            print(f"{label} 失败（{attempt}/{attempts}）：{exc}；{sleep_for:.1f} 秒后重试", file=sys.stderr)
+            if is_nga_temporary_unavailable(exc):
+                sleep_for = max(delay * attempt, 5 * attempt) + random.uniform(0, max(delay, 2))
+            else:
+                sleep_for = delay * attempt + random.uniform(0, delay)
+            print(f"{label} 失败（{attempt}/{effective_attempts}）：{exc}；{sleep_for:.1f} 秒后重试", file=sys.stderr)
             time.sleep(sleep_for)
-    raise RuntimeError(f"{label} 在 {attempts} 次尝试后仍失败：{last_exc}")
+    message = f"{label} 在 {effective_attempts} 次尝试后仍失败：{last_exc}"
+    if last_exc and is_nga_temporary_unavailable(last_exc):
+        raise NgaTemporaryUnavailable(message) from last_exc
+    raise RuntimeError(message)
 
 
 def collect_posts_with_retries(args: argparse.Namespace, count_pages: int | None = None) -> list[NgaPost]:
@@ -1507,11 +2852,15 @@ def collect_posts_with_retries(args: argparse.Namespace, count_pages: int | None
     if not cookie:
         raise SystemExit("缺少 NGA_COOKIE。请从已登录 bbs.nga.cn 的浏览器会话复制 Cookie。")
     max_pages = count_pages if count_pages is not None else args.max_pages
-    return with_retries(
-        "NGA 监听抓取",
+    return collect_posts(
+        args.author_id,
+        cookie,
+        max_pages,
+        args.timeout,
         args.retries,
         args.retry_delay,
-        lambda: collect_posts(args.author_id, cookie, max_pages, args.timeout),
+        getattr(args, "nga_page_delay", DEFAULT_NGA_PAGE_DELAY),
+        False,
     )
 
 
@@ -1519,11 +2868,15 @@ def collect_replies_with_retries(args: argparse.Namespace, author_id: str, count
     cookie = args.cookie or os.getenv("NGA_COOKIE", "")
     if not cookie:
         raise SystemExit("缺少 NGA_COOKIE。请从已登录 bbs.nga.cn 的浏览器会话复制 Cookie。")
-    return with_retries(
-        "NGA 用户回复抓取",
+    return collect_recent_replies(
+        author_id,
+        count,
+        cookie,
+        args.timeout,
         args.retries,
         args.retry_delay,
-        lambda: collect_recent_replies(author_id, count, cookie, args.timeout),
+        getattr(args, "nga_page_delay", DEFAULT_NGA_PAGE_DELAY),
+        True,
     )
 
 
@@ -1531,11 +2884,15 @@ def collect_thread_tail_with_retries(args: argparse.Namespace, tid: str, count: 
     cookie = args.cookie or os.getenv("NGA_COOKIE", "")
     if not cookie:
         raise SystemExit("缺少 NGA_COOKIE。请从已登录 bbs.nga.cn 的浏览器会话复制 Cookie。")
-    return with_retries(
-        "NGA 帖子回复抓取",
+    return collect_thread_tail(
+        tid,
+        count,
+        cookie,
+        args.timeout,
         args.retries,
         args.retry_delay,
-        lambda: collect_thread_tail(tid, count, cookie, args.timeout),
+        getattr(args, "nga_page_delay", DEFAULT_NGA_PAGE_DELAY),
+        True,
     )
 
 
@@ -1551,9 +2908,32 @@ def handle_feishu_commands(args: argparse.Namespace, state: dict[str, Any]) -> b
         message_id = str(message.get("message_id", ""))
         if not message_id or message_id in handled:
             continue
-        text = message_text(message)
+        if is_feishu_bot_message(message):
+            handled.add(message_id)
+            changed = True
+            continue
+        text, image_keys, file_refs = message_parts(message)
+        parent_id = str(message.get("parent_id") or message.get("root_id") or "")
+        root_id = str(message.get("root_id") or "")
+        reply_context, image_refs, file_refs = enrich_reply_context(args, message_id, image_keys, file_refs, parent_id, root_id)
+        sender_id = sender_id_from_message(message)
+        if ai_analysis.parse_ai_command(text) is not None:
+            try:
+                run_ai_command_background(args, text, sender_id, f"飞书消息轮询:{message_id}", message_id, image_refs, file_refs, reply_context)
+            except Exception as exc:
+                if ai_analysis.AIConfig.from_namespace(args).send_errors_to_feishu:
+                    push_feishu_text(args, "AI command failed", str(exc))
+                else:
+                    print(f"AI 命令轮询处理失败: {exc}", file=sys.stderr)
+            handled.add(message_id)
+            changed = True
+            continue
         command = parse_bot_command(text, args.default_author_id, args.default_tid)
         if command is None:
+            if should_forward_plain_text_to_ai(args, text, sender_id, image_keys, file_refs):
+                run_ai_plain_text_background(args, text, sender_id, f"飞书消息轮询:{message_id}", message_id, image_refs, file_refs, reply_context)
+                handled.add(message_id)
+                changed = True
             continue
 
         try:
@@ -1646,6 +3026,7 @@ def run_once(args: argparse.Namespace) -> int:
             print(f"当前处于免打扰时段，已标记 {len(deliver_posts)} 条非免打扰区间旧回复为已读，不纳入汇总。")
         deliver_posts = []
 
+    ai_pushed_posts: list[NgaPost] = []
     for post in new_posts:
         if post not in deliver_posts:
             continue
@@ -1654,6 +3035,10 @@ def run_once(args: argparse.Namespace) -> int:
         else:
             push_to_feishu(args, post)
             seen.add(post.key)
+            ai_pushed_posts.append(post)
+
+    if ai_pushed_posts:
+        after_posts_pushed_for_ai(args, ai_pushed_posts)
 
     if not args.dry_run:
         state["seen"] = sorted(seen)
@@ -1688,6 +3073,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--command-lookback", type=int, default=int(os.getenv("FEISHU_COMMAND_LOOKBACK", "600")))
     parser.add_argument("--retries", type=int, default=int(os.getenv("NGA_RETRIES", "10")))
     parser.add_argument("--retry-delay", type=float, default=float(os.getenv("NGA_RETRY_DELAY", "2")))
+    parser.add_argument("--nga-page-delay", type=float, default=float(os.getenv("NGA_PAGE_DELAY", str(DEFAULT_NGA_PAGE_DELAY))))
     parser.add_argument("--interval", type=int, default=int(os.getenv("NGA_INTERVAL", "60")))
     parser.add_argument("--jitter", type=int, default=int(os.getenv("NGA_JITTER", "20")))
     parser.add_argument("--quiet-hours-enabled", action="store_true", default=os.getenv("NGA_QUIET_HOURS_ENABLED", "").lower() in {"1", "true", "yes", "on"})
@@ -1700,6 +3086,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--once", action="store_true", help="只执行一次轮询后退出。")
     parser.add_argument("--ws", action="store_true", help="使用飞书 WebSocket 接收消息和卡片操作。")
     parser.add_argument("--ws-no-watch", action="store_true", help="在 WebSocket 模式下不启动 NGA 后台监听循环。")
+    ai_analysis.add_cli_arguments(parser)
     return parser.parse_args()
 
 
@@ -1739,6 +3126,7 @@ def main() -> None:
             except Exception as exc:
                 print(f"飞书命令轮询失败: {exc}", file=sys.stderr)
             run_once(args)
+            maybe_run_ai_schedule(args)
         except Exception as exc:
             print(f"错误: {exc}", file=sys.stderr)
             if args.once:

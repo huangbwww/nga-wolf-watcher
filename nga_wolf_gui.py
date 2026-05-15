@@ -62,6 +62,25 @@ DEFAULT_CONFIG = {
     "quiet_start_time": "00:00",
     "quiet_end_time": "00:00",
     "quiet_policy": "ignore",
+    "ai_enabled": False,
+    "ai_provider": "codex",
+    "ai_work_dir": ".ai_agent_workspace",
+    "ai_auto_analyze_new_post": False,
+    "ai_auto_analysis_prompt": "根据最新的 NGA 回复历史、我目前的持仓信息和观察列表，并实时查询公开 A 股行情信息，分析盘面变化、机会与风险，给出接下来需要重点观察的方向和操作建议。",
+    "ai_prompt_file": "",
+    "ai_timeout": "300",
+    "ai_codex_command": "codex",
+    "ai_claude_command": "claude",
+    "ai_custom_command": "",
+    "ai_schedule_enabled": False,
+    "ai_schedule_interval_minutes": "5",
+    "ai_schedule_prompt": "",
+    "ai_schedule_window_mode": "a_share",
+    "ai_schedule_windows": "weekday:09:30-11:30,13:00-15:00",
+    "ai_allowed_user_ids": "",
+    "ai_send_errors_to_feishu": False,
+    "ai_max_feishu_chars": "3500",
+    "ai_upload_long_result": False,
 }
 
 
@@ -277,6 +296,25 @@ def build_args(
         once=False,
         ws=ws,
         ws_no_watch=ws_no_watch,
+        ai_enabled=bool(config.get("ai_enabled", False)),
+        ai_provider=str(config.get("ai_provider") or "codex").strip(),
+        ai_work_dir=str(config.get("ai_work_dir") or ".ai_agent_workspace").strip(),
+        ai_auto_analyze_new_post=bool(config.get("ai_auto_analyze_new_post", False)),
+        ai_auto_analysis_prompt=str(config.get("ai_auto_analysis_prompt") or "").strip(),
+        ai_prompt_file=str(config.get("ai_prompt_file") or "").strip(),
+        ai_history_limit=50,
+        ai_timeout=int_value(config, "ai_timeout", 300),
+        ai_codex_command=str(config.get("ai_codex_command") or "codex").strip(),
+        ai_claude_command=str(config.get("ai_claude_command") or "claude").strip(),
+        ai_custom_command=str(config.get("ai_custom_command") or "").strip(),
+        ai_schedule_enabled=bool(config.get("ai_schedule_enabled", False)),
+        ai_schedule_interval_minutes=int_value(config, "ai_schedule_interval_minutes", 5),
+        ai_schedule_prompt=str(config.get("ai_schedule_prompt") or "").strip(),
+        ai_schedule_windows=str(config.get("ai_schedule_windows") or "weekday:09:30-11:30,13:00-15:00").strip(),
+        ai_allowed_user_ids=str(config.get("ai_allowed_user_ids") or "").strip(),
+        ai_send_errors_to_feishu=bool(config.get("ai_send_errors_to_feishu", False)),
+        ai_max_feishu_chars=int_value(config, "ai_max_feishu_chars", 3500),
+        ai_upload_long_result=bool(config.get("ai_upload_long_result", False)),
     )
 
 
@@ -301,6 +339,9 @@ def validate_config(
         ("retries", "重试次数"),
         ("retry_delay", "重试延迟"),
         ("timeout", "请求超时"),
+        ("ai_timeout", "AI 超时"),
+        ("ai_schedule_interval_minutes", "AI 定时间隔"),
+        ("ai_max_feishu_chars", "AI 飞书最大字符"),
     ]:
         try:
             float_value(config, key, 0)
@@ -325,6 +366,11 @@ def validate_config(
             errors.append("免打扰结束时间必须是 HH:MM")
         if str(config.get("quiet_policy") or "") not in {"ignore", "defer"}:
             errors.append("免打扰处理方式无效")
+    if str(config.get("ai_provider") or "codex") not in {"codex", "claude", "custom"}:
+        errors.append("AI Provider 必须是 codex、claude 或 custom")
+    if bool(config.get("ai_enabled", False)) and str(config.get("ai_provider") or "codex") == "custom":
+        if not str(config.get("ai_custom_command") or "").strip():
+            errors.append("启用 custom AI provider 时必须填写 Custom 命令模板")
     return errors
 
 
@@ -432,6 +478,19 @@ class App:
                 "retry_delay",
                 "timeout",
                 "state_path",
+                "ai_provider",
+                "ai_work_dir",
+                "ai_auto_analysis_prompt",
+                "ai_prompt_file",
+                "ai_timeout",
+                "ai_codex_command",
+                "ai_claude_command",
+                "ai_custom_command",
+                "ai_schedule_interval_minutes",
+                "ai_schedule_prompt",
+                "ai_schedule_windows",
+                "ai_allowed_user_ids",
+                "ai_max_feishu_chars",
             ]
         }
         if not self.vars["feishu_id_type"].get():
@@ -450,6 +509,13 @@ class App:
         self.quiet_end_hour_var = StringVar(value=end_hour)
         self.quiet_end_minute_var = StringVar(value=end_minute)
         self.quiet_policy_var = StringVar(value=str(self.config.get("quiet_policy") or "ignore"))
+        self.ai_enabled_var = BooleanVar(value=bool(self.config.get("ai_enabled", False)))
+        self.ai_auto_var = BooleanVar(value=bool(self.config.get("ai_auto_analyze_new_post", False)))
+        self.ai_schedule_var = BooleanVar(value=bool(self.config.get("ai_schedule_enabled", False)))
+        self.ai_send_errors_var = BooleanVar(value=bool(self.config.get("ai_send_errors_to_feishu", False)))
+        self.ai_upload_long_result_var = BooleanVar(value=bool(self.config.get("ai_upload_long_result", False)))
+        raw_window_mode = str(self.config.get("ai_schedule_window_mode") or "a_share")
+        self.ai_schedule_window_mode_var = StringVar(value="自定义" if raw_window_mode == "custom" else "A股开市时间")
         self.status_var = StringVar(value="未启动")
         self.status_detail_var = StringVar(value="监听服务尚未运行")
         self.action_feedback_var = StringVar(value="准备就绪")
@@ -510,6 +576,7 @@ class App:
         self.build_quick_page()
         self.build_feishu_page()
         self.build_nga_page()
+        self.build_ai_page()
         self.build_log_page()
         self.build_settings_page()
         self.build_global_action_bar()
@@ -556,6 +623,12 @@ class App:
             self.quiet_end_hour_var,
             self.quiet_end_minute_var,
             self.quiet_policy_var,
+            self.ai_enabled_var,
+            self.ai_auto_var,
+            self.ai_schedule_var,
+            self.ai_send_errors_var,
+            self.ai_upload_long_result_var,
+            self.ai_schedule_window_mode_var,
         ]
         for var in variables:
             var.trace_add("write", lambda *_args: self.mark_dirty())
@@ -595,6 +668,7 @@ class App:
             ("quick", "快速开始", "⌂"),
             ("feishu", "飞书配置", "↗"),
             ("nga", "NGA配置", "◎"),
+            ("ai", "AI分析", "AI"),
             ("log", "日志", "□"),
             ("settings", "设置", "⚙"),
         ]
@@ -665,6 +739,12 @@ class App:
         page = self.make_page("nga")
         self.page_title(page, "NGA 配置", "维护 Cookie、默认用户和帖子 ID。", 0)
         self.nga_card(page, 1)
+        self.path_card(page, 2)
+
+    def build_ai_page(self) -> None:
+        page = self.make_page("ai")
+        self.page_title(page, "AI 分析", "可选本地 Agent 增强；默认关闭，不影响原有监听和飞书推送。", 0)
+        self.ai_card(page, 1)
         self.path_card(page, 2)
 
     def build_log_page(self) -> None:
@@ -1103,6 +1183,107 @@ class App:
         )
         tile.grid(row=row, column=column, sticky="ew", padx=(16 if column == 0 else 6, 16 if column == 3 else 6), pady=(4, 16))
 
+    def ai_card(self, parent: ctk.CTkFrame, row: int) -> None:
+        frame = self.card(parent, row)
+        frame.grid_columnconfigure(1, weight=1)
+        self.card_title(frame, "本地 AI Agent")
+        ctk.CTkSwitch(
+            frame,
+            text="启用 AI 分析",
+            variable=self.ai_enabled_var,
+            fg_color="#cbd5e1",
+            progress_color=PRIMARY,
+            button_color="#ffffff",
+            text_color=TEXT,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=16, pady=(6, 8))
+        ctk.CTkSwitch(
+            frame,
+            text="新帖自动分析",
+            variable=self.ai_auto_var,
+            fg_color="#cbd5e1",
+            progress_color=PRIMARY,
+            button_color="#ffffff",
+            text_color=TEXT,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=16, pady=(6, 8))
+        ctk.CTkLabel(frame, text="Provider", anchor="w", text_color=TEXT).grid(row=3, column=0, sticky="w", padx=16, pady=(6, 8))
+        ctk.CTkOptionMenu(
+            frame,
+            variable=self.vars["ai_provider"],
+            values=["codex", "claude", "custom"],
+            height=34,
+            fg_color="#f8fafc",
+            button_color="#e2e8f0",
+            button_hover_color="#cbd5e1",
+            text_color=TEXT,
+        ).grid(row=3, column=1, sticky="ew", padx=(0, 16), pady=(6, 8))
+        fields = [
+            ("自动分析 Prompt", "ai_auto_analysis_prompt"),
+            ("AI 工作目录", "ai_work_dir"),
+            ("AI 超时(秒)", "ai_timeout"),
+            ("Codex 命令", "ai_codex_command"),
+            ("Claude 命令", "ai_claude_command"),
+            ("Custom 命令模板", "ai_custom_command"),
+            ("定时间隔(分钟)", "ai_schedule_interval_minutes"),
+            ("定时 Prompt", "ai_schedule_prompt"),
+            ("允许用户 ID", "ai_allowed_user_ids"),
+            ("飞书最大字符", "ai_max_feishu_chars"),
+        ]
+        for offset, (label, key) in enumerate(fields, start=4):
+            self.add_entry(frame, label, key, offset)
+        window_row = 4 + len(fields)
+        ctk.CTkLabel(frame, text="定时窗口", anchor="w", text_color=TEXT).grid(row=window_row, column=0, sticky="w", padx=16, pady=(6, 8))
+        window_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        window_frame.grid(row=window_row, column=1, sticky="ew", padx=(0, 16), pady=(6, 8))
+        window_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkOptionMenu(
+            window_frame,
+            variable=self.ai_schedule_window_mode_var,
+            values=["A股开市时间", "自定义"],
+            height=34,
+            fg_color="#f8fafc",
+            button_color="#e2e8f0",
+            button_hover_color="#cbd5e1",
+            text_color=TEXT,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ctk.CTkEntry(
+            window_frame,
+            textvariable=self.vars["ai_schedule_windows"],
+            height=34,
+            corner_radius=10,
+            fg_color="#f8fafc",
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
+        ).grid(row=0, column=1, sticky="ew")
+        switch_row = window_row + 1
+        ctk.CTkSwitch(
+            frame,
+            text="启用定时分析",
+            variable=self.ai_schedule_var,
+            fg_color="#cbd5e1",
+            progress_color=PRIMARY,
+            button_color="#ffffff",
+            text_color=TEXT,
+        ).grid(row=switch_row, column=0, columnspan=2, sticky="w", padx=16, pady=(8, 6))
+        ctk.CTkSwitch(
+            frame,
+            text="错误发送到飞书",
+            variable=self.ai_send_errors_var,
+            fg_color="#cbd5e1",
+            progress_color=PRIMARY,
+            button_color="#ffffff",
+            text_color=TEXT,
+        ).grid(row=switch_row + 1, column=0, columnspan=2, sticky="w", padx=16, pady=(6, 6))
+        ctk.CTkSwitch(
+            frame,
+            text="长结果上传文件",
+            variable=self.ai_upload_long_result_var,
+            fg_color="#cbd5e1",
+            progress_color=PRIMARY,
+            button_color="#ffffff",
+            text_color=TEXT,
+        ).grid(row=switch_row + 2, column=0, columnspan=2, sticky="w", padx=16, pady=(6, 16))
+
     def path_card(self, parent: ctk.CTkFrame, row: int) -> None:
         frame = self.card(parent, row)
         frame.grid_columnconfigure(1, weight=1)
@@ -1231,6 +1412,15 @@ class App:
         config["quiet_start_time"] = f"{self.quiet_start_hour_var.get()}:{self.quiet_start_minute_var.get()}"
         config["quiet_end_time"] = f"{self.quiet_end_hour_var.get()}:{self.quiet_end_minute_var.get()}"
         config["quiet_policy"] = self.quiet_policy_var.get()
+        config["ai_enabled"] = self.ai_enabled_var.get()
+        config["ai_auto_analyze_new_post"] = self.ai_auto_var.get()
+        config["ai_schedule_enabled"] = self.ai_schedule_var.get()
+        config["ai_send_errors_to_feishu"] = self.ai_send_errors_var.get()
+        config["ai_upload_long_result"] = self.ai_upload_long_result_var.get()
+        window_mode = "custom" if self.ai_schedule_window_mode_var.get() == "自定义" else "a_share"
+        config["ai_schedule_window_mode"] = window_mode
+        if window_mode == "a_share":
+            config["ai_schedule_windows"] = "weekday:09:30-11:30,13:00-15:00"
         return config
 
     def current_status_text(self) -> str:
