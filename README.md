@@ -105,6 +105,12 @@ Command meanings:
 
 `/pack_r 45974302 10` is accepted as a compatibility alias for packing the default wolf thread.
 
+### Mention Alerts
+
+If you want the bot to @ you in the card when a new wolf reply or a quiet-hour summary arrives, send `/setting` in the Feishu group and click `开启并@我`. The watcher saves the sender id from the button click, then adds that @ to both automatic new-reply cards and quiet-hour summary cards. Click `关闭@提醒` to disable both.
+
+This is one global on/off switch. The mention is embedded in the original card, so the bot does not send an extra message.
+
 ## Advanced Usage
 
 If you only want to use the EXE, you can stop reading here.
@@ -219,6 +225,14 @@ Disable command polling in non-WebSocket mode:
 
 ```powershell
 python .\nga_feishu_watch.py --disable-commands
+```
+
+Mention alerts can also be initialized with environment variables or CLI flags, but the Feishu `/setting` card is preferred because it captures your sender id automatically.
+
+```powershell
+$env:FEISHU_MENTION_ENABLED="true"
+$env:FEISHU_MENTION_USER_ID="ou_xxx"
+python .\nga_feishu_watch.py --feishu-mention-enabled --feishu-mention-user-id ou_xxx
 ```
 
 ### Optional Local AI Agent Enhancement

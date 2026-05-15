@@ -66,6 +66,7 @@ QUOTE_END_MARKER = "__NGA_QUOTE_END__"
 _AI_MANAGERS: dict[tuple[str, str], ai_analysis.AIManager] = {}
 _AI_FEISHU_QUEUES: dict[tuple[str, str], "queue.Queue[Callable[[], None]]"] = {}
 _AI_FEISHU_QUEUE_LOCK = threading.Lock()
+_WATCHER_STATE_LOCK = threading.Lock()
 
 
 class NgaTemporaryUnavailable(RuntimeError):
@@ -174,6 +175,56 @@ def write_json(path: Path, value: Any) -> None:
         json.dump(value, f, ensure_ascii=False, indent=2, sort_keys=True)
         f.write("\n")
     tmp.replace(path)
+
+
+def write_watcher_state(path: Path, state: dict[str, Any]) -> None:
+    with _WATCHER_STATE_LOCK:
+        current = read_json(path, {})
+        if isinstance(current, dict):
+            current_mention_at = int(current.get("mention_updated_at") or 0)
+            state_mention_at = int(state.get("mention_updated_at") or 0)
+            if current_mention_at > state_mention_at or (
+                current_mention_at and not any(key in state for key in ("mention_enabled", "mention_user_id", "mention_updated_at"))
+            ):
+                for key in ("mention_enabled", "mention_user_id", "mention_updated_at"):
+                    if key in current:
+                        state[key] = current[key]
+        write_json(path, state)
+
+
+def effective_mention_enabled(args: argparse.Namespace, state: dict[str, Any]) -> bool:
+    if "mention_enabled" in state:
+        return ai_analysis.bool_value(state.get("mention_enabled"))
+    return ai_analysis.bool_value(getattr(args, "feishu_mention_enabled", False))
+
+
+def effective_mention_user_id(args: argparse.Namespace, state: dict[str, Any]) -> str:
+    return str(state.get("mention_user_id") or getattr(args, "feishu_mention_user_id", "") or "").strip()
+
+
+def feishu_mention_user_id(args: argparse.Namespace, state: dict[str, Any]) -> str:
+    user_id = effective_mention_user_id(args, state)
+    if effective_mention_enabled(args, state) and user_id:
+        return user_id
+    return ""
+
+
+def feishu_mention_md(user_id: str) -> str:
+    safe_user_id = str(user_id or "").strip()
+    return f"<at id={safe_user_id}></at>" if safe_user_id else ""
+
+
+def mention_card_elements(user_id: str) -> list[dict[str, Any]]:
+    mention = feishu_mention_md(user_id)
+    if not mention:
+        return []
+    return [
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": mention},
+        },
+        {"tag": "hr"},
+    ]
 
 
 def parse_hhmm(value: str) -> int:
@@ -710,8 +761,8 @@ def post_card_element(post: NgaPost) -> list[dict[str, Any]]:
     return elements
 
 
-def feishu_posts_card(posts: list[NgaPost], title: str) -> dict[str, Any]:
-    elements: list[dict[str, Any]] = []
+def feishu_posts_card(posts: list[NgaPost], title: str, mention_user_id: str = "") -> dict[str, Any]:
+    elements: list[dict[str, Any]] = mention_card_elements(mention_user_id)
     for idx, post in enumerate(posts[:20]):
         if idx:
             elements.append({"tag": "hr"})
@@ -779,9 +830,9 @@ def feishu_ai_markdown_card(title: str, markdown: str, part: int = 1, total: int
     }
 
 
-def feishu_deferred_summary_card(posts: list[NgaPost], total_count: int) -> dict[str, Any]:
+def feishu_deferred_summary_card(posts: list[NgaPost], total_count: int, mention_user_id: str = "") -> dict[str, Any]:
     shown = posts[:20]
-    elements: list[dict[str, Any]] = [
+    elements: list[dict[str, Any]] = mention_card_elements(mention_user_id) + [
         {
             "tag": "div",
             "text": {
@@ -940,13 +991,14 @@ def push_feishu_app(
     post: NgaPost,
     timeout: int,
     message_format: str = "card",
+    mention_user_id: str = "",
 ) -> None:
     if message_format == "text":
         msg_type = "text"
         content = json.dumps({"text": feishu_message_text(post)}, ensure_ascii=False)
     else:
         msg_type = "interactive"
-        content = json.dumps(feishu_posts_card([post], "NGA new reply"), ensure_ascii=False)
+        content = json.dumps(feishu_posts_card([post], "NGA new reply", mention_user_id), ensure_ascii=False)
     result = feishu_app_request(
         app_id,
         app_secret,
@@ -1483,16 +1535,35 @@ def is_feishu_bot_message(message: dict[str, Any]) -> bool:
     return sender_type in {"app", "bot"}
 
 
+def value_get(value: Any, key: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(key)
+    return getattr(value, key, None)
+
+
+def identity_id(value: Any) -> str:
+    if value is None:
+        return ""
+    for key in ("open_id", "user_id", "union_id"):
+        found = value_get(value, key)
+        if isinstance(found, (str, int)) and str(found).strip():
+            return str(found).strip()
+    for nested_key in ("sender_id", "operator_id", "user", "user_id"):
+        nested = value_get(value, nested_key)
+        if nested is value:
+            continue
+        found = identity_id(nested)
+        if found:
+            return found
+    return ""
+
+
 def object_sender_id(value: Any) -> str:
     for owner_name in ("sender", "operator"):
-        owner = getattr(value, owner_name, None)
-        sender_id = getattr(owner, "sender_id", None) if owner is not None else None
-        if sender_id is None:
-            continue
-        for key in ("open_id", "user_id", "union_id"):
-            found = getattr(sender_id, key, "")
-            if found:
-                return str(found)
+        found = identity_id(value_get(value, owner_name))
+        if found:
+            return found
+    return identity_id(value)
     return ""
 
 
@@ -1693,13 +1764,14 @@ def push_feishu_app_posts(
     title: str,
     timeout: int,
     message_format: str = "card",
+    mention_user_id: str = "",
 ) -> None:
     if message_format == "text":
         msg_type = "text"
         content = json.dumps({"text": feishu_history_text(posts, title)}, ensure_ascii=False)
     else:
         msg_type = "interactive"
-        content = json.dumps(feishu_posts_card(posts, title), ensure_ascii=False)
+        content = json.dumps(feishu_posts_card(posts, title, mention_user_id), ensure_ascii=False)
     result = feishu_app_request(
         app_id,
         app_secret,
@@ -2222,7 +2294,7 @@ def command_form_card(command: str, target_id: str, count: str) -> dict[str, Any
     }
 
 
-def ai_settings_card(manager: ai_analysis.AIManager) -> dict[str, Any]:
+def ai_settings_card(manager: ai_analysis.AIManager, mention_enabled: bool = False, mention_user_id: str = "") -> dict[str, Any]:
     effective = manager.effective_config()
     state = manager.read_state()
     current_mode = manager.effective_permission_mode()
@@ -2243,7 +2315,9 @@ def ai_settings_card(manager: ai_analysis.AIManager) -> dict[str, Any]:
                         f"定时分析：`{'开' if effective.schedule_enabled else '关'}`\n"
                         f"定时间隔：`{effective.schedule_interval_minutes}` 分钟\n"
                         f"时间窗口：`{effective.schedule_windows}`\n"
-                        f"权限模式：`{manager.effective_permission_mode()}`"
+                        f"权限模式：`{manager.effective_permission_mode()}`\n"
+                        f"@提醒：`{'开' if mention_enabled else '关'}`"
+                        f"{f' | 当前对象：`{mention_user_id}`' if mention_user_id else ''}"
                     ),
                 },
                 callback_action_row(
@@ -2257,6 +2331,10 @@ def ai_settings_card(manager: ai_analysis.AIManager) -> dict[str, Any]:
                 callback_action_row(
                     callback_button("定时分析开", "set_ai_schedule", "primary" if effective.schedule_enabled else "default", enabled=True),
                     callback_button("定时分析关", "set_ai_schedule", "primary" if not effective.schedule_enabled else "default", enabled=False),
+                ),
+                callback_action_row(
+                    callback_button("开启并@我", "set_mention_me", "primary" if mention_enabled else "default"),
+                    callback_button("关闭@提醒", "disable_mention", "primary" if not mention_enabled else "default"),
                 ),
                 {"tag": "hr"},
                 {
@@ -2427,12 +2505,22 @@ def args_for_chat(args: argparse.Namespace, chat_id: str) -> argparse.Namespace:
     return cloned
 
 
+def settings_card_for_args(args: argparse.Namespace, manager: ai_analysis.AIManager) -> dict[str, Any]:
+    state = read_json(Path(args.state_path), {})
+    return ai_settings_card(
+        manager,
+        mention_enabled=effective_mention_enabled(args, state),
+        mention_user_id=effective_mention_user_id(args, state),
+    )
+
+
 def run_bot_command(args: argparse.Namespace, command: BotCommand) -> None:
     if command.action == "start":
         push_feishu_card(args, start_form_card(args.default_author_id, args.default_tid))
         return
     if command.action == "setting":
-        push_feishu_card(args, ai_settings_card(ai_manager_for_args(args)))
+        manager = ai_manager_for_args(args)
+        push_feishu_card(args, settings_card_for_args(args, manager))
         return
 
     if command.target_type == "reply":
@@ -2508,7 +2596,7 @@ def card_action_chat_id(event: Any, fallback: str) -> str:
 
 def card_action_sender_id(event: Any) -> str:
     event_body = getattr(event, "event", None)
-    return object_sender_id(event_body)
+    return object_sender_id(event_body) or object_sender_id(event)
 
 
 def start_ws(args: argparse.Namespace) -> None:
@@ -2568,27 +2656,46 @@ def start_ws(args: argparse.Namespace) -> None:
             if action == "open_fetch_menu":
                 return card_response(start_form_card(args.default_author_id, args.default_tid, show_back=True), "已打开拉取信息")
             if action == "open_settings":
-                return card_response(ai_settings_card(manager), "已打开设置")
+                return card_response(settings_card_for_args(scoped_args, manager), "已打开设置")
             if action == "open_mode_settings":
                 return card_response(ai_mode_card(manager, back_action="open_settings"), "已打开权限设置")
+            if action == "set_mention_me":
+                if not sender_id:
+                    return card_response(None, "无法识别当前飞书用户。", "error")
+                state_path = Path(scoped_args.state_path)
+                state = read_json(state_path, {})
+                state["mention_enabled"] = True
+                state["mention_user_id"] = sender_id
+                state["mention_updated_at"] = int(time.time())
+                write_watcher_state(state_path, state)
+                print(f"已开启飞书 @ 提醒：{sender_id}")
+                return card_response(settings_card_for_args(scoped_args, manager), "@提醒已开启")
+            if action == "disable_mention":
+                state_path = Path(scoped_args.state_path)
+                state = read_json(state_path, {})
+                state["mention_enabled"] = False
+                state["mention_updated_at"] = int(time.time())
+                write_watcher_state(state_path, state)
+                print("已关闭飞书 @ 提醒")
+                return card_response(settings_card_for_args(scoped_args, manager), "@提醒已关闭")
             if action == "set_ai_enabled":
                 if not manager.is_authorized(sender_id):
                     return card_response(None, "AI command rejected: sender is not authorized.", "error")
                 enabled = ai_analysis.bool_value(form.get("enabled"))
                 manager.handle_command("/ai on" if enabled else "/ai off", sender_id)
-                return card_response(ai_settings_card(manager), "AI 已开启" if enabled else "AI 已关闭")
+                return card_response(settings_card_for_args(scoped_args, manager), "AI 已开启" if enabled else "AI 已关闭")
             if action == "set_ai_auto":
                 if not manager.is_authorized(sender_id):
                     return card_response(None, "AI command rejected: sender is not authorized.", "error")
                 enabled = ai_analysis.bool_value(form.get("enabled"))
                 manager.handle_command("/ai auto on" if enabled else "/ai auto off", sender_id)
-                return card_response(ai_settings_card(manager), "自动分析已开启" if enabled else "自动分析已关闭")
+                return card_response(settings_card_for_args(scoped_args, manager), "自动分析已开启" if enabled else "自动分析已关闭")
             if action == "set_ai_schedule":
                 if not manager.is_authorized(sender_id):
                     return card_response(None, "AI command rejected: sender is not authorized.", "error")
                 enabled = ai_analysis.bool_value(form.get("enabled"))
                 manager.handle_command("/ai schedule on" if enabled else "/ai schedule off", sender_id)
-                return card_response(ai_settings_card(manager), "定时分析已开启" if enabled else "定时分析已关闭")
+                return card_response(settings_card_for_args(scoped_args, manager), "定时分析已开启" if enabled else "定时分析已关闭")
             if action == "save_ai_settings":
                 if not manager.is_authorized(sender_id):
                     return card_response(None, "AI command rejected: sender is not authorized.", "error")
@@ -2605,7 +2712,7 @@ def start_ws(args: argparse.Namespace) -> None:
                     manager.handle_command(f"/ai schedule windows {windows}", sender_id)
                 manager.handle_command(f"/ai schedule prompt {schedule_prompt}", sender_id)
                 manager.handle_command(f"/ai auto prompt {auto_prompt}", sender_id)
-                return card_response(ai_settings_card(manager), "AI 设置已保存")
+                return card_response(settings_card_for_args(scoped_args, manager), "AI 设置已保存")
             if action == "set_ai_mode":
                 mode = str(form.get("mode") or "")
                 if not manager.is_authorized(sender_id):
@@ -2682,6 +2789,8 @@ def send_test_message(args: argparse.Namespace) -> None:
 def push_deferred_summary(args: argparse.Namespace, posts: list[NgaPost]) -> None:
     if not posts:
         return
+    state = read_json(Path(args.state_path), {})
+    mention_user_id = feishu_mention_user_id(args, state)
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     webhook = args.webhook or os.getenv("FEISHU_WEBHOOK", "")
     secret = args.secret or os.getenv("FEISHU_SECRET")
@@ -2697,7 +2806,7 @@ def push_deferred_summary(args: argparse.Namespace, posts: list[NgaPost]) -> Non
                 app_secret,
                 receive_id,
                 receive_id_type,
-                feishu_deferred_summary_card(posts, len(posts)),
+                feishu_deferred_summary_card(posts, len(posts), mention_user_id),
                 args.timeout,
             )
         return
@@ -2713,7 +2822,7 @@ def push_deferred_summary(args: argparse.Namespace, posts: list[NgaPost]) -> Non
     push_feishu(webhook, secret, summary, args.timeout)
 
 
-def push_to_feishu(args: argparse.Namespace, post: NgaPost) -> None:
+def push_to_feishu(args: argparse.Namespace, post: NgaPost, mention_user_id: str = "") -> None:
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     webhook = args.webhook or os.getenv("FEISHU_WEBHOOK", "")
     secret = args.secret or os.getenv("FEISHU_SECRET")
@@ -2721,7 +2830,7 @@ def push_to_feishu(args: argparse.Namespace, post: NgaPost) -> None:
     if app_id or app_secret or receive_id:
         if not (app_id and app_secret and receive_id):
             raise SystemExit("缺少 FEISHU_APP_ID、FEISHU_APP_SECRET 或 FEISHU_RECEIVE_ID。")
-        push_feishu_app(app_id, app_secret, receive_id, receive_id_type, post, args.timeout, args.message_format)
+        push_feishu_app(app_id, app_secret, receive_id, receive_id_type, post, args.timeout, args.message_format, mention_user_id)
         return
 
     if not webhook:
@@ -2973,6 +3082,7 @@ def run_once(args: argparse.Namespace) -> int:
     state_path = Path(args.state_path)
     state = read_json(state_path, {"seen": []})
     seen = set(state.get("seen", []))
+    mention_user_id = feishu_mention_user_id(args, state)
 
     posts = collect_posts_with_retries(args)
     if args.mark_seen:
@@ -2980,7 +3090,7 @@ def run_once(args: argparse.Namespace) -> int:
             seen.add(post.key)
         state["seen"] = sorted(seen)
         state["updated_at"] = int(time.time())
-        write_json(state_path, state)
+        write_watcher_state(state_path, state)
         print(f"已标记 {len(posts)} 条已抓取回复为已读。")
         return len(posts)
 
@@ -3015,7 +3125,7 @@ def run_once(args: argparse.Namespace) -> int:
             state.pop("deferred_updated_at", None)
             state["seen"] = sorted(seen)
             state["updated_at"] = int(time.time())
-            write_json(state_path, state)
+            write_watcher_state(state_path, state)
             print(f"已推送免打扰期间新回复汇总：{len(deferred_posts)} 条。")
     elif deliver_posts:
         for post in deliver_posts:
@@ -3033,7 +3143,7 @@ def run_once(args: argparse.Namespace) -> int:
         if args.dry_run:
             print(f"[试运行] {post.subject} {post.url}\n{post.content[:500]}\n")
         else:
-            push_to_feishu(args, post)
+            push_to_feishu(args, post, mention_user_id)
             seen.add(post.key)
             ai_pushed_posts.append(post)
 
@@ -3043,7 +3153,7 @@ def run_once(args: argparse.Namespace) -> int:
     if not args.dry_run:
         state["seen"] = sorted(seen)
         state["updated_at"] = int(time.time())
-        write_json(state_path, state)
+        write_watcher_state(state_path, state)
     pushed_count = 0 if quiet_now else len(deliver_posts)
     print(f"已抓取 {len(posts)} 条回复，已推送 {pushed_count} 条新回复。")
     return len(new_posts)
@@ -3069,6 +3179,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--list-feishu-chats", action="store_true", help="列出飞书机器人可见的群组。")
     parser.add_argument("--send-test", action="store_true", help="发送一条飞书测试消息后退出。")
     parser.add_argument("--message-format", choices=["card", "text"], default=os.getenv("FEISHU_MESSAGE_FORMAT", "card"))
+    parser.add_argument(
+        "--feishu-mention-enabled",
+        "--mention-enabled",
+        dest="feishu_mention_enabled",
+        action="store_true",
+        default=ai_analysis.env_bool("FEISHU_MENTION_ENABLED", False),
+        help="在自动新回复和免打扰汇总卡片中 @ 指定飞书用户。",
+    )
+    parser.add_argument(
+        "--feishu-mention-user-id",
+        "--mention-user-id",
+        dest="feishu_mention_user_id",
+        default=os.getenv("FEISHU_MENTION_USER_ID", ""),
+        help="卡片 @ 的飞书用户 ID。通常通过 /setting 卡片点击“开启并@我”自动保存。",
+    )
     parser.add_argument("--disable-commands", action="store_true", help="不轮询飞书群组普通消息命令。")
     parser.add_argument("--command-lookback", type=int, default=int(os.getenv("FEISHU_COMMAND_LOOKBACK", "600")))
     parser.add_argument("--retries", type=int, default=int(os.getenv("NGA_RETRIES", "10")))
@@ -3122,7 +3247,7 @@ def main() -> None:
             state = read_json(state_path, {"seen": []})
             try:
                 if handle_feishu_commands(args, state):
-                    write_json(state_path, state)
+                    write_watcher_state(state_path, state)
             except Exception as exc:
                 print(f"飞书命令轮询失败: {exc}", file=sys.stderr)
             run_once(args)
