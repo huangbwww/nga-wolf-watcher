@@ -690,7 +690,7 @@ class App:
 
         ctk.CTkLabel(
             sidebar,
-            text="NGA Wolf Watcher\nv1.0.4",
+            text="NGA Wolf Watcher\nv1.0.5",
             justify="left",
             anchor="w",
             font=ctk.CTkFont(size=11),

@@ -107,9 +107,15 @@ Command meanings:
 
 ### Mention Alerts
 
-If you want the bot to @ you in the card when a new wolf reply or a quiet-hour summary arrives, send `/setting` in the Feishu group and click `开启并@我`. The watcher saves the sender id from the button click, then adds that @ to both automatic new-reply cards and quiet-hour summary cards. Click `关闭@提醒` to disable both.
+If you want the bot to @ you in the card when a new wolf reply or a quiet-hour summary arrives:
 
-This is one global on/off switch. The mention is embedded in the original card, so the bot does not send an extra message.
+1. Send `/setting` in the Feishu group to open the settings card.
+2. Click `开启并@我`.
+3. The watcher saves the sender id from that button click, so you do not need to look up a user id manually.
+4. Future automatic new-reply cards and quiet-hour summary cards will include that @ at the top.
+5. To disable it, open `/setting` again and click `关闭@提醒`.
+
+This is one global on/off switch. The mention is embedded in the original card, so the bot does not send an extra message. The setting is persisted in the runtime state file and remains active after restarting the watcher.
 
 ## Advanced Usage
 
