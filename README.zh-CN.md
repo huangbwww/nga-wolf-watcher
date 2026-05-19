@@ -272,7 +272,17 @@ $env:AI_CUSTOM_COMMAND = 'python D:\agents\run_agent.py --work-dir {work_dir} --
 python .\nga_feishu_watch.py --ws
 ```
 
-custom command 支持占位符：`{work_dir}`、`{prompt_file}`、`{output_file}`、`{task_type}`、`{latest_event}`、`{history_file}`、`{session_id}`、`{image_files}`、`{file_files}`、`{permission_mode}`。
+custom command 支持占位符：`{work_dir}`、`{prompt_file}`、`{output_file}`、`{task_type}`、`{latest_event}`、`{history_file}`、`{session_id}`、`{image_files}`、`{file_files}`、`{permission_mode}`、`{model}`、`{reasoning_effort}`。
+
+模型和思考强度：
+
+- GUI 里的“默认模型”和“默认思考强度”是启动默认值，留空或 `default` 表示不指定，使用 agent 自己的默认。
+- 飞书 `/setting` 卡片里的模型/思考强度是运行时覆盖，点“恢复默认模型/强度”会回到 GUI/启动默认值。
+- Codex 下拉模型：`gpt-5.5`、`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.3-codex`、`gpt-5.3-codex-spark`、`gpt-5.2`；思考强度：`low`、`medium`、`high`、`xhigh`。
+- Claude 下拉模型：`default`、`sonnet[1m]`、`opus[1m]`、`haiku`；思考强度：`low`、`medium`、`high`、`xhigh`、`max`。
+- Codex 会把模型传给 `codex exec --model <model>`，把思考强度通过 Codex 配置覆盖传入。
+- Claude Code 会把模型传给 `claude --model <model>`，把思考强度传给 `--effort <level>`。
+- custom command 只保存并暴露 `{model}`、`{reasoning_effort}`，是否生效取决于你的命令模板是否使用这些占位符。
 
 新帖自动分析：
 
@@ -309,6 +319,12 @@ $env:AI_SCHEDULE_WINDOWS = 'weekday:09:30-11:30,13:00-15:00'
 /mode
 /mode yolo
 /ai mode full-auto
+/model
+/model auto
+/model gpt-5.4
+/reasoning
+/reasoning default
+/reasoning high
 /ai auto on
 /ai auto off
 /ai latest
@@ -339,6 +355,15 @@ AI_TIMEOUT=300
 AI_CODEX_COMMAND=codex
 AI_CLAUDE_COMMAND=claude
 AI_CUSTOM_COMMAND=
+AI_MODEL=
+AI_CODEX_MODEL=
+AI_CLAUDE_MODEL=
+AI_CUSTOM_MODEL=
+AI_REASONING_EFFORT=
+AI_CODEX_REASONING_EFFORT=
+AI_CLAUDE_EFFORT=
+AI_CUSTOM_REASONING_EFFORT=
+AI_IGNORE_CODEX_USER_CONFIG=true
 AI_SCHEDULE_ENABLED=false
 AI_SCHEDULE_INTERVAL_MINUTES=5
 AI_SCHEDULE_PROMPT=

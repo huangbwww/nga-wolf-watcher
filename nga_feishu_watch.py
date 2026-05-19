@@ -2299,6 +2299,41 @@ def ai_settings_card(manager: ai_analysis.AIManager, mention_enabled: bool = Fal
     state = manager.read_state()
     current_mode = manager.effective_permission_mode()
     mode_options = ai_analysis.permission_mode_options(manager.config.provider)
+    current_model = manager.effective_model()
+    current_reasoning = manager.effective_reasoning_effort()
+    runtime_model = "model" in state
+    runtime_reasoning = "reasoning_effort" in state
+    model_choices = ["default", "auto", *ai_analysis.model_options(manager.config.provider)]
+    reasoning_choices = ["default", *ai_analysis.reasoning_effort_options(manager.config.provider)]
+    if manager.config.provider in {"codex", "claude"}:
+        model_control = {
+            "tag": "select_static",
+            "name": "model",
+            "placeholder": {"tag": "plain_text", "content": f"当前：{current_model or 'auto'}"},
+            "options": [{"text": {"tag": "plain_text", "content": item}, "value": item} for item in model_choices],
+        }
+        reasoning_control = {
+            "tag": "select_static",
+            "name": "reasoning_effort",
+            "placeholder": {"tag": "plain_text", "content": f"当前：{current_reasoning or 'default'}"},
+            "options": [
+                {"text": {"tag": "plain_text", "content": ai_analysis.reasoning_effort_label(manager.config.provider, item)}, "value": item}
+                for item in reasoning_choices
+            ],
+        }
+    else:
+        model_control = {
+            "tag": "input",
+            "name": "model",
+            "placeholder": {"tag": "plain_text", "content": "自定义模型名；留空为 auto"},
+            "default_value": current_model,
+        }
+        reasoning_control = {
+            "tag": "input",
+            "name": "reasoning_effort",
+            "placeholder": {"tag": "plain_text", "content": "自定义思考强度；留空为 default"},
+            "default_value": current_reasoning,
+        }
     schedule_prompt = str(state.get("schedule_prompt") or effective.schedule_prompt or ai_analysis.DEFAULT_SCHEDULED_ANALYSIS_PROMPT)
     auto_prompt = str(state.get("auto_analysis_prompt") or effective.auto_analysis_prompt or ai_analysis.DEFAULT_AUTO_ANALYSIS_PROMPT)
     return {
@@ -2316,6 +2351,8 @@ def ai_settings_card(manager: ai_analysis.AIManager, mention_enabled: bool = Fal
                         f"定时间隔：`{effective.schedule_interval_minutes}` 分钟\n"
                         f"时间窗口：`{effective.schedule_windows}`\n"
                         f"权限模式：`{manager.effective_permission_mode()}`\n"
+                        f"模型：`{current_model or 'auto'}`{'（运行时）' if runtime_model else '（默认）'}\n"
+                        f"思考强度：`{current_reasoning or 'default'}`{'（运行时）' if runtime_reasoning else '（默认）'}\n"
                         f"@提醒：`{'开' if mention_enabled else '关'}`"
                         f"{f' | 当前对象：`{mention_user_id}`' if mention_user_id else ''}"
                     ),
@@ -2336,6 +2373,9 @@ def ai_settings_card(manager: ai_analysis.AIManager, mention_enabled: bool = Fal
                     callback_button("开启并@我", "set_mention_me", "primary" if mention_enabled else "default"),
                     callback_button("关闭@提醒", "disable_mention", "primary" if not mention_enabled else "default"),
                 ),
+                callback_action_row(
+                    callback_button("恢复默认模型/强度", "reset_ai_model_config"),
+                ),
                 {"tag": "hr"},
                 {
                     "tag": "form",
@@ -2354,6 +2394,16 @@ def ai_settings_card(manager: ai_analysis.AIManager, mention_enabled: bool = Fal
                                 for mode, _desc in mode_options
                             ],
                         },
+                        {
+                            "tag": "markdown",
+                            "content": "**模型**\nCodex/Claude 使用下拉选择；`default` 回到 GUI/启动默认值，`auto` 表示本次运行时不指定模型。",
+                        },
+                        model_control,
+                        {
+                            "tag": "markdown",
+                            "content": "**思考强度**\nCodex: `low/medium/high/xhigh`；Claude: `low/medium/high/xhigh/max`；`default` 使用默认。",
+                        },
+                        reasoning_control,
                         {
                             "tag": "markdown",
                             "content": "**定时分析频率（分钟）**\n每隔多少分钟在命中时间窗口时触发一次定时分析。",
@@ -2678,6 +2728,11 @@ def start_ws(args: argparse.Namespace) -> None:
                 write_watcher_state(state_path, state)
                 print("已关闭飞书 @ 提醒")
                 return card_response(settings_card_for_args(scoped_args, manager), "@提醒已关闭")
+            if action == "reset_ai_model_config":
+                if not manager.is_authorized(sender_id):
+                    return card_response(None, "AI command rejected: sender is not authorized.", "error")
+                manager.clear_runtime_model_config()
+                return card_response(settings_card_for_args(scoped_args, manager), "已恢复默认模型/强度")
             if action == "set_ai_enabled":
                 if not manager.is_authorized(sender_id):
                     return card_response(None, "AI command rejected: sender is not authorized.", "error")
@@ -2704,8 +2759,14 @@ def start_ws(args: argparse.Namespace) -> None:
                 schedule_prompt = str(form.get("schedule_prompt") or "").strip()
                 auto_prompt = str(form.get("auto_prompt") or "").strip()
                 mode = str(form.get("permission_mode") or "").strip()
+                model = str(form.get("model") or "").strip()
+                reasoning_effort = str(form.get("reasoning_effort") or "").strip()
                 if mode:
                     manager.handle_command(f"/mode {mode}", sender_id)
+                if "model" in form:
+                    manager.handle_command(f"/model {model or 'auto'}", sender_id)
+                if "reasoning_effort" in form:
+                    manager.handle_command(f"/reasoning {reasoning_effort or 'default'}", sender_id)
                 if interval:
                     manager.handle_command(f"/ai schedule every {interval}", sender_id)
                 if windows:

@@ -15,6 +15,7 @@ from typing import Callable
 
 import customtkinter as ctk
 
+import ai_analysis
 import nga_feishu_watch
 
 
@@ -72,6 +73,9 @@ DEFAULT_CONFIG = {
     "ai_codex_command": "codex",
     "ai_claude_command": "claude",
     "ai_custom_command": "",
+    "ai_model": "",
+    "ai_reasoning_effort": "default",
+    "ai_ignore_codex_user_config": True,
     "ai_schedule_enabled": False,
     "ai_schedule_interval_minutes": "5",
     "ai_schedule_prompt": "",
@@ -307,6 +311,9 @@ def build_args(
         ai_codex_command=str(config.get("ai_codex_command") or "codex").strip(),
         ai_claude_command=str(config.get("ai_claude_command") or "claude").strip(),
         ai_custom_command=str(config.get("ai_custom_command") or "").strip(),
+        ai_model=str(config.get("ai_model") or "").strip(),
+        ai_reasoning_effort=str(config.get("ai_reasoning_effort") or "").strip(),
+        ai_ignore_codex_user_config=bool(config.get("ai_ignore_codex_user_config", True)),
         ai_schedule_enabled=bool(config.get("ai_schedule_enabled", False)),
         ai_schedule_interval_minutes=int_value(config, "ai_schedule_interval_minutes", 5),
         ai_schedule_prompt=str(config.get("ai_schedule_prompt") or "").strip(),
@@ -366,9 +373,14 @@ def validate_config(
             errors.append("免打扰结束时间必须是 HH:MM")
         if str(config.get("quiet_policy") or "") not in {"ignore", "defer"}:
             errors.append("免打扰处理方式无效")
-    if str(config.get("ai_provider") or "codex") not in {"codex", "claude", "custom"}:
+    provider = str(config.get("ai_provider") or "codex")
+    if provider not in {"codex", "claude", "custom"}:
         errors.append("AI Provider 必须是 codex、claude 或 custom")
-    if bool(config.get("ai_enabled", False)) and str(config.get("ai_provider") or "codex") == "custom":
+    effort = str(config.get("ai_reasoning_effort") or "").strip().lower()
+    if provider != "custom" and effort and not ai_analysis.is_valid_reasoning_effort(effort, provider):
+        values = "、".join(["default", *ai_analysis.reasoning_effort_options(provider)])
+        errors.append(f"AI 思考强度必须是 {values}")
+    if bool(config.get("ai_enabled", False)) and provider == "custom":
         if not str(config.get("ai_custom_command") or "").strip():
             errors.append("启用 custom AI provider 时必须填写 Custom 命令模板")
     return errors
@@ -486,6 +498,8 @@ class App:
                 "ai_codex_command",
                 "ai_claude_command",
                 "ai_custom_command",
+                "ai_model",
+                "ai_reasoning_effort",
                 "ai_schedule_interval_minutes",
                 "ai_schedule_prompt",
                 "ai_schedule_windows",
@@ -514,6 +528,7 @@ class App:
         self.ai_schedule_var = BooleanVar(value=bool(self.config.get("ai_schedule_enabled", False)))
         self.ai_send_errors_var = BooleanVar(value=bool(self.config.get("ai_send_errors_to_feishu", False)))
         self.ai_upload_long_result_var = BooleanVar(value=bool(self.config.get("ai_upload_long_result", False)))
+        self.ai_ignore_codex_user_config_var = BooleanVar(value=bool(self.config.get("ai_ignore_codex_user_config", True)))
         raw_window_mode = str(self.config.get("ai_schedule_window_mode") or "a_share")
         self.ai_schedule_window_mode_var = StringVar(value="自定义" if raw_window_mode == "custom" else "A股开市时间")
         self.status_var = StringVar(value="未启动")
@@ -537,6 +552,10 @@ class App:
         self.global_save_button: ctk.CTkButton
         self.save_state_label: ctk.CTkLabel
         self.minute_picker: ctk.CTkToplevel | None = None
+        self.ai_model_menu: ctk.CTkOptionMenu | None = None
+        self.ai_model_entry: ctk.CTkEntry | None = None
+        self.ai_reasoning_menu: ctk.CTkOptionMenu | None = None
+        self.ai_reasoning_entry: ctk.CTkEntry | None = None
 
         self.build_ui()
         self.poll_logs()
@@ -627,6 +646,7 @@ class App:
             self.ai_auto_var,
             self.ai_schedule_var,
             self.ai_send_errors_var,
+            self.ai_ignore_codex_user_config_var,
             self.ai_upload_long_result_var,
             self.ai_schedule_window_mode_var,
         ]
@@ -690,7 +710,7 @@ class App:
 
         ctk.CTkLabel(
             sidebar,
-            text="NGA Wolf Watcher\nv1.0.5",
+            text="NGA Wolf Watcher\nv1.0.6",
             justify="left",
             anchor="w",
             font=ctk.CTkFont(size=11),
@@ -1215,7 +1235,60 @@ class App:
             button_color="#e2e8f0",
             button_hover_color="#cbd5e1",
             text_color=TEXT,
+            command=lambda _value: self.update_ai_model_controls(),
         ).grid(row=3, column=1, sticky="ew", padx=(0, 16), pady=(6, 8))
+        ctk.CTkLabel(frame, text="默认模型", anchor="w", text_color=TEXT).grid(row=4, column=0, sticky="w", padx=16, pady=(6, 8))
+        self.ai_model_menu = ctk.CTkOptionMenu(
+            frame,
+            variable=self.vars["ai_model"],
+            values=["default"],
+            height=34,
+            fg_color="#f8fafc",
+            button_color="#e2e8f0",
+            button_hover_color="#cbd5e1",
+            text_color=TEXT,
+        )
+        self.ai_model_entry = ctk.CTkEntry(
+            frame,
+            textvariable=self.vars["ai_model"],
+            height=34,
+            corner_radius=10,
+            fg_color="#f8fafc",
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
+        )
+        ctk.CTkLabel(frame, text="默认思考强度", anchor="w", text_color=TEXT).grid(row=5, column=0, sticky="w", padx=16, pady=(6, 8))
+        self.ai_reasoning_menu = ctk.CTkOptionMenu(
+            frame,
+            variable=self.vars["ai_reasoning_effort"],
+            values=["default"],
+            height=34,
+            fg_color="#f8fafc",
+            button_color="#e2e8f0",
+            button_hover_color="#cbd5e1",
+            text_color=TEXT,
+        )
+        self.ai_reasoning_entry = ctk.CTkEntry(
+            frame,
+            textvariable=self.vars["ai_reasoning_effort"],
+            height=34,
+            corner_radius=10,
+            fg_color="#f8fafc",
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
+        )
+        self.update_ai_model_controls()
+        ctk.CTkSwitch(
+            frame,
+            text="忽略 Codex 用户配置",
+            variable=self.ai_ignore_codex_user_config_var,
+            fg_color="#cbd5e1",
+            progress_color=PRIMARY,
+            button_color="#ffffff",
+            text_color=TEXT,
+        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=16, pady=(6, 8))
         fields = [
             ("自动分析 Prompt", "ai_auto_analysis_prompt"),
             ("AI 工作目录", "ai_work_dir"),
@@ -1228,9 +1301,9 @@ class App:
             ("允许用户 ID", "ai_allowed_user_ids"),
             ("飞书最大字符", "ai_max_feishu_chars"),
         ]
-        for offset, (label, key) in enumerate(fields, start=4):
+        for offset, (label, key) in enumerate(fields, start=7):
             self.add_entry(frame, label, key, offset)
-        window_row = 4 + len(fields)
+        window_row = 7 + len(fields)
         ctk.CTkLabel(frame, text="定时窗口", anchor="w", text_color=TEXT).grid(row=window_row, column=0, sticky="w", padx=16, pady=(6, 8))
         window_frame = ctk.CTkFrame(frame, fg_color="transparent")
         window_frame.grid(row=window_row, column=1, sticky="ew", padx=(0, 16), pady=(6, 8))
@@ -1283,6 +1356,36 @@ class App:
             button_color="#ffffff",
             text_color=TEXT,
         ).grid(row=switch_row + 2, column=0, columnspan=2, sticky="w", padx=16, pady=(6, 16))
+
+    def update_ai_model_controls(self) -> None:
+        provider = str(self.vars.get("ai_provider").get() if "ai_provider" in self.vars else "codex").strip().lower()
+        if provider in {"codex", "claude"}:
+            model_values = ["default", "auto", *ai_analysis.model_options(provider)]
+            reasoning_values = ["default", *ai_analysis.reasoning_effort_options(provider)]
+            if self.ai_model_menu is not None:
+                self.ai_model_menu.configure(values=model_values)
+                self.ai_model_menu.grid(row=4, column=1, sticky="ew", padx=(0, 16), pady=(6, 8))
+            if self.ai_model_entry is not None:
+                self.ai_model_entry.grid_forget()
+            if self.ai_reasoning_menu is not None:
+                self.ai_reasoning_menu.configure(values=reasoning_values)
+                self.ai_reasoning_menu.grid(row=5, column=1, sticky="ew", padx=(0, 16), pady=(6, 8))
+            if self.ai_reasoning_entry is not None:
+                self.ai_reasoning_entry.grid_forget()
+            if not self.vars["ai_model"].get().strip() or self.vars["ai_model"].get().strip() not in model_values:
+                self.vars["ai_model"].set("default")
+            if not self.vars["ai_reasoning_effort"].get().strip() or self.vars["ai_reasoning_effort"].get().strip() not in reasoning_values:
+                self.vars["ai_reasoning_effort"].set("default")
+            return
+
+        if self.ai_model_menu is not None:
+            self.ai_model_menu.grid_forget()
+        if self.ai_reasoning_menu is not None:
+            self.ai_reasoning_menu.grid_forget()
+        if self.ai_model_entry is not None:
+            self.ai_model_entry.grid(row=4, column=1, sticky="ew", padx=(0, 16), pady=(6, 8))
+        if self.ai_reasoning_entry is not None:
+            self.ai_reasoning_entry.grid(row=5, column=1, sticky="ew", padx=(0, 16), pady=(6, 8))
 
     def path_card(self, parent: ctk.CTkFrame, row: int) -> None:
         frame = self.card(parent, row)
@@ -1417,6 +1520,7 @@ class App:
         config["ai_schedule_enabled"] = self.ai_schedule_var.get()
         config["ai_send_errors_to_feishu"] = self.ai_send_errors_var.get()
         config["ai_upload_long_result"] = self.ai_upload_long_result_var.get()
+        config["ai_ignore_codex_user_config"] = self.ai_ignore_codex_user_config_var.get()
         window_mode = "custom" if self.ai_schedule_window_mode_var.get() == "自定义" else "a_share"
         config["ai_schedule_window_mode"] = window_mode
         if window_mode == "a_share":

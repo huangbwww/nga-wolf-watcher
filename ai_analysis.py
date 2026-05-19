@@ -38,6 +38,10 @@ DEFAULT_TIMEOUT = 300
 DEFAULT_SCHEDULE_WINDOWS = "weekday:09:30-11:30,13:00-15:00"
 DEFAULT_MAX_FEISHU_CHARS = 3500
 SOURCE_NAME = "nga-wolf-watcher"
+CODEX_MODEL_OPTIONS = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2"]
+CLAUDE_MODEL_OPTIONS = ["sonnet[1m]", "opus[1m]", "haiku"]
+CODEX_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+CLAUDE_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
 DEFAULT_AUTO_ANALYSIS_PROMPT = "根据最新的 NGA 回复历史、我目前的持仓信息和观察列表，并实时查询公开 A 股行情信息，分析盘面变化、机会与风险，给出接下来需要重点观察的方向和操作建议。"
 DEFAULT_STOCK_ANALYSIS_PROMPT = DEFAULT_AUTO_ANALYSIS_PROMPT
@@ -91,6 +95,86 @@ def csv_set(value: str) -> set[str]:
     return {item.strip() for item in value.split(",") if item.strip()}
 
 
+def provider_model_env(provider: str) -> str:
+    generic = os.getenv("AI_MODEL")
+    if generic is not None:
+        return generic
+    if provider == "codex":
+        return os.getenv("AI_CODEX_MODEL", "")
+    if provider == "claude":
+        return os.getenv("AI_CLAUDE_MODEL", "")
+    return os.getenv("AI_CUSTOM_MODEL", "")
+
+
+def provider_reasoning_env(provider: str) -> str:
+    generic = os.getenv("AI_REASONING_EFFORT")
+    if generic is not None:
+        return generic
+    if provider == "codex":
+        return os.getenv("AI_CODEX_REASONING_EFFORT", "")
+    if provider == "claude":
+        return os.getenv("AI_CLAUDE_EFFORT", "")
+    return os.getenv("AI_CUSTOM_REASONING_EFFORT", "")
+
+
+def normalize_model(raw: str) -> str:
+    text = str(raw or "").strip()
+    if text.lower() in {"default", "unset"}:
+        return ""
+    return text
+
+
+def model_options(provider: str = "codex") -> list[str]:
+    if provider == "claude":
+        return list(CLAUDE_MODEL_OPTIONS)
+    if provider == "codex":
+        return list(CODEX_MODEL_OPTIONS)
+    return []
+
+
+def model_label(provider: str, value: str) -> str:
+    if provider == "codex":
+        return {
+            "gpt-5.5": "GPT-5.5",
+            "gpt-5.4": "GPT-5.4",
+            "gpt-5.4-mini": "GPT-5.4-Mini",
+            "gpt-5.3-codex": "GPT-5.3-Codex",
+            "gpt-5.3-codex-spark": "GPT-5.3-Codex-Spark",
+            "gpt-5.2": "GPT-5.2",
+        }.get(value, value)
+    return value
+
+
+def reasoning_effort_options(provider: str = "codex") -> list[str]:
+    if provider == "claude":
+        return sorted(CLAUDE_REASONING_EFFORTS, key=["low", "medium", "high", "xhigh", "max"].index)
+    if provider == "codex":
+        return sorted(CODEX_REASONING_EFFORTS, key=["low", "medium", "high", "xhigh"].index)
+    return []
+
+
+def reasoning_effort_label(provider: str, value: str) -> str:
+    return value
+
+
+def normalize_reasoning_effort(raw: str, provider: str = "codex") -> str:
+    text = str(raw or "").strip().lower()
+    if text in {"", "default", "auto", "unset"}:
+        return ""
+    options = reasoning_effort_options(provider)
+    if options and text not in options:
+        return ""
+    return text
+
+
+def is_valid_reasoning_effort(raw: str, provider: str = "codex") -> bool:
+    text = str(raw or "").strip().lower()
+    if text in {"", "default", "auto", "unset"}:
+        return True
+    options = reasoning_effort_options(provider)
+    return not options or text in options
+
+
 @dataclass
 class AIConfig:
     enabled: bool = False
@@ -114,12 +198,21 @@ class AIConfig:
     max_feishu_chars: int = DEFAULT_MAX_FEISHU_CHARS
     upload_long_result: bool = False
     permission_mode: str = "default"
+    model: str = ""
+    reasoning_effort: str = ""
+    ignore_codex_user_config: bool = True
 
     @classmethod
     def from_namespace(cls, args: argparse.Namespace) -> "AIConfig":
         provider = str(getattr(args, "ai_provider", os.getenv("AI_PROVIDER", DEFAULT_PROVIDER)) or DEFAULT_PROVIDER).lower()
         if provider not in {"codex", "claude", "custom"}:
             provider = DEFAULT_PROVIDER
+        raw_model = getattr(args, "ai_model", None)
+        if raw_model is None or not str(raw_model).strip():
+            raw_model = provider_model_env(provider)
+        raw_reasoning = getattr(args, "ai_reasoning_effort", None)
+        if raw_reasoning is None or not str(raw_reasoning).strip():
+            raw_reasoning = provider_reasoning_env(provider)
         work_dir = resolve_work_dir(
             str(getattr(args, "ai_work_dir", os.getenv("AI_WORK_DIR", DEFAULT_WORK_DIR)) or DEFAULT_WORK_DIR),
             getattr(args, "state_path", ""),
@@ -159,6 +252,14 @@ class AIConfig:
             permission_mode=normalize_permission_mode(
                 str(getattr(args, "ai_permission_mode", os.getenv("AI_PERMISSION_MODE", "default")) or "default"),
                 provider,
+            ),
+            model=normalize_model(str(raw_model or "")),
+            reasoning_effort=normalize_reasoning_effort(
+                str(raw_reasoning or ""),
+                provider,
+            ),
+            ignore_codex_user_config=bool_value(
+                getattr(args, "ai_ignore_codex_user_config", env_bool("AI_IGNORE_CODEX_USER_CONFIG", True))
             ),
         )
 
@@ -227,6 +328,13 @@ def add_cli_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--ai-max-feishu-chars", type=int, default=int(os.getenv("AI_MAX_FEISHU_CHARS", str(DEFAULT_MAX_FEISHU_CHARS))))
     parser.add_argument("--ai-upload-long-result", action="store_true", default=env_bool("AI_UPLOAD_LONG_RESULT", False))
     parser.add_argument("--ai-permission-mode", default=os.getenv("AI_PERMISSION_MODE", "default"))
+    parser.add_argument("--ai-model", default=os.getenv("AI_MODEL", ""))
+    parser.add_argument("--ai-reasoning-effort", default=os.getenv("AI_REASONING_EFFORT", ""))
+    parser.add_argument(
+        "--ai-ignore-codex-user-config",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("AI_IGNORE_CODEX_USER_CONFIG", True),
+    )
 
 
 def utcish_now() -> str:
@@ -668,6 +776,19 @@ def resolve_executable(command: list[str], provider: str) -> list[str]:
 class CodexRunner(BaseRunner):
     provider = "codex"
 
+    def _model_args(self, task: AITask) -> list[str]:
+        model = normalize_model(str(task.metadata.get("model") or self.config.model or ""))
+        return ["--model", model] if model else []
+
+    def _reasoning_args(self, task: AITask) -> list[str]:
+        effort = normalize_reasoning_effort(
+            str(task.metadata.get("reasoning_effort") or self.config.reasoning_effort or ""),
+            "codex",
+        )
+        if not effort or effort == "auto":
+            return []
+        return ["-c", f'model_reasoning_effort="{effort}"']
+
     def _mode_args(self, task: AITask) -> list[str]:
         mode = normalize_permission_mode(task.metadata.get("permission_mode") or self.config.permission_mode, "codex")
         if mode in {"auto-edit", "full-auto"}:
@@ -687,12 +808,15 @@ class CodexRunner(BaseRunner):
         command = [
             *base,
             "exec",
-            "--ignore-user-config",
             "--ignore-rules",
             "--cd",
             str(task.work_dir),
             "--skip-git-repo-check",
         ]
+        if self.config.ignore_codex_user_config:
+            command.append("--ignore-user-config")
+        command.extend(self._model_args(task))
+        command.extend(self._reasoning_args(task))
         command.extend(self._mode_args(task))
         command.extend(self._image_args(task))
         command.extend([
@@ -709,10 +833,13 @@ class CodexRunner(BaseRunner):
             "exec",
             "resume",
             "--last",
-            "--ignore-user-config",
             "--ignore-rules",
             "--skip-git-repo-check",
         ]
+        if self.config.ignore_codex_user_config:
+            command.append("--ignore-user-config")
+        command.extend(self._model_args(task))
+        command.extend(self._reasoning_args(task))
         command.extend(self._mode_args(task))
         command.extend(self._image_args(task))
         command.extend([
@@ -761,6 +888,12 @@ class ClaudeRunner(BaseRunner):
             return format_command_template(self.config.claude_command, values)
         mode = normalize_permission_mode(task.metadata.get("permission_mode") or self.config.permission_mode, "claude")
         command = [*split_command_line(self.config.claude_command), "-p", "--session-id", str(values["session_id"])]
+        model = normalize_model(str(task.metadata.get("model") or self.config.model or ""))
+        if model:
+            command.extend(["--model", model])
+        effort = normalize_reasoning_effort(str(task.metadata.get("reasoning_effort") or self.config.reasoning_effort or ""), "claude")
+        if effort:
+            command.extend(["--effort", effort])
         if mode != "default":
             command.extend(["--permission-mode", mode])
         command.append(short_prompt)
@@ -787,6 +920,8 @@ def command_values(task: AITask, prompt_file: Path) -> dict[str, Path | str]:
         "image_files": " ".join(quote_arg(str(path)) for path in task.image_paths),
         "file_files": " ".join(quote_arg(str(path)) for path in task.file_paths),
         "permission_mode": task.metadata.get("permission_mode") or "",
+        "model": task.metadata.get("model") or "",
+        "reasoning_effort": task.metadata.get("reasoning_effort") or "",
         "session_id": task.metadata.get("session_id") or shared_session_id(task.work_dir),
     }
 
@@ -949,12 +1084,33 @@ class AIManager:
         clone.schedule_prompt = str(state.get("schedule_prompt") or self.config.schedule_prompt or "")
         clone.schedule_windows = self.effective_windows()
         clone.permission_mode = self.effective_permission_mode()
+        clone.model = self.effective_model()
+        clone.reasoning_effort = self.effective_reasoning_effort()
         return clone
 
     def effective_permission_mode(self) -> str:
         state = self.read_state()
         raw = str(state.get("permission_mode") or self.config.permission_mode or "default")
         return normalize_permission_mode(raw, self.config.provider)
+
+    def effective_model(self) -> str:
+        state = self.read_state()
+        if "model" in state:
+            return normalize_model(str(state.get("model") or ""))
+        return normalize_model(self.config.model)
+
+    def effective_reasoning_effort(self) -> str:
+        state = self.read_state()
+        if "reasoning_effort" in state:
+            return normalize_reasoning_effort(str(state.get("reasoning_effort") or ""), self.config.provider)
+        return normalize_reasoning_effort(self.config.reasoning_effort, self.config.provider)
+
+    def clear_runtime_model_config(self) -> None:
+        state = self.read_state()
+        state.pop("model", None)
+        state.pop("reasoning_effort", None)
+        state["updated_at"] = utcish_now()
+        self.write_state(state)
 
     def is_authorized(self, sender_id: str | None) -> bool:
         if not self.config.allowed_user_ids:
@@ -1060,6 +1216,8 @@ class AIManager:
                 "created_at": utcish_now(),
                 "provider": self.config.provider,
                 "permission_mode": self.effective_permission_mode(),
+                "model": self.effective_model(),
+                "reasoning_effort": self.effective_reasoning_effort(),
             },
         )
 
@@ -1205,7 +1363,7 @@ class AIManager:
         if command is None:
             return ""
         action, arg = command
-        if action in {"help", "status", "prompt", "workdir", "history", "last", "mode"}:
+        if action in {"help", "status", "prompt", "workdir", "history", "last", "mode", "model", "reasoning"}:
             pass
         elif not self.is_authorized(sender_id):
             return "AI command rejected: sender is not authorized."
@@ -1225,6 +1383,48 @@ class AIManager:
             state["permission_mode"] = mode
             self.write_state(state)
             return f"AI permission mode set to `{mode}`."
+        if action == "model":
+            if not arg.strip():
+                model = self.effective_model()
+                return f"Current AI model: `{model or 'auto'}`."
+            if not self.is_authorized(sender_id):
+                return "AI command rejected: sender is not authorized."
+            raw = arg.strip()
+            lowered = raw.lower()
+            if lowered == "default":
+                state.pop("model", None)
+                state["updated_at"] = utcish_now()
+                self.write_state(state)
+                model = self.effective_model()
+                return f"AI model restored to default: `{model or 'auto'}`."
+            model = "" if lowered in {"auto", "unset"} else normalize_model(raw)
+            state["model"] = model
+            state["updated_at"] = utcish_now()
+            self.write_state(state)
+            return f"AI model set to `{model or 'auto'}`."
+        if action == "reasoning":
+            if not arg.strip():
+                effort = self.effective_reasoning_effort()
+                return f"Current AI reasoning effort: `{effort or 'default'}`."
+            if not self.is_authorized(sender_id):
+                return "AI command rejected: sender is not authorized."
+            raw = arg.strip()
+            lowered = raw.lower()
+            if lowered == "default":
+                state.pop("reasoning_effort", None)
+                state["updated_at"] = utcish_now()
+                self.write_state(state)
+                effort = self.effective_reasoning_effort()
+                return f"AI reasoning effort restored to default: `{effort or 'default'}`."
+            if not is_valid_reasoning_effort(raw, self.config.provider):
+                options = reasoning_effort_options(self.config.provider)
+                detail = ", ".join(options) if options else "any custom string"
+                return f"Unknown AI reasoning effort: `{raw}`. Available: default, auto, {detail}."
+            effort = "" if lowered in {"auto", "unset"} else normalize_reasoning_effort(raw, self.config.provider)
+            state["reasoning_effort"] = effort
+            state["updated_at"] = utcish_now()
+            self.write_state(state)
+            return f"AI reasoning effort set to `{effort or 'default'}`."
         if action == "on":
             state["ai_enabled"] = True
             self.write_state(state)
@@ -1308,6 +1508,8 @@ class AIManager:
                 f"enabled: {self.effective_enabled()}",
                 f"provider: {self.config.provider}",
                 f"permission_mode: {self.effective_permission_mode()}",
+                f"model: {self.effective_model() or 'auto'}",
+                f"reasoning_effort: {self.effective_reasoning_effort() or 'default'}",
                 f"work_dir: {self.config.work_dir}",
                 f"session_key: {shared_session_id(self.config.work_dir)}",
                 f"auto_analyze_new_post: {self.effective_auto()}",
@@ -1326,6 +1528,12 @@ def parse_ai_command(text: str) -> tuple[str, str] | None:
     mode_match = re.search(r"(?:^|\s)/mode(?:\s+(.+?))?(?:\s|$)", compact, flags=re.I)
     if mode_match:
         return "mode", (mode_match.group(1) or "").strip()
+    model_match = re.search(r"(?:^|\s)/model(?:\s+(.+?))?(?:\s|$)", compact, flags=re.I)
+    if model_match:
+        return "model", (model_match.group(1) or "").strip()
+    reasoning_match = re.search(r"(?:^|\s)/(?:reasoning|effort)(?:\s+(.+?))?(?:\s|$)", compact, flags=re.I)
+    if reasoning_match:
+        return "reasoning", (reasoning_match.group(1) or "").strip()
     match = re.search(r"(?:^|\s)/ai(?:\s+(.*))?$", compact, flags=re.I)
     if not match:
         return None
@@ -1336,6 +1544,12 @@ def parse_ai_command(text: str) -> tuple[str, str] | None:
     match_mode = re.fullmatch(r"mode(?:\s+(.+))?", rest, flags=re.I)
     if match_mode:
         return "mode", (match_mode.group(1) or "").strip()
+    match_model = re.fullmatch(r"model(?:\s+(.+))?", rest, flags=re.I)
+    if match_model:
+        return "model", (match_model.group(1) or "").strip()
+    match_reasoning = re.fullmatch(r"(?:reasoning|effort)(?:\s+(.+))?", rest, flags=re.I)
+    if match_reasoning:
+        return "reasoning", (match_reasoning.group(1) or "").strip()
     if lower == "auto on":
         return "auto_on", ""
     if lower == "auto off":
@@ -1376,6 +1590,8 @@ def ai_help_text() -> str:
             "/ai latest",
             "/ai ask <question> (optional; plain non-command messages also go to AI when AI is on)",
             "/mode [default|auto-edit|full-auto|yolo] or /ai mode <name>",
+            "/model [auto|default|name] or /ai model <name>",
+            "/reasoning [default|low|medium|high|xhigh] or /ai reasoning <level>",
             "/ai schedule on | /ai schedule off",
             "/ai schedule every <minutes>",
             f"/ai schedule windows {DEFAULT_SCHEDULE_WINDOWS}",

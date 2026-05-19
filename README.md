@@ -272,7 +272,17 @@ $env:AI_CUSTOM_COMMAND = 'python D:\agents\run_agent.py --work-dir {work_dir} --
 python .\nga_feishu_watch.py --ws
 ```
 
-Supported custom placeholders: `{work_dir}`, `{prompt_file}`, `{output_file}`, `{task_type}`, `{latest_event}`, `{history_file}`, `{session_id}`, `{image_files}`, `{file_files}`, `{permission_mode}`.
+Supported custom placeholders: `{work_dir}`, `{prompt_file}`, `{output_file}`, `{task_type}`, `{latest_event}`, `{history_file}`, `{session_id}`, `{image_files}`, `{file_files}`, `{permission_mode}`, `{model}`, `{reasoning_effort}`.
+
+Model and reasoning effort:
+
+- The GUI's default model and default reasoning effort are startup defaults. Leave them empty or `default` to use the agent's own default.
+- The Feishu `/setting` card can override model/reasoning at runtime. Click `恢复默认模型/强度` to return to the GUI/startup defaults.
+- Codex model dropdown: `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.2`; reasoning effort: `low`, `medium`, `high`, `xhigh`.
+- Claude model dropdown: `default`, `sonnet[1m]`, `opus[1m]`, `haiku`; effort: `low`, `medium`, `high`, `xhigh`, `max`.
+- Codex receives the model through `codex exec --model <model>` and receives reasoning effort through a Codex config override.
+- Claude Code receives the model through `claude --model <model>` and reasoning effort through `--effort <level>`.
+- Custom commands only receive `{model}` and `{reasoning_effort}` placeholders; they take effect only if your command template uses them.
 
 Auto-analyze new wolf posts:
 
@@ -309,6 +319,12 @@ AI Feishu commands:
 /mode
 /mode yolo
 /ai mode full-auto
+/model
+/model auto
+/model gpt-5.4
+/reasoning
+/reasoning default
+/reasoning high
 /ai auto on
 /ai auto off
 /ai latest
@@ -339,6 +355,15 @@ AI_TIMEOUT=300
 AI_CODEX_COMMAND=codex
 AI_CLAUDE_COMMAND=claude
 AI_CUSTOM_COMMAND=
+AI_MODEL=
+AI_CODEX_MODEL=
+AI_CLAUDE_MODEL=
+AI_CUSTOM_MODEL=
+AI_REASONING_EFFORT=
+AI_CODEX_REASONING_EFFORT=
+AI_CLAUDE_EFFORT=
+AI_CUSTOM_REASONING_EFFORT=
+AI_IGNORE_CODEX_USER_CONFIG=true
 AI_SCHEDULE_ENABLED=false
 AI_SCHEDULE_INTERVAL_MINUTES=5
 AI_SCHEDULE_PROMPT=
