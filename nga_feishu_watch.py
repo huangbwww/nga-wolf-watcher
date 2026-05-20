@@ -1179,13 +1179,38 @@ def download_nga_image_bytes(url: str, cookie: str, timeout: int) -> tuple[bytes
     }
     if cookie:
         headers["Cookie"] = cookie
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        content_length = str(resp.headers.get("Content-Length") or "").strip()
-        if content_length.isdigit() and int(content_length) > FEISHU_IMAGE_MAX_BYTES:
-            raise RuntimeError("image is larger than Feishu 10MB limit")
-        data = resp.read(FEISHU_IMAGE_MAX_BYTES + 1)
-        content_type = str(resp.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+
+    def fetch(candidate_url: str) -> tuple[bytes, str]:
+        req = urllib.request.Request(candidate_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            content_length = str(resp.headers.get("Content-Length") or "").strip()
+            if content_length.isdigit() and int(content_length) > FEISHU_IMAGE_MAX_BYTES:
+                raise RuntimeError("image is larger than Feishu 10MB limit")
+            data = resp.read(FEISHU_IMAGE_MAX_BYTES + 1)
+            content_type = str(resp.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        return data, content_type
+
+    candidates = [url]
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme == "https" and parsed.netloc.lower().endswith("nga.178.com"):
+        candidates.append(urllib.parse.urlunparse(parsed._replace(scheme="http")))
+
+    last_error: Exception | None = None
+    for candidate_url in candidates:
+        try:
+            data, content_type = fetch(candidate_url)
+            break
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if not (exc.code == 567 and candidate_url != candidates[-1]):
+                raise
+        except Exception as exc:
+            last_error = exc
+            if candidate_url == candidates[-1]:
+                raise
+    else:
+        raise RuntimeError(f"image download failed: {last_error}")
+
     if not data:
         raise RuntimeError("image response is empty")
     if len(data) > FEISHU_IMAGE_MAX_BYTES:

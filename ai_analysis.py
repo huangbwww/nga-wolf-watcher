@@ -509,13 +509,32 @@ def download_image(url: str, output_path: Path, timeout: int = 20) -> Path:
     cookie = os.getenv("NGA_COOKIE", "").strip()
     if cookie:
         headers["Cookie"] = cookie
-    request = urllib.request.Request(
-        url,
-        headers=headers,
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        data = response.read()
-        content_type = response.headers.get("Content-Type", "")
+    candidates = [url]
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme == "https" and parsed.netloc.lower().endswith("nga.178.com"):
+        candidates.append(urllib.parse.urlunparse(parsed._replace(scheme="http")))
+
+    last_error: Exception | None = None
+    for candidate_url in candidates:
+        request = urllib.request.Request(
+            candidate_url,
+            headers=headers,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                data = response.read()
+                content_type = response.headers.get("Content-Type", "")
+            break
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if not (exc.code == 567 and candidate_url != candidates[-1]):
+                raise
+        except Exception as exc:
+            last_error = exc
+            if candidate_url == candidates[-1]:
+                raise
+    else:
+        raise RuntimeError(f"image download failed: {last_error}")
     suffix = image_suffix_from_url(url, content_type)
     if output_path.suffix.lower() != suffix:
         output_path = output_path.with_suffix(suffix)

@@ -241,7 +241,7 @@ $env:FEISHU_MENTION_USER_ID="ou_xxx"
 python .\nga_feishu_watch.py --feishu-mention-enabled --feishu-mention-user-id ou_xxx
 ```
 
-使用飞书应用凭证发送卡片时，NGA 图片默认会尝试直接显示在卡片里。程序会先下载图片 URL，再上传到飞书换取 `image_key`，然后在卡片中渲染图片；任一步失败都会自动回退成原来的可点击图片链接，不影响新回复推送。Webhook 模式不能上传卡片图片，仍然只显示链接。
+使用飞书应用凭证发送卡片时，NGA 图片默认会尝试直接显示在卡片里。程序会先下载图片 URL，再上传到飞书换取 `image_key`，然后在卡片中渲染图片；任一步失败都会自动回退成原来的可点击图片链接，不影响新回复推送。Webhook 模式不能上传卡片图片，仍然只显示链接。部分 NGA 图片 URL 会拒绝 HTTPS 直连下载，程序会自动用同一地址的 HTTP 版本重试，再失败才回退成链接。
 
 ```powershell
 $env:FEISHU_CARD_IMAGES="true"

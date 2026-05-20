@@ -241,7 +241,7 @@ $env:FEISHU_MENTION_USER_ID="ou_xxx"
 python .\nga_feishu_watch.py --feishu-mention-enabled --feishu-mention-user-id ou_xxx
 ```
 
-NGA images in Feishu cards are embedded by default when you use Feishu app credentials. The watcher downloads the image URL, uploads it to Feishu, renders the returned `image_key` in the card, and falls back to the old clickable link if any step fails. Webhook mode cannot upload card images and keeps links.
+NGA images in Feishu cards are embedded by default when you use Feishu app credentials. The watcher downloads the image URL, uploads it to Feishu, renders the returned `image_key` in the card, and falls back to the old clickable link if any step fails. Webhook mode cannot upload card images and keeps links. Some NGA image URLs reject HTTPS direct downloads; the watcher automatically retries the same image over HTTP before falling back to a link.
 
 ```powershell
 $env:FEISHU_CARD_IMAGES="true"
