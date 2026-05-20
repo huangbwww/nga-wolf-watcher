@@ -241,6 +241,16 @@ $env:FEISHU_MENTION_USER_ID="ou_xxx"
 python .\nga_feishu_watch.py --feishu-mention-enabled --feishu-mention-user-id ou_xxx
 ```
 
+使用飞书应用凭证发送卡片时，NGA 图片默认会尝试直接显示在卡片里。程序会先下载图片 URL，再上传到飞书换取 `image_key`，然后在卡片中渲染图片；任一步失败都会自动回退成原来的可点击图片链接，不影响新回复推送。Webhook 模式不能上传卡片图片，仍然只显示链接。
+
+```powershell
+$env:FEISHU_CARD_IMAGES="true"
+$env:FEISHU_CARD_IMAGE_LIMIT="6"
+python .\nga_feishu_watch.py --feishu-card-images --feishu-card-image-limit 6
+```
+
+上传后的 `image_key` 会缓存在 `.nga_seen.json` 同目录的 `feishu_image_cache.json`，重复查询历史时不会反复上传同一张 NGA 图片。
+
 ### 可选本地 AI Agent 增强系统
 
 本节主要是源码/BAT 用户需要的 CLI、环境变量和工作目录细节。只使用 EXE 的用户，可以先看前面的“AI 分析功能说明”和 GUI 里的 `AI 分析` 配置区域。
@@ -427,6 +437,7 @@ Prompt 使用方式：
 - 权限不足：检查 `AI_ALLOWED_USER_IDS` 和飞书 sender id。
 - 正在回复状态不显示：检查飞书应用是否开启消息表情 Reaction 相关权限，或把 `AI_REPLY_STATUS_EMOJI` 改成当前租户支持的表情类型。
 - 图片读不了：如果是飞书图片，检查飞书应用是否开启消息资源读取权限；如果是 NGA 图片，检查 `events/latest_event.json` 是否有 `image_urls`，以及 `attachments/nga/` 下是否下载成功。Codex 会通过 `--image` 接收已下载图片，失败时可让 agent 打开事件里的原图 URL。
+- NGA 图片没有直接显示在飞书卡片里：这个能力只支持飞书应用模式，不支持 webhook 模式。检查应用是否有上传图片权限、运行机器是否能访问原始 NGA 图片 URL，以及 `FEISHU_CARD_IMAGES` 是否仍然开启。上传失败时卡片会保留可点击图片链接。
 - 飞书 txt/file 附件读不了：同样检查消息资源读取权限；程序会把附件下载到 `attachments/` 并把本地路径给 agent。若是“回复某个文件消息”，还需要机器人能读取被回复的那条消息。
 
 脚本会把已推送回复 id、已处理命令 id 和免打扰暂存回复存在 `.nga_seen.json`。EXE GUI 默认会把它放在 `%LOCALAPPDATA%\NGA Wolf Watcher\`，和 `config.json` 同目录。它和 config 分开是因为它属于运行状态，会频繁写入；删除它相当于重置已读/已处理历史。

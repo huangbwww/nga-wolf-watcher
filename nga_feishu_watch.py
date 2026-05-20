@@ -58,6 +58,8 @@ DEFAULT_QUIET_END_TIME = "00:00"
 DEFAULT_QUIET_POLICY = "ignore"
 DEFAULT_NGA_PAGE_DELAY = 2.0
 DEFAULT_NGA_UNAVAILABLE_RETRIES = 3
+DEFAULT_FEISHU_CARD_IMAGE_LIMIT = 6
+FEISHU_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -67,6 +69,7 @@ _AI_MANAGERS: dict[tuple[str, str], ai_analysis.AIManager] = {}
 _AI_FEISHU_QUEUES: dict[tuple[str, str], "queue.Queue[Callable[[], None]]"] = {}
 _AI_FEISHU_QUEUE_LOCK = threading.Lock()
 _WATCHER_STATE_LOCK = threading.Lock()
+_FEISHU_IMAGE_CACHE_LOCK = threading.Lock()
 
 
 class NgaTemporaryUnavailable(RuntimeError):
@@ -685,7 +688,7 @@ def lark_quote(value: str) -> str:
     return "\n".join(f"> {line}" if line else ">" for line in escaped.splitlines())
 
 
-def post_card_element(post: NgaPost) -> list[dict[str, Any]]:
+def post_card_element(post: NgaPost, image_keys_by_url: dict[str, str] | None = None) -> list[dict[str, Any]]:
     title = lark_md_escape(post.subject)
     time_text = lark_md_escape(post.post_time or "unknown")
     author_text = lark_md_escape(post.author or post.author_id or "unknown")
@@ -737,13 +740,27 @@ def post_card_element(post: NgaPost) -> list[dict[str, Any]]:
         )
 
     if post.image_urls:
-        image_lines = "\n".join(f"[image {idx}]({lark_md_escape(url)})" for idx, url in enumerate(post.image_urls[:6], 1))
-        elements.append(
-            {
-                "tag": "div",
-                "text": {"tag": "lark_md", "content": f"**Images**\n{image_lines}"},
-            }
-        )
+        image_keys_by_url = image_keys_by_url or {}
+        fallback_lines: list[str] = []
+        for idx, url in enumerate(post.image_urls[:6], 1):
+            image_key = str(image_keys_by_url.get(url) or "").strip()
+            if image_key:
+                elements.append(
+                    {
+                        "tag": "img",
+                        "img_key": image_key,
+                        "alt": {"tag": "plain_text", "content": f"NGA image {idx}"},
+                    }
+                )
+            else:
+                fallback_lines.append(f"[image {idx}]({lark_md_escape(url)})")
+        if fallback_lines:
+            elements.append(
+                {
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": f"**Images**\n{chr(10).join(fallback_lines)}"},
+                }
+            )
 
     elements.append(
         {
@@ -761,12 +778,17 @@ def post_card_element(post: NgaPost) -> list[dict[str, Any]]:
     return elements
 
 
-def feishu_posts_card(posts: list[NgaPost], title: str, mention_user_id: str = "") -> dict[str, Any]:
+def feishu_posts_card(
+    posts: list[NgaPost],
+    title: str,
+    mention_user_id: str = "",
+    image_keys_by_url: dict[str, str] | None = None,
+) -> dict[str, Any]:
     elements: list[dict[str, Any]] = mention_card_elements(mention_user_id)
     for idx, post in enumerate(posts[:20]):
         if idx:
             elements.append({"tag": "hr"})
-        elements.extend(post_card_element(post))
+        elements.extend(post_card_element(post, image_keys_by_url))
     if not elements:
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "No replies found."}})
     return {
@@ -830,7 +852,12 @@ def feishu_ai_markdown_card(title: str, markdown: str, part: int = 1, total: int
     }
 
 
-def feishu_deferred_summary_card(posts: list[NgaPost], total_count: int, mention_user_id: str = "") -> dict[str, Any]:
+def feishu_deferred_summary_card(
+    posts: list[NgaPost],
+    total_count: int,
+    mention_user_id: str = "",
+    image_keys_by_url: dict[str, str] | None = None,
+) -> dict[str, Any]:
     shown = posts[:20]
     elements: list[dict[str, Any]] = mention_card_elements(mention_user_id) + [
         {
@@ -849,7 +876,7 @@ def feishu_deferred_summary_card(posts: list[NgaPost], total_count: int, mention
     for idx, post in enumerate(shown, 1):
         if idx > 1:
             elements.append({"tag": "hr"})
-        elements.extend(post_card_element(post))
+        elements.extend(post_card_element(post, image_keys_by_url))
     remaining = total_count - len(shown)
     if remaining > 0:
         elements.append({"tag": "hr"})
@@ -992,13 +1019,16 @@ def push_feishu_app(
     timeout: int,
     message_format: str = "card",
     mention_user_id: str = "",
+    *,
+    args: argparse.Namespace | None = None,
 ) -> None:
     if message_format == "text":
         msg_type = "text"
         content = json.dumps({"text": feishu_message_text(post)}, ensure_ascii=False)
     else:
         msg_type = "interactive"
-        content = json.dumps(feishu_posts_card([post], "NGA new reply", mention_user_id), ensure_ascii=False)
+        image_keys_by_url = feishu_image_keys_for_posts(args, app_id, app_secret, [post])
+        content = json.dumps(feishu_posts_card([post], "NGA new reply", mention_user_id, image_keys_by_url), ensure_ascii=False)
     result = feishu_app_request(
         app_id,
         app_secret,
@@ -1011,7 +1041,13 @@ def push_feishu_app(
         raise RuntimeError(f"飞书应用消息推送失败：{result}")
 
 
-def multipart_body(fields: dict[str, str], file_field: str, file_name: str, file_bytes: bytes) -> tuple[bytes, str]:
+def multipart_body(
+    fields: dict[str, str],
+    file_field: str,
+    file_name: str,
+    file_bytes: bytes,
+    file_content_type: str = "text/plain; charset=utf-8",
+) -> tuple[bytes, str]:
     boundary = f"----nga-watch-{uuid.uuid4().hex}"
     chunks: list[bytes] = []
     for name, value in fields.items():
@@ -1023,7 +1059,7 @@ def multipart_body(fields: dict[str, str], file_field: str, file_name: str, file
     chunks.append(
         (
             f'Content-Disposition: form-data; name="{file_field}"; filename="{file_name}"\r\n'
-            "Content-Type: text/plain; charset=utf-8\r\n\r\n"
+            f"Content-Type: {file_content_type or 'application/octet-stream'}\r\n\r\n"
         ).encode("utf-8")
     )
     chunks.append(file_bytes)
@@ -1059,6 +1095,164 @@ def upload_feishu_file(token: str, file_name: str, text: str, timeout: int) -> s
     return str(file_key)
 
 
+def image_content_type_for_extension(ext: str) -> str:
+    ext = str(ext or "").lower()
+    if ext in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if ext == ".gif":
+        return "image/gif"
+    if ext == ".webp":
+        return "image/webp"
+    if ext == ".bmp":
+        return "image/bmp"
+    if ext in {".tif", ".tiff"}:
+        return "image/tiff"
+    if ext == ".ico":
+        return "image/x-icon"
+    return "image/png"
+
+
+def upload_feishu_image(token: str, file_name: str, data: bytes, content_type: str, timeout: int) -> str:
+    body, multipart_content_type = multipart_body(
+        {"image_type": "message"},
+        "image",
+        file_name,
+        data,
+        content_type or "application/octet-stream",
+    )
+    req = urllib.request.Request(
+        f"{FEISHU_API}/im/v1/images",
+        data=body,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": multipart_content_type},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Feishu image upload failed: HTTP {exc.code}: {detail}") from exc
+    if result.get("code") != 0:
+        raise RuntimeError(f"Feishu image upload failed: {result}")
+    image_key = result.get("data", {}).get("image_key")
+    if not image_key:
+        raise RuntimeError(f"Feishu image upload response missing image_key: {result}")
+    return str(image_key)
+
+
+def feishu_image_cache_path(args: argparse.Namespace) -> Path:
+    return Path(getattr(args, "state_path", ".nga_seen.json")).expanduser().resolve().with_name("feishu_image_cache.json")
+
+
+def read_feishu_image_cache(path: Path) -> dict[str, Any]:
+    try:
+        data = read_json(path, {})
+    except Exception:
+        return {"images": {}}
+    if not isinstance(data, dict):
+        return {"images": {}}
+    images = data.get("images")
+    if not isinstance(images, dict):
+        data["images"] = {}
+    return data
+
+
+def write_feishu_image_cache(path: Path, cache: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cache["updated_at"] = int(time.time())
+    images = cache.get("images")
+    if isinstance(images, dict) and len(images) > 500:
+        ordered = sorted(
+            images.items(),
+            key=lambda item: int(item[1].get("updated_at") or 0) if isinstance(item[1], dict) else 0,
+            reverse=True,
+        )
+        cache["images"] = dict(ordered[:500])
+    write_json(path, cache)
+
+
+def download_nga_image_bytes(url: str, cookie: str, timeout: int) -> tuple[bytes, str]:
+    headers = {
+        "User-Agent": DEFAULT_USER_AGENT,
+        "Referer": "https://bbs.nga.cn/",
+        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    }
+    if cookie:
+        headers["Cookie"] = cookie
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        content_length = str(resp.headers.get("Content-Length") or "").strip()
+        if content_length.isdigit() and int(content_length) > FEISHU_IMAGE_MAX_BYTES:
+            raise RuntimeError("image is larger than Feishu 10MB limit")
+        data = resp.read(FEISHU_IMAGE_MAX_BYTES + 1)
+        content_type = str(resp.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+    if not data:
+        raise RuntimeError("image response is empty")
+    if len(data) > FEISHU_IMAGE_MAX_BYTES:
+        raise RuntimeError("image is larger than Feishu 10MB limit")
+    return data, content_type
+
+
+def card_image_urls(posts: list[NgaPost], limit: int) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for post in posts[:20]:
+        for url in post.image_urls[:6]:
+            normalized = str(url or "").strip()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                urls.append(normalized)
+                if len(urls) >= limit:
+                    return urls
+    return urls
+
+
+def feishu_image_keys_for_posts(args: argparse.Namespace | None, app_id: str, app_secret: str, posts: list[NgaPost]) -> dict[str, str]:
+    if not args or not bool(getattr(args, "feishu_card_images", True)):
+        return {}
+    limit = max(0, int(getattr(args, "feishu_card_image_limit", DEFAULT_FEISHU_CARD_IMAGE_LIMIT) or 0))
+    urls = card_image_urls(posts, limit)
+    if not urls:
+        return {}
+    token = get_feishu_tenant_access_token(app_id, app_secret, int(getattr(args, "timeout", 20) or 20))
+    timeout = max(3, min(int(getattr(args, "timeout", 20) or 20), 20))
+    cookie = getattr(args, "cookie", "") or os.getenv("NGA_COOKIE", "")
+    cache_path = feishu_image_cache_path(args)
+    result: dict[str, str] = {}
+    with _FEISHU_IMAGE_CACHE_LOCK:
+        cache = read_feishu_image_cache(cache_path)
+        images = cache.setdefault("images", {})
+        changed = False
+        for url in urls:
+            cached = images.get(url) if isinstance(images, dict) else None
+            if isinstance(cached, dict) and str(cached.get("image_key") or "").strip():
+                result[url] = str(cached["image_key"])
+                cached["last_used_at"] = int(time.time())
+                changed = True
+                continue
+            try:
+                data, content_type = download_nga_image_bytes(url, cookie, timeout)
+                ext = image_extension(data, content_type)
+                upload_content_type = content_type if content_type.startswith("image/") else image_content_type_for_extension(ext)
+                file_name = f"nga_{hashlib.sha1(url.encode('utf-8')).hexdigest()[:12]}{ext}"
+                image_key = upload_feishu_image(token, file_name, data, upload_content_type, timeout)
+                result[url] = image_key
+                images[url] = {
+                    "image_key": image_key,
+                    "updated_at": int(time.time()),
+                    "size": len(data),
+                }
+                changed = True
+            except Exception as exc:
+                print(f"Feishu card image inline failed for {url}: {exc}", file=sys.stderr)
+        if changed:
+            try:
+                write_feishu_image_cache(cache_path, cache)
+            except Exception as exc:
+                print(f"Feishu card image cache write failed: {exc}", file=sys.stderr)
+    return result
+
+
 def push_feishu_file(args: argparse.Namespace, file_name: str, text: str) -> None:
     _app_id, _app_secret, receive_id, receive_id_type, token = feishu_app_token(args)
     file_key = upload_feishu_file(token, file_name, text, args.timeout)
@@ -1084,7 +1278,7 @@ def push_feishu_text(args: argparse.Namespace, title: str, text: str) -> None:
     )
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     if app_id and app_secret and receive_id:
-        push_feishu_app_posts(app_id, app_secret, receive_id, receive_id_type, [post], title, args.timeout, "text")
+        push_feishu_app_posts(app_id, app_secret, receive_id, receive_id_type, [post], title, args.timeout, "text", args=args)
         return
     push_to_feishu(args, post)
 
@@ -1765,13 +1959,16 @@ def push_feishu_app_posts(
     timeout: int,
     message_format: str = "card",
     mention_user_id: str = "",
+    *,
+    args: argparse.Namespace | None = None,
 ) -> None:
     if message_format == "text":
         msg_type = "text"
         content = json.dumps({"text": feishu_history_text(posts, title)}, ensure_ascii=False)
     else:
         msg_type = "interactive"
-        content = json.dumps(feishu_posts_card(posts, title, mention_user_id), ensure_ascii=False)
+        image_keys_by_url = feishu_image_keys_for_posts(args, app_id, app_secret, posts)
+        content = json.dumps(feishu_posts_card(posts, title, mention_user_id, image_keys_by_url), ensure_ascii=False)
     result = feishu_app_request(
         app_id,
         app_secret,
@@ -2594,10 +2791,10 @@ def run_bot_command(args: argparse.Namespace, command: BotCommand) -> None:
             for start in range(0, len(posts), 20):
                 chunk = posts[start : start + 20]
                 chunk_title = f"{title} ({start + 1}-{start + len(chunk)})"
-                push_feishu_app_posts(*creds, chunk, chunk_title, args.timeout, args.message_format)
+                push_feishu_app_posts(*creds, chunk, chunk_title, args.timeout, args.message_format, args=args)
                 time.sleep(0.4)
         else:
-            push_feishu_app_posts(*creds, posts, title, args.timeout, args.message_format)
+            push_feishu_app_posts(*creds, posts, title, args.timeout, args.message_format, args=args)
 
 
 def run_command_background(args: argparse.Namespace, command: BotCommand, label: str) -> None:
@@ -2841,6 +3038,7 @@ def send_test_message(args: argparse.Namespace) -> None:
             "NGA 监听测试",
             args.timeout,
             args.message_format,
+            args=args,
         )
     else:
         push_to_feishu(args, post)
@@ -2860,14 +3058,15 @@ def push_deferred_summary(args: argparse.Namespace, posts: list[NgaPost]) -> Non
         if not (app_id and app_secret and receive_id):
             raise SystemExit("缺少 FEISHU_APP_ID、FEISHU_APP_SECRET 或 FEISHU_RECEIVE_ID。")
         if args.message_format == "text":
-            push_feishu_app_posts(app_id, app_secret, receive_id, receive_id_type, posts, title, args.timeout, "text")
+            push_feishu_app_posts(app_id, app_secret, receive_id, receive_id_type, posts, title, args.timeout, "text", args=args)
         else:
+            image_keys_by_url = feishu_image_keys_for_posts(args, app_id, app_secret, posts)
             push_feishu_app_card(
                 app_id,
                 app_secret,
                 receive_id,
                 receive_id_type,
-                feishu_deferred_summary_card(posts, len(posts), mention_user_id),
+                feishu_deferred_summary_card(posts, len(posts), mention_user_id, image_keys_by_url),
                 args.timeout,
             )
         return
@@ -2891,7 +3090,7 @@ def push_to_feishu(args: argparse.Namespace, post: NgaPost, mention_user_id: str
     if app_id or app_secret or receive_id:
         if not (app_id and app_secret and receive_id):
             raise SystemExit("缺少 FEISHU_APP_ID、FEISHU_APP_SECRET 或 FEISHU_RECEIVE_ID。")
-        push_feishu_app(app_id, app_secret, receive_id, receive_id_type, post, args.timeout, args.message_format, mention_user_id)
+        push_feishu_app(app_id, app_secret, receive_id, receive_id_type, post, args.timeout, args.message_format, mention_user_id, args=args)
         return
 
     if not webhook:
@@ -3240,6 +3439,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--list-feishu-chats", action="store_true", help="列出飞书机器人可见的群组。")
     parser.add_argument("--send-test", action="store_true", help="发送一条飞书测试消息后退出。")
     parser.add_argument("--message-format", choices=["card", "text"], default=os.getenv("FEISHU_MESSAGE_FORMAT", "card"))
+    parser.add_argument(
+        "--feishu-card-images",
+        action=argparse.BooleanOptionalAction,
+        default=ai_analysis.env_bool("FEISHU_CARD_IMAGES", True),
+        help="在飞书应用卡片中尝试直接显示 NGA 图片；失败时自动回退为图片链接。",
+    )
+    parser.add_argument(
+        "--feishu-card-image-limit",
+        type=int,
+        default=int(os.getenv("FEISHU_CARD_IMAGE_LIMIT", str(DEFAULT_FEISHU_CARD_IMAGE_LIMIT))),
+        help="每张飞书卡片最多内嵌上传的 NGA 图片数量。",
+    )
     parser.add_argument(
         "--feishu-mention-enabled",
         "--mention-enabled",

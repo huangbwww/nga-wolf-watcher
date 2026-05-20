@@ -241,6 +241,16 @@ $env:FEISHU_MENTION_USER_ID="ou_xxx"
 python .\nga_feishu_watch.py --feishu-mention-enabled --feishu-mention-user-id ou_xxx
 ```
 
+NGA images in Feishu cards are embedded by default when you use Feishu app credentials. The watcher downloads the image URL, uploads it to Feishu, renders the returned `image_key` in the card, and falls back to the old clickable link if any step fails. Webhook mode cannot upload card images and keeps links.
+
+```powershell
+$env:FEISHU_CARD_IMAGES="true"
+$env:FEISHU_CARD_IMAGE_LIMIT="6"
+python .\nga_feishu_watch.py --feishu-card-images --feishu-card-image-limit 6
+```
+
+Uploaded `image_key` values are cached in `feishu_image_cache.json` next to `.nga_seen.json`, so repeated history queries do not upload the same NGA image again.
+
 ### Optional Local AI Agent Enhancement
 
 This section is mainly for source/BAT users who need CLI flags, environment variables, and work-directory details. EXE-only users can start with the earlier “AI Analysis Notes” section and the GUI's `AI 分析` settings area.
@@ -427,6 +437,7 @@ Troubleshooting:
 - Permission denied: check `AI_ALLOWED_USER_IDS` and the sender ID reported by Feishu.
 - Replying status is not shown: check whether the Feishu app has message reaction permissions, or set `AI_REPLY_STATUS_EMOJI` to an emoji type supported by your tenant.
 - Images are not readable: for Feishu images, check whether the Feishu app has message resource read permission; for NGA images, check whether `events/latest_event.json` has `image_urls` and whether `attachments/nga/` contains downloaded files. Codex receives downloaded images through `--image`; if download fails, ask the agent to open the original URL from the event JSON.
+- NGA images do not show inside Feishu cards: this only works in Feishu app mode, not webhook mode. Check whether the app can upload images, whether the original NGA image URL is reachable from the watcher machine, and whether `FEISHU_CARD_IMAGES` is still enabled. If upload fails, the card intentionally keeps the clickable image link.
 - Feishu txt/file attachments are not readable: check the same message resource read permission. The watcher downloads files into `attachments/` and passes local paths to the agent. For reply-to-file workflows, the bot must also be allowed to read the replied message.
 
 The script stores pushed reply ids, handled command ids, and deferred quiet-hour replies in `.nga_seen.json`. In the EXE GUI, the default file lives under `%LOCALAPPDATA%\NGA Wolf Watcher\`, next to `config.json`. It is separate from config because it is runtime state and is written frequently; deleting it resets the watcher’s seen/handled history.
