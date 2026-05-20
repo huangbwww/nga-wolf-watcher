@@ -54,6 +54,39 @@ Keep the first-start mark-seen option enabled before the first launch. It marks 
 
 The GUI saves local secrets under `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`. Runtime state is stored next to it as `.nga_seen.json` by default. Do not share these files.
 
+### Feishu / WeChat Channel Selection
+
+The default message channel is `feishu`, so existing Feishu setups keep working. The GUI now has a `消息通道` / message-channel selector:
+
+- Choose `feishu` to show and validate only Feishu app settings. Empty WeChat fields are ignored.
+- Choose `wechat` to show and validate only WeChat bot settings. Empty Feishu App ID, App Secret, and Receive ID are ignored.
+- NGA Cookie, polling, quiet hours, and AI settings are shared and send through the selected channel.
+
+The WeChat channel uses the same kind of personal-WeChat ilink gateway as cc-connect. It is not a normal official WeChat bot and it does not automate the desktop WeChat client. On first use, the target WeChat account must send one message to the bot so the watcher can cache its `context_token`; proactive NGA pushes can only be sent after that. WeChat has no Feishu cards, so `/setting` returns a plain-text menu and copyable commands.
+
+WeChat channel variables:
+
+```text
+NGA_BOT_CHANNEL=wechat
+WECHAT_BOT_TOKEN=<ilink Bearer token>
+WECHAT_BOT_BASE_URL=https://ilinkai.weixin.qq.com
+WECHAT_BOT_CDN_BASE_URL=https://novac2c.cdn.weixin.qq.com/c2c
+WECHAT_BOT_TARGET_USER_ID=<xxx@im.wechat>
+WECHAT_BOT_ALLOWED_USER_IDS=<empty means all, or comma-separated user IDs>
+WECHAT_BOT_POLL_TIMEOUT_MS=35000
+WECHAT_BOT_ACCOUNT_ID=default
+```
+
+Personal-WeChat bot access can be affected by the ilink gateway, login expiry, API changes, and account-risk controls. Check platform rules and account risk before using it.
+
+In the GUI, click `扫码绑定` in the WeChat config card. The watcher requests a QR code from the ilink gateway, opens the QR link, and waits for confirmation from your phone. After confirmation, it fills `WECHAT_BOT_TOKEN`, `WECHAT_BOT_TARGET_USER_ID`, `WECHAT_BOT_ALLOWED_USER_IDS`, and `WECHAT_BOT_ACCOUNT_ID`. Save the config before starting the watcher.
+
+WeChat does not support Feishu-style interactive cards, so the watcher provides text shortcuts:
+
+- After `/start`, reply with `1`, `2`, `3`, `4`, or `5` for common fetch, pack, and settings actions.
+- After `/setting`, reply with `1` through `8` to control AI, auto analysis, scheduled analysis, and return to the main menu.
+- Direct short aliases also work: `hr10`/`hr 10`, `pr20`/`pr 20`, `ht10`/`ht 10`, `pt50`/`pt 50`, `s`, `st`, `a1/a0`, `n1/n0`, `q1/q0`, `b`.
+
 ### Do-Not-Disturb Hours
 
 In `运行设置` / `Settings`, enable `免打扰时段` if you do not want automatic monitoring pushes during a weekly time range. Set a start weekday/time and an end weekday/time, for example `周五 18:00 -> 周一 08:00`. The time uses hour/minute dropdowns to avoid manual `HH:MM` input. Manual Feishu commands, packing, chat lookup, and test messages are not affected.
@@ -79,7 +112,7 @@ The cookie is equivalent to a temporary login credential. Do not post it in issu
 
 ## Commands
 
-In the target Feishu group, mention the bot or use the card:
+In the target Feishu group, mention the bot or use the card. In WeChat mode, send the same commands directly to the bot:
 
 ```text
 /start
@@ -98,10 +131,10 @@ Defaults:
 
 Command meanings:
 
-- `/history_r <uid|0> <count>` fetch recent replies by uid and send cards.
-- `/pack_r <uid|0> <count>` fetch recent replies by uid and send a `.txt` file.
-- `/history_t <tid> <count>` fetch latest posts from a thread and send cards.
-- `/pack_t <tid> <count>` fetch latest posts from a thread and send a `.txt` file.
+- `/history_r <uid|0> <count>` fetch recent replies by uid and send them through the selected channel.
+- `/pack_r <uid|0> <count>` fetch recent replies by uid and pack the content. Feishu app mode sends a `.txt` file; WeChat mode also tries to send a real `.txt` file through iLink media upload, then falls back to text chunks if upload is unavailable.
+- `/history_t <tid> <count>` fetch latest posts from a thread and send them through the selected channel.
+- `/pack_t <tid> <count>` fetch latest posts from a thread and pack the content.
 
 `/pack_r 45974302 10` is accepted as a compatibility alias for packing the default wolf thread.
 
@@ -355,6 +388,15 @@ AI Feishu commands:
 AI configuration keys:
 
 ```text
+NGA_BOT_CHANNEL=feishu
+WECHAT_BOT_TOKEN=
+WECHAT_BOT_BASE_URL=https://ilinkai.weixin.qq.com
+WECHAT_BOT_CDN_BASE_URL=https://novac2c.cdn.weixin.qq.com/c2c
+WECHAT_BOT_TARGET_USER_ID=
+WECHAT_BOT_ALLOWED_USER_IDS=
+WECHAT_BOT_POLL_TIMEOUT_MS=35000
+WECHAT_BOT_ROUTE_TAG=
+WECHAT_BOT_ACCOUNT_ID=default
 AI_ENABLED=false
 AI_PROVIDER=codex
 AI_WORK_DIR=.ai_agent_workspace
@@ -438,6 +480,8 @@ Troubleshooting:
 - Replying status is not shown: check whether the Feishu app has message reaction permissions, or set `AI_REPLY_STATUS_EMOJI` to an emoji type supported by your tenant.
 - Images are not readable: for Feishu images, check whether the Feishu app has message resource read permission; for NGA images, check whether `events/latest_event.json` has `image_urls` and whether `attachments/nga/` contains downloaded files. Codex receives downloaded images through `--image`; if download fails, ask the agent to open the original URL from the event JSON.
 - NGA images do not show inside Feishu cards: this only works in Feishu app mode, not webhook mode. Check whether the app can upload images, whether the original NGA image URL is reachable from the watcher machine, and whether `FEISHU_CARD_IMAGES` is still enabled. If upload fails, the card intentionally keeps the clickable image link.
+- WeChat proactive pushes fail: send one message from the target WeChat account first, then make sure `WECHAT_BOT_TARGET_USER_ID` matches the cached user id.
+- WeChat images/files are unreadable: check `WECHAT_BOT_CDN_BASE_URL`. Encrypted media download and outgoing file upload need `pycryptodome`; if upload is unavailable, packed txt content falls back to text chunks.
 - Feishu txt/file attachments are not readable: check the same message resource read permission. The watcher downloads files into `attachments/` and passes local paths to the agent. For reply-to-file workflows, the bot must also be allowed to read the replied message.
 
 The script stores pushed reply ids, handled command ids, and deferred quiet-hour replies in `.nga_seen.json`. In the EXE GUI, the default file lives under `%LOCALAPPDATA%\NGA Wolf Watcher\`, next to `config.json`. It is separate from config because it is runtime state and is written frequently; deleting it resets the watcher’s seen/handled history.
@@ -446,7 +490,7 @@ The script stores pushed reply ids, handled command ids, and deferred quiet-hour
 
 ```powershell
 python -m pip install pyinstaller
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name NGA-Wolf-Watcher --icon .\assets\app_icon.ico --add-data ".\assets\app_icon.ico;assets" --add-data ".\assets\app_icon.png;assets" --collect-all lark_oapi --collect-all customtkinter .\nga_wolf_gui.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name NGA-Wolf-Watcher --icon .\assets\app_icon.ico --add-data ".\assets\app_icon.ico;assets" --add-data ".\assets\app_icon.png;assets" --collect-all lark_oapi --collect-all customtkinter --hidden-import Crypto.Cipher.AES .\nga_wolf_gui.py
 ```
 
 The output is `dist\NGA-Wolf-Watcher.exe`.

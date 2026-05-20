@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 import traceback
+import webbrowser
 import ctypes
 from argparse import Namespace
 from pathlib import Path
@@ -17,6 +18,7 @@ import customtkinter as ctk
 
 import ai_analysis
 import nga_feishu_watch
+import wechat_bot
 
 
 APP_TITLE = "NGA Wolf Watcher"
@@ -42,11 +44,20 @@ SIDEBAR_ACTIVE = "#1d4ed8"
 
 
 DEFAULT_CONFIG = {
+    "bot_channel": "feishu",
     "nga_cookie": "",
     "feishu_app_id": "",
     "feishu_app_secret": "",
     "feishu_receive_id": "",
     "feishu_id_type": "chat_id",
+    "wechat_bot_token": "",
+    "wechat_bot_base_url": "https://ilinkai.weixin.qq.com",
+    "wechat_bot_cdn_base_url": "https://novac2c.cdn.weixin.qq.com/c2c",
+    "wechat_bot_target_user_id": "",
+    "wechat_bot_allowed_user_ids": "",
+    "wechat_bot_poll_timeout_ms": "35000",
+    "wechat_bot_route_tag": "",
+    "wechat_bot_account_id": "default",
     "default_author_id": "150058",
     "default_tid": "45974302",
     "interval": "60",
@@ -266,6 +277,7 @@ def build_args(
 ) -> Namespace:
     author_id = str(config.get("default_author_id") or "150058").strip()
     return Namespace(
+        bot_channel=str(config.get("bot_channel") or "feishu").strip(),
         author_id=author_id,
         default_author_id=author_id,
         default_tid=str(config.get("default_tid") or "45974302").strip(),
@@ -278,6 +290,16 @@ def build_args(
         feishu_app_secret=str(config.get("feishu_app_secret") or "").strip(),
         feishu_receive_id=str(config.get("feishu_receive_id") or "").strip(),
         feishu_id_type=str(config.get("feishu_id_type") or "chat_id").strip(),
+        wechat_bot_token=str(config.get("wechat_bot_token") or "").strip(),
+        wechat_bot_base_url=str(config.get("wechat_bot_base_url") or "https://ilinkai.weixin.qq.com").strip(),
+        wechat_bot_cdn_base_url=str(config.get("wechat_bot_cdn_base_url") or "https://novac2c.cdn.weixin.qq.com/c2c").strip(),
+        wechat_bot_target_user_id=str(config.get("wechat_bot_target_user_id") or "").strip(),
+        wechat_bot_allowed_user_ids=str(config.get("wechat_bot_allowed_user_ids") or "").strip(),
+        wechat_bot_poll_timeout_ms=int_value(config, "wechat_bot_poll_timeout_ms", 35000),
+        wechat_bot_route_tag=str(config.get("wechat_bot_route_tag") or "").strip(),
+        wechat_bot_account_id=str(config.get("wechat_bot_account_id") or "default").strip(),
+        wechat_bot_state_dir="",
+        wechat_poll=str(config.get("bot_channel") or "feishu").strip() == "wechat",
         timeout=int_value(config, "timeout", 20),
         dry_run=False,
         mark_seen=mark_seen,
@@ -331,12 +353,23 @@ def validate_config(
     require_receive_id: bool = True,
     require_cookie: bool = True,
 ) -> list[str]:
-    required = [
-        ("feishu_app_id", "Feishu App ID"),
-        ("feishu_app_secret", "Feishu App Secret"),
-    ]
-    if require_receive_id:
-        required.append(("feishu_receive_id", "Receive ID"))
+    channel = str(config.get("bot_channel") or "feishu").strip()
+    if channel not in {"feishu", "wechat"}:
+        channel = "feishu"
+    required: list[tuple[str, str]] = []
+    if channel == "feishu":
+        required.extend(
+            [
+                ("feishu_app_id", "Feishu App ID"),
+                ("feishu_app_secret", "Feishu App Secret"),
+            ]
+        )
+        if require_receive_id:
+            required.append(("feishu_receive_id", "Receive ID"))
+    else:
+        required.append(("wechat_bot_token", "微信 Bot Token"))
+        if require_receive_id:
+            required.append(("wechat_bot_target_user_id", "微信目标用户 ID"))
     if require_cookie:
         required.append(("nga_cookie", "NGA Cookie"))
     errors = [label for key, label in required if not str(config.get(key) or "").strip()]
@@ -349,6 +382,7 @@ def validate_config(
         ("ai_timeout", "AI 超时"),
         ("ai_schedule_interval_minutes", "AI 定时间隔"),
         ("ai_max_feishu_chars", "AI 飞书最大字符"),
+        ("wechat_bot_poll_timeout_ms", "微信长轮询超时"),
     ]:
         try:
             float_value(config, key, 0)
@@ -451,9 +485,14 @@ def run_watcher_from_config(path: Path, *, ws_no_watch: bool = False) -> None:
         sys.stdout = log_handle
         sys.stderr = log_handle
     try:
-        args = build_args(config, ws=True, ws_no_watch=ws_no_watch)
-        print("正在启动飞书 WebSocket 监听进程。")
-        nga_feishu_watch.start_ws(args)
+        channel = str(config.get("bot_channel") or "feishu").strip()
+        args = build_args(config, ws=(channel != "wechat"), ws_no_watch=ws_no_watch)
+        if channel == "wechat":
+            print("正在启动微信 Bot 长轮询监听进程。")
+            nga_feishu_watch.start_wechat_poll(args)
+        else:
+            print("正在启动飞书 WebSocket 监听进程。")
+            nga_feishu_watch.start_ws(args)
     except BaseException:
         traceback.print_exc()
         raise
@@ -478,10 +517,19 @@ class App:
         self.vars: dict[str, StringVar] = {
             key: StringVar(value=str(self.config.get(key) or ""))
             for key in [
+                "bot_channel",
                 "feishu_app_id",
                 "feishu_app_secret",
                 "feishu_receive_id",
                 "feishu_id_type",
+                "wechat_bot_token",
+                "wechat_bot_base_url",
+                "wechat_bot_cdn_base_url",
+                "wechat_bot_target_user_id",
+                "wechat_bot_allowed_user_ids",
+                "wechat_bot_poll_timeout_ms",
+                "wechat_bot_route_tag",
+                "wechat_bot_account_id",
                 "default_author_id",
                 "default_tid",
                 "interval",
@@ -509,6 +557,16 @@ class App:
         }
         if not self.vars["feishu_id_type"].get():
             self.vars["feishu_id_type"].set("chat_id")
+        if self.vars["bot_channel"].get() not in {"feishu", "wechat"}:
+            self.vars["bot_channel"].set("feishu")
+        if not self.vars["wechat_bot_base_url"].get():
+            self.vars["wechat_bot_base_url"].set("https://ilinkai.weixin.qq.com")
+        if not self.vars["wechat_bot_cdn_base_url"].get():
+            self.vars["wechat_bot_cdn_base_url"].set("https://novac2c.cdn.weixin.qq.com/c2c")
+        if not self.vars["wechat_bot_poll_timeout_ms"].get():
+            self.vars["wechat_bot_poll_timeout_ms"].set("35000")
+        if not self.vars["wechat_bot_account_id"].get():
+            self.vars["wechat_bot_account_id"].set("default")
 
         self.auto_init_var = BooleanVar(value=bool(self.config.get("auto_mark_seen_first_start", True)))
         self.quiet_enabled_var = BooleanVar(value=bool(self.config.get("quiet_hours_enabled", False)))
@@ -543,6 +601,8 @@ class App:
         self.current_page: str | None = None
         self.cookie_textboxes: list[ctk.CTkTextbox] = []
         self.chat_result_frames: list[ctk.CTkFrame] = []
+        self.feishu_frames: list[ctk.CTkFrame] = []
+        self.wechat_frames: list[ctk.CTkFrame] = []
         self.syncing_cookie = False
         self.log_text: ctk.CTkTextbox
         self.status_dot: ctk.CTkLabel
@@ -600,6 +660,7 @@ class App:
         self.build_settings_page()
         self.build_global_action_bar()
         self.watch_config_changes()
+        self.update_channel_visibility()
         self.show_page("quick")
 
         self.append_log(f"配置文件：{config_path()}")
@@ -686,7 +747,7 @@ class App:
 
         items = [
             ("quick", "快速开始", "⌂"),
-            ("feishu", "飞书配置", "↗"),
+            ("feishu", "通道配置", "↗"),
             ("nga", "NGA配置", "◎"),
             ("ai", "AI分析", "AI"),
             ("log", "日志", "□"),
@@ -744,16 +805,21 @@ class App:
     def build_quick_page(self) -> None:
         page = self.make_page("quick")
         self.status_card(page, 0)
-        self.feishu_card(page, 1)
-        self.nga_card(page, 2)
-        self.actions_card(page, 3)
-        self.path_card(page, 4)
+        self.channel_card(page, 1)
+        self.feishu_card(page, 2)
+        self.wechat_card(page, 3)
+        self.nga_card(page, 4)
+        self.actions_card(page, 5)
+        self.path_card(page, 6)
 
     def build_feishu_page(self) -> None:
         page = self.make_page("feishu")
-        self.page_title(page, "飞书配置", "填写机器人应用凭据，然后在快速开始里查询群组。", 0)
-        self.feishu_card(page, 1)
-        self.path_card(page, 2)
+        self.page_title(page, "消息通道配置", "选择飞书或微信；只需要填写当前通道的配置。", 0)
+        self.channel_card(page, 1)
+        self.feishu_card(page, 2)
+        self.wechat_card(page, 3)
+        self.path_card(page, 4)
+        self.update_channel_visibility()
 
     def build_nga_page(self) -> None:
         page = self.make_page("nga")
@@ -1097,8 +1163,49 @@ class App:
         self.stop_button.grid(row=1, column=3, sticky="e", padx=(0, 16), pady=(4, 16))
         self.update_status_style()
 
-    def feishu_card(self, parent: ctk.CTkFrame, row: int) -> None:
+    def channel_card(self, parent: ctk.CTkFrame, row: int) -> ctk.CTkFrame:
         frame = self.card(parent, row)
+        frame.grid_columnconfigure(1, weight=1)
+        self.card_title(frame, "消息通道")
+        ctk.CTkLabel(frame, text="当前通道", anchor="w", text_color=TEXT).grid(row=1, column=0, sticky="w", padx=16, pady=(6, 8))
+        ctk.CTkOptionMenu(
+            frame,
+            variable=self.vars["bot_channel"],
+            values=["feishu", "wechat"],
+            height=34,
+            fg_color="#f8fafc",
+            button_color="#e2e8f0",
+            button_hover_color="#cbd5e1",
+            text_color=TEXT,
+            command=lambda _value: self.update_channel_visibility(),
+        ).grid(row=1, column=1, sticky="ew", padx=(0, 16), pady=(6, 8))
+        ctk.CTkLabel(
+            frame,
+            text="选飞书就只校验飞书配置；选微信就只校验微信配置。NGA 和 AI 设置是公共设置。",
+            anchor="w",
+            text_color=MUTED,
+            font=ctk.CTkFont(size=12),
+        ).grid(row=2, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 14))
+        return frame
+
+    def update_channel_visibility(self) -> None:
+        if not hasattr(self, "feishu_frames"):
+            return
+        channel = self.vars.get("bot_channel").get() if "bot_channel" in self.vars else "feishu"
+        for frame in self.feishu_frames:
+            if channel == "wechat":
+                frame.grid_remove()
+            else:
+                frame.grid()
+        for frame in self.wechat_frames:
+            if channel == "wechat":
+                frame.grid()
+            else:
+                frame.grid_remove()
+
+    def feishu_card(self, parent: ctk.CTkFrame, row: int) -> ctk.CTkFrame:
+        frame = self.card(parent, row)
+        self.feishu_frames.append(frame)
         frame.grid_columnconfigure(1, weight=1)
         self.card_title(frame, "飞书应用配置")
         self.add_entry(frame, "App ID", "feishu_app_id", 1)
@@ -1128,6 +1235,49 @@ class App:
         result_frame.grid_columnconfigure(0, weight=1)
         self.chat_result_frames.append(result_frame)
         self.render_chat_results([])
+        return frame
+
+    def wechat_card(self, parent: ctk.CTkFrame, row: int) -> ctk.CTkFrame:
+        frame = self.card(parent, row)
+        self.wechat_frames.append(frame)
+        frame.grid_columnconfigure(1, weight=1)
+        self.card_title(frame, "微信 Bot 配置")
+        self.add_entry(frame, "Bot Token", "wechat_bot_token", 1, show="*")
+        self.add_entry(frame, "Base URL", "wechat_bot_base_url", 2)
+        self.add_entry(frame, "CDN Base URL", "wechat_bot_cdn_base_url", 3)
+        self.add_entry(frame, "目标用户 ID", "wechat_bot_target_user_id", 4)
+        self.add_entry(frame, "允许用户 ID", "wechat_bot_allowed_user_ids", 5)
+        self.add_entry(frame, "轮询超时(ms)", "wechat_bot_poll_timeout_ms", 6)
+        self.add_entry(frame, "Route Tag", "wechat_bot_route_tag", 7)
+        self.add_entry(frame, "Account ID", "wechat_bot_account_id", 8)
+        bind_row = ctk.CTkFrame(frame, fg_color="transparent")
+        bind_row.grid(row=9, column=0, columnspan=2, sticky="ew", padx=16, pady=(4, 8))
+        bind_row.grid_columnconfigure(1, weight=1)
+        ctk.CTkButton(
+            bind_row,
+            text="扫码绑定",
+            width=112,
+            height=34,
+            corner_radius=10,
+            fg_color=PRIMARY,
+            hover_color=PRIMARY_HOVER,
+            command=self.wechat_scan_bind_clicked,
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            bind_row,
+            text="自动打开二维码链接；手机微信确认后会回填 Token 和用户 ID。",
+            anchor="w",
+            text_color=MUTED,
+            font=ctk.CTkFont(size=12),
+        ).grid(row=0, column=1, sticky="ew", padx=(10, 0))
+        ctk.CTkLabel(
+            frame,
+            text="首次使用请先用目标微信给机器人发一条消息，程序拿到 context_token 后才能主动推送。",
+            anchor="w",
+            text_color=MUTED,
+            font=ctk.CTkFont(size=12),
+        ).grid(row=10, column=0, columnspan=2, sticky="ew", padx=16, pady=(4, 16))
+        return frame
 
     def nga_card(self, parent: ctk.CTkFrame, row: int) -> None:
         frame = self.card(parent, row)
@@ -1682,6 +1832,11 @@ class App:
     def list_chats_clicked(self) -> None:
         if not self.save_from_ui(require_receive_id=False, require_cookie=False):
             return
+        if str(self.config.get("bot_channel") or "feishu") == "wechat":
+            self.append_log("微信通道没有群组查询；请先让目标微信给机器人发一条消息，再把用户 ID 填到目标用户 ID。")
+            self.set_action_feedback("微信通道不需要查询群组；请按绑定说明先发一条消息。")
+            messagebox.showinfo("微信绑定说明", "微信通道没有飞书 chat_id 查询。\n\n首次使用请先用目标微信给机器人发一条消息，程序收到后会缓存 context_token。然后把该微信用户 ID 填到“目标用户 ID”。")
+            return
         app_id = str(self.config.get("feishu_app_id") or "").strip()
         app_secret = str(self.config.get("feishu_app_secret") or "").strip()
 
@@ -1704,6 +1859,75 @@ class App:
             self.root.after(0, lambda: self.set_action_feedback(f"查询到 {len(chats)} 个群组，可在飞书配置卡片里点击“填入”。"))
 
         self.run_background("查询群组", do_list)
+
+    def wechat_scan_bind_clicked(self) -> None:
+        if self.process and self.process.poll() is None:
+            messagebox.showwarning("监听运行中", "请先停止监听，再进行微信扫码绑定。")
+            return
+        self.vars["bot_channel"].set("wechat")
+        self.update_channel_visibility()
+        config = self.collect_config()
+        base_url = str(config.get("wechat_bot_base_url") or "https://ilinkai.weixin.qq.com").strip()
+        route_tag = str(config.get("wechat_bot_route_tag") or "").strip()
+        timeout = int_value(config, "timeout", 20)
+
+        def do_bind() -> None:
+            self.append_log("开始获取微信扫码二维码。")
+            qr = wechat_bot.begin_qr_login(base_url, route_tag=route_tag, timeout=max(timeout, 40))
+            qr_url = qr["qr_url"]
+            self.append_log(f"微信扫码 URL：{qr_url}")
+            self.root.after(0, lambda: self.show_wechat_qr_window(qr_url))
+            try:
+                webbrowser.open(qr_url)
+            except Exception as exc:
+                self.append_log(f"打开二维码链接失败：{exc}")
+            self.root.after(0, lambda: self.set_action_feedback("请用手机微信扫描/打开二维码，并在手机上确认登录。"))
+            result = wechat_bot.poll_qr_login(qr["qr_key"], base_url, route_tag=route_tag, timeout_seconds=wechat_bot.DEFAULT_WECHAT_QR_TIMEOUT_SECONDS)
+
+            def apply_result() -> None:
+                self.vars["wechat_bot_token"].set(result.get("token", ""))
+                if result.get("base_url"):
+                    self.vars["wechat_bot_base_url"].set(result["base_url"])
+                if result.get("user_id"):
+                    self.vars["wechat_bot_target_user_id"].set(result["user_id"])
+                    if not self.vars["wechat_bot_allowed_user_ids"].get().strip():
+                        self.vars["wechat_bot_allowed_user_ids"].set(result["user_id"])
+                if result.get("account_id"):
+                    self.vars["wechat_bot_account_id"].set(result["account_id"])
+                self.mark_dirty()
+                self.set_action_feedback("微信扫码绑定成功，已回填配置。请保存配置后启动监听。")
+                messagebox.showinfo("微信绑定成功", "已回填 WECHAT_BOT_TOKEN 和微信用户 ID。\n\n请点击“保存配置”，然后启动监听。首次主动推送前，建议再给机器人发一条消息完成 context_token 缓存。")
+
+            self.root.after(0, apply_result)
+
+        self.run_background("微信扫码绑定", do_bind, preserve_status=True)
+
+    def show_wechat_qr_window(self, qr_url: str) -> None:
+        window = ctk.CTkToplevel(self.root)
+        window.title("微信扫码绑定")
+        window.geometry("560x240")
+        window.transient(self.root)
+        window.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            window,
+            text="请用手机微信扫描或打开下面的二维码链接，并在手机上确认登录。",
+            text_color=TEXT,
+            anchor="w",
+            wraplength=500,
+        ).grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 8))
+        textbox = ctk.CTkTextbox(window, height=90, fg_color="#f8fafc", text_color=TEXT, border_width=1, border_color=BORDER)
+        textbox.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 12))
+        textbox.insert("1.0", qr_url)
+        textbox.configure(state="disabled")
+        ctk.CTkButton(
+            window,
+            text="在浏览器打开",
+            height=34,
+            corner_radius=10,
+            fg_color=PRIMARY,
+            hover_color=PRIMARY_HOVER,
+            command=lambda: webbrowser.open(qr_url),
+        ).grid(row=2, column=0, sticky="w", padx=18, pady=(0, 16))
 
     def start_clicked(self) -> None:
         with self.operation_lock:
@@ -1755,7 +1979,8 @@ class App:
                 pid = process.pid
                 watcher_pid_path().write_text(str(pid), encoding="utf-8")
                 self.append_log(f"监听已启动，PID {pid}。")
-                self.root.after(0, lambda: self.set_status(f"运行中 PID {pid}", "正在监听 NGA 回复和飞书卡片操作"))
+                channel_label = "微信 Bot" if str(self.config.get("bot_channel") or "feishu") == "wechat" else "飞书卡片"
+                self.root.after(0, lambda: self.set_status(f"运行中 PID {pid}", f"正在监听 NGA 回复和{channel_label}操作"))
             finally:
                 with self.operation_lock:
                     self.starting = False

@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import ai_analysis
+import wechat_bot
 
 
 NGA_ENDPOINT = "https://bbs.nga.cn/thread.php"
@@ -70,6 +71,7 @@ _AI_FEISHU_QUEUES: dict[tuple[str, str], "queue.Queue[Callable[[], None]]"] = {}
 _AI_FEISHU_QUEUE_LOCK = threading.Lock()
 _WATCHER_STATE_LOCK = threading.Lock()
 _FEISHU_IMAGE_CACHE_LOCK = threading.Lock()
+_WECHAT_CLIENTS: dict[tuple[str, str], wechat_bot.WeChatBotClient] = {}
 
 
 class NgaTemporaryUnavailable(RuntimeError):
@@ -163,6 +165,31 @@ def feishu_credentials(args: argparse.Namespace) -> tuple[str, str, str, str]:
     receive_id = args.feishu_receive_id or os.getenv("FEISHU_RECEIVE_ID", "")
     receive_id_type = args.feishu_id_type or os.getenv("FEISHU_ID_TYPE", "chat_id")
     return app_id, app_secret, receive_id, receive_id_type
+
+
+def bot_channel(args: argparse.Namespace) -> str:
+    channel = str(getattr(args, "bot_channel", "") or os.getenv("NGA_BOT_CHANNEL", "feishu")).strip().lower()
+    return channel if channel in {"feishu", "wechat"} else "feishu"
+
+
+def is_wechat_channel(args: argparse.Namespace) -> bool:
+    return bot_channel(args) == "wechat"
+
+
+def wechat_client_for_args(args: argparse.Namespace) -> wechat_bot.WeChatBotClient:
+    config = wechat_bot.WeChatBotConfig.from_namespace(args)
+    key = (str(config.state_dir.resolve()), config.token)
+    client = _WECHAT_CLIENTS.get(key)
+    if client is None:
+        client = wechat_bot.WeChatBotClient(config)
+        _WECHAT_CLIENTS[key] = client
+    return client
+
+
+def args_for_wechat_user(args: argparse.Namespace, user_id: str) -> argparse.Namespace:
+    cloned = copy.copy(args)
+    cloned.wechat_bot_target_user_id = user_id
+    return cloned
 
 
 def read_json(path: Path, default: Any) -> Any:
@@ -594,7 +621,7 @@ def feishu_message_text(post: NgaPost) -> str:
         byline,
         f"Link: {post.url}",
         "",
-        post.content[:1800],
+        friendly_post_content(post.content, quote_limit=700, reply_limit=1200)[:1800],
     ]
     if post.image_urls:
         lines.extend(["", "Images:", *[f"- {url}" for url in post.image_urls]])
@@ -604,7 +631,7 @@ def feishu_message_text(post: NgaPost) -> str:
 def feishu_history_text(posts: list[NgaPost], title: str) -> str:
     lines = [title]
     for idx, post in enumerate(posts, 1):
-        excerpt = post.content.replace("\n", " ")[:300]
+        excerpt = re.sub(r"\s+", " ", friendly_post_content(post.content, quote_limit=180, reply_limit=260)).strip()[:420]
         lines.append(f"\n{idx}. {post.subject}")
         meta = post.post_time or "unknown"
         if post.author or post.author_id:
@@ -616,6 +643,26 @@ def feishu_history_text(posts: list[NgaPost], title: str) -> str:
         if post.image_urls:
             lines.append("Images: " + ", ".join(post.image_urls[:5]))
     return "\n".join(lines)
+
+
+def wechat_posts_text(posts: list[NgaPost], title: str) -> str:
+    lines = [title]
+    for idx, post in enumerate(posts, 1):
+        if idx > 1:
+            lines.extend(["", "-" * 24])
+        lines.append(f"\n{idx}. {post.subject}")
+        meta = post.post_time or "unknown"
+        if post.author or post.author_id:
+            meta += f" | {post.author or post.author_id}"
+        if post.floor:
+            meta += f" | #{post.floor}"
+        lines.append(meta)
+        lines.append(post.url)
+        lines.append("")
+        lines.append(friendly_post_content(post.content, quote_limit=900, reply_limit=1600))
+        if post.image_urls:
+            lines.extend(["", "图片：", *[f"- {url}" for url in post.image_urls[:6]]])
+    return "\n".join(lines).strip()
 
 
 def posts_to_txt(posts: list[NgaPost], title: str) -> str:
@@ -632,7 +679,7 @@ def posts_to_txt(posts: list[NgaPost], title: str) -> str:
         if post.image_urls:
             meta.extend(f"image: {url}" for url in post.image_urls)
         chunks.append("\n".join(meta))
-        chunks.append(post.content)
+        chunks.append(friendly_post_content(post.content, quote_limit=1200, reply_limit=3000))
         chunks.append("-" * 60)
     return "\n".join(chunks)
 
@@ -650,6 +697,32 @@ def truncate_text(value: str, limit: int) -> str:
 
 def display_text(value: str) -> str:
     return value.replace(QUOTE_END_MARKER, "").strip()
+
+
+def friendly_post_content(value: str, *, quote_limit: int = 600, reply_limit: int = 1200) -> str:
+    quoted = split_quoted_reply(value)
+    if not quoted:
+        if QUOTE_END_MARKER in value:
+            quote_body, reply_body = value.split(QUOTE_END_MARKER, 1)
+            lines: list[str] = []
+            if quote_body.strip():
+                lines.extend(["被回复内容：", truncate_text(display_text(quote_body), quote_limit)])
+            if reply_body.strip():
+                if lines:
+                    lines.append("")
+                lines.extend(["本次回复：", truncate_text(display_text(reply_body), reply_limit)])
+            if lines:
+                return "\n".join(lines).strip()
+        return display_text(value)
+    quote_header, quote_body, reply_body = quoted
+    lines: list[str] = ["被回复内容："]
+    quote_parts = [quote_header]
+    if quote_body:
+        quote_parts.append(quote_body)
+    lines.append(truncate_text(display_text("\n".join(part for part in quote_parts if part)), quote_limit))
+    if reply_body:
+        lines.extend(["", "本次回复：", truncate_text(display_text(reply_body), reply_limit)])
+    return "\n".join(lines).strip()
 
 
 def split_quoted_reply(content: str) -> tuple[str, str, str] | None:
@@ -1364,6 +1437,74 @@ def push_feishu_raw_card(args: argparse.Namespace, card: dict[str, Any]) -> None
         raise RuntimeError(f"Feishu webhook card message failed: {result}")
 
 
+def push_channel_raw_text(args: argparse.Namespace, text: str) -> None:
+    if is_wechat_channel(args):
+        wechat_client_for_args(args).send_text_to_target(text)
+        return
+    push_feishu_raw_text(args, text)
+
+
+def push_channel_text(args: argparse.Namespace, title: str, text: str) -> None:
+    if is_wechat_channel(args):
+        content = f"{title}\n\n{text}" if title else text
+        wechat_client_for_args(args).send_text_to_target(content)
+        return
+    push_feishu_text(args, title, text)
+
+
+def save_wechat_outgoing_file(args: argparse.Namespace, file_name: str, text: str) -> Path:
+    config = wechat_client_for_args(args).config
+    safe_name = wechat_bot.safe_segment(Path(file_name).name or f"nga_file_{int(time.time())}.txt")
+    if not Path(safe_name).suffix:
+        safe_name += ".txt"
+    out_dir = config.state_dir / "outgoing_files"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / safe_name
+    if path.exists():
+        stem = path.stem
+        suffix = path.suffix
+        path = out_dir / f"{stem}_{int(time.time())}{suffix}"
+    path.write_text(text, encoding="utf-8")
+    return path.resolve()
+
+
+def push_channel_file(args: argparse.Namespace, file_name: str, text: str) -> None:
+    if is_wechat_channel(args):
+        path = save_wechat_outgoing_file(args, file_name, text)
+        caption = "\n".join([file_name, f"本地文件: {path}"])
+        try:
+            wechat_client_for_args(args).send_file_to_target(path, file_name=file_name, caption=caption)
+            return
+        except Exception as exc:
+            print(f"微信文件发送失败，回退为文本分段: {exc}", file=sys.stderr)
+            push_channel_raw_text(
+                args,
+                "\n".join(
+                    [
+                        file_name,
+                        f"本地文件: {path}",
+                        f"微信文件发送失败，已回退为文本消息: {exc}",
+                        "",
+                        text,
+                    ]
+                ),
+            )
+        return
+    push_feishu_file(args, file_name, text)
+
+
+def push_channel_posts(args: argparse.Namespace, posts: list[NgaPost], title: str, mention_user_id: str = "") -> None:
+    if is_wechat_channel(args):
+        push_channel_raw_text(args, wechat_posts_text(posts, title))
+        return
+    app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
+    if not (app_id and app_secret and receive_id):
+        for post in posts:
+            push_to_feishu(args, post, mention_user_id)
+        return
+    push_feishu_app_posts(app_id, app_secret, receive_id, receive_id_type, posts, title, args.timeout, args.message_format, mention_user_id, args=args)
+
+
 def create_feishu_reaction(args: argparse.Namespace, message_id: str, emoji_type: str = "WITTY") -> str:
     if not message_id:
         return ""
@@ -1691,6 +1832,10 @@ def prepare_ai_message_for_agent(
 
 
 def push_ai_markdown(args: argparse.Namespace, title: str, markdown: str, *, is_error: bool = False) -> None:
+    if is_wechat_channel(args):
+        prefix = f"{title}\n\n" if title else ""
+        push_channel_raw_text(args, prefix + markdown)
+        return
     chunks = split_text_chunks(markdown, 2800)
     total = len(chunks)
     try:
@@ -1717,17 +1862,18 @@ def push_ai_result(args: argparse.Namespace, result: ai_analysis.AIResult) -> No
 
 def ai_manager_for_args(args: argparse.Namespace) -> ai_analysis.AIManager:
     config = ai_analysis.AIConfig.from_namespace(args)
-    key = (str(config.work_dir.resolve()), getattr(args, "feishu_receive_id", "") or "")
+    target = getattr(args, "wechat_bot_target_user_id", "") if is_wechat_channel(args) else getattr(args, "feishu_receive_id", "")
+    key = (str(config.work_dir.resolve()), f"{bot_channel(args)}:{target or ''}")
     manager = _AI_MANAGERS.get(key)
     if manager is not None:
         manager.config = config
         return manager
 
     def send_text(text: str) -> None:
-        push_feishu_text(args, "AI analysis", text)
+        push_channel_text(args, "AI analysis", text)
 
     def send_file(file_name: str, text: str) -> None:
-        push_feishu_file(args, file_name, text)
+        push_channel_file(args, file_name, text)
 
     def send_result(result: ai_analysis.AIResult) -> None:
         push_ai_result(args, result)
@@ -1803,7 +1949,8 @@ def should_forward_plain_text_to_ai(
 
 def ai_feishu_queue_for_args(args: argparse.Namespace) -> "queue.Queue[Callable[[], None]]":
     config = ai_analysis.AIConfig.from_namespace(args)
-    key = (str(config.work_dir.resolve()), getattr(args, "feishu_receive_id", "") or "")
+    target = getattr(args, "wechat_bot_target_user_id", "") if is_wechat_channel(args) else getattr(args, "feishu_receive_id", "")
+    key = (str(config.work_dir.resolve()), f"{bot_channel(args)}:{target or ''}")
     with _AI_FEISHU_QUEUE_LOCK:
         existing = _AI_FEISHU_QUEUES.get(key)
         if existing is not None:
@@ -1837,7 +1984,7 @@ def enqueue_ai_feishu_job(args: argparse.Namespace, label: str, job: Callable[[]
         print(f"AI 飞书任务队列已满 {label}", file=sys.stderr)
         try:
             if ai_analysis.AIConfig.from_namespace(args).send_errors_to_feishu:
-                push_feishu_text(args, "AI queue full", "AI task queue is full, please retry later.")
+                push_channel_text(args, "AI queue full", "AI task queue is full, please retry later.")
         except Exception as exc:
             print(f"发送 AI 队列已满提示失败: {exc}", file=sys.stderr)
         return False
@@ -1853,11 +2000,14 @@ def run_ai_command(
     manager = ai_manager_for_args(args)
     parsed = ai_analysis.parse_ai_command(text)
     if parsed and parsed[0] == "mode" and not parsed[1].strip():
+        if is_wechat_channel(args):
+            push_channel_raw_text(args, ai_mode_text(manager))
+            return
         try:
             push_feishu_card(args, ai_mode_card(manager))
         except Exception as exc:
             print(f"AI mode card send failed, falling back to text: {exc}", file=sys.stderr)
-            push_feishu_raw_text(args, ai_mode_text(manager))
+            push_channel_raw_text(args, ai_mode_text(manager))
         return
     response = manager.handle_command(text, sender_id, image_paths=image_paths, file_paths=file_paths)
     if response:
@@ -1869,14 +2019,14 @@ def run_ai_command(
             summary = response[: config.max_feishu_chars] + "\n\n[truncated]"
             if config.upload_long_result:
                 try:
-                    push_feishu_raw_text(args, summary + "\n\nFull result uploaded as `ai_command_result.md`.")
-                    push_feishu_file(args, "ai_command_result.md", response)
+                    push_channel_raw_text(args, summary + "\n\nFull result uploaded as `ai_command_result.md`.")
+                    push_channel_file(args, "ai_command_result.md", response)
                 except Exception as exc:
                     print(f"AI 长结果上传失败，改为截断发送: {exc}", file=sys.stderr)
-                    push_feishu_raw_text(args, summary)
+                    push_channel_raw_text(args, summary)
                 return
             response = summary
-        push_feishu_raw_text(args, response)
+        push_channel_raw_text(args, response)
 
 
 def run_ai_plain_text(
@@ -1923,7 +2073,7 @@ def run_ai_command_background(
             print(f"AI 命令处理失败 {label}: {exc}", file=sys.stderr)
             try:
                 if ai_analysis.AIConfig.from_namespace(args).send_errors_to_feishu:
-                    push_feishu_text(args, "AI command failed", str(exc))
+                    push_channel_text(args, "AI command failed", str(exc))
             except Exception as nested:
                 print(f"发送 AI 错误消息失败: {nested}", file=sys.stderr)
 
@@ -1953,7 +2103,7 @@ def run_ai_plain_text_background(
             print(f"AI 对话处理失败 {label}: {exc}", file=sys.stderr)
             try:
                 if ai_analysis.AIConfig.from_namespace(args).send_errors_to_feishu:
-                    push_feishu_text(args, "AI conversation failed", str(exc))
+                    push_channel_text(args, "AI conversation failed", str(exc))
             except Exception as nested:
                 print(f"发送 AI 错误消息失败: {nested}", file=sys.stderr)
 
@@ -2754,6 +2904,137 @@ def ai_mode_text(manager: ai_analysis.AIManager) -> str:
     return "\n".join(lines)
 
 
+def wechat_start_text(default_author_id: str, default_tid: str) -> str:
+    return "\n".join(
+        [
+            "NGA 快捷菜单",
+            f"默认 uid {default_author_id} = 狼大",
+            f"默认 tid {default_tid} = 狼大贴",
+            "",
+            f"1 查询狼大最近 {DEFAULT_REPLY_COUNT} 条回复",
+            "2 打包狼大最近 20 条回复",
+            f"3 查询狼大帖最近 {DEFAULT_THREAD_COUNT} 条",
+            "4 打包狼大帖最近 50 条",
+            "5 打开设置",
+            "",
+            "也可以直接发送：",
+            "hr10 查询狼大最近 10 条回复",
+            "pr20 打包狼大最近 20 条回复",
+            "ht10 查询狼大贴最近 10 条",
+            "pt50 打包狼大贴最近 50 条",
+            "s 打开设置",
+            "完整命令仍可用：/history_r、/pack_r、/history_t、/pack_t",
+        ]
+    )
+
+
+def wechat_settings_text(args: argparse.Namespace, manager: ai_analysis.AIManager) -> str:
+    effective = manager.effective_config()
+    cfg = wechat_bot.WeChatBotConfig.from_namespace(args)
+    return "\n".join(
+        [
+            "NGA Wolf Watcher 设置",
+            f"通道: wechat",
+            f"AI: {'开' if effective.enabled else '关'}",
+            f"自动分析: {'开' if effective.auto_analyze_new_post else '关'}",
+            f"定时分析: {'开' if effective.schedule_enabled else '关'}",
+            f"定时间隔: {effective.schedule_interval_minutes} 分钟",
+            f"时间窗口: {effective.schedule_windows}",
+            f"权限模式: {manager.effective_permission_mode()}",
+            f"模型: {manager.effective_model() or 'auto'}",
+            f"思考强度: {manager.effective_reasoning_effort() or 'default'}",
+            f"微信目标用户: {cfg.target_user_id or '未设置'}",
+            "",
+            "可复制命令：",
+            "1 AI 开",
+            "2 AI 关",
+            "3 自动分析开",
+            "4 自动分析关",
+            "5 定时分析开",
+            "6 定时分析关",
+            "7 AI 状态",
+            "8 返回主菜单",
+            "",
+            "a1 AI 开 | a0 AI 关",
+            "n1 自动分析开 | n0 自动分析关",
+            "q1 定时分析开 | q0 定时分析关",
+            "st AI 状态 | b 绑定状态",
+            "/ai on | /ai off",
+            "/ai auto on | /ai auto off",
+            "/ai schedule on | /ai schedule off",
+            "/ai schedule every 5",
+            f"/ai schedule windows {ai_analysis.DEFAULT_SCHEDULE_WINDOWS}",
+            "/mode default",
+            "/model auto",
+            "/reasoning high",
+            "",
+            wechat_bot.describe_binding(cfg),
+        ]
+    )
+
+
+def wechat_normalize_short_command(args: argparse.Namespace, user_id: str, text: str) -> str:
+    raw = str(text or "").strip()
+    compact = " ".join(raw.split()).lower()
+    if not compact:
+        return raw
+    menu = wechat_bot.WeChatMenuState(wechat_client_for_args(args).config.state_dir).get(user_id)
+
+    def parse_short_count(prefix: str, default: int) -> int | None:
+        match = re.fullmatch(rf"{re.escape(prefix)}(?:\s*(\d{{1,3}}))?", compact)
+        if not match:
+            return None
+        if match.group(1):
+            return max(1, min(int(match.group(1)), 500))
+        return default
+
+    aliases = {
+        "s": "/setting",
+        "st": "/ai status",
+        "a1": "/ai on",
+        "a0": "/ai off",
+        "n1": "/ai auto on",
+        "n0": "/ai auto off",
+        "q1": "/ai schedule on",
+        "q0": "/ai schedule off",
+        "b": "/wechat binding",
+    }
+    if compact in aliases:
+        return aliases[compact]
+    hr_count = parse_short_count("hr", DEFAULT_REPLY_COUNT)
+    if hr_count is not None:
+        return f"/history_r {args.default_author_id} {hr_count}"
+    pr_count = parse_short_count("pr", 20)
+    if pr_count is not None:
+        return f"/pack_r {args.default_author_id} {pr_count}"
+    ht_count = parse_short_count("ht", DEFAULT_THREAD_COUNT)
+    if ht_count is not None:
+        return f"/history_t {args.default_tid} {ht_count}"
+    pt_count = parse_short_count("pt", 50)
+    if pt_count is not None:
+        return f"/pack_t {args.default_tid} {pt_count}"
+    if compact in {"1", "2", "3", "4", "5"} and menu == "start":
+        return {
+            "1": f"/history_r {args.default_author_id} {DEFAULT_REPLY_COUNT}",
+            "2": f"/pack_r {args.default_author_id} 20",
+            "3": f"/history_t {args.default_tid} {DEFAULT_THREAD_COUNT}",
+            "4": f"/pack_t {args.default_tid} 50",
+            "5": "/setting",
+        }[compact]
+    if compact in {"1", "2", "3", "4", "5", "6", "7", "8"} and menu == "setting":
+        return {
+            "1": "/ai on",
+            "2": "/ai off",
+            "3": "/ai auto on",
+            "4": "/ai auto off",
+            "5": "/ai schedule on",
+            "6": "/ai schedule off",
+            "7": "/ai status",
+            "8": "/start",
+        }[compact]
+    return raw
+
+
 def push_feishu_card(args: argparse.Namespace, card: dict[str, Any]) -> None:
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     if not (app_id and app_secret and receive_id):
@@ -2788,10 +3069,22 @@ def settings_card_for_args(args: argparse.Namespace, manager: ai_analysis.AIMana
 
 def run_bot_command(args: argparse.Namespace, command: BotCommand) -> None:
     if command.action == "start":
+        if is_wechat_channel(args):
+            target_user = str(getattr(args, "wechat_bot_target_user_id", "") or "").strip()
+            if target_user:
+                wechat_bot.WeChatMenuState(wechat_client_for_args(args).config.state_dir).set(target_user, "start")
+            push_channel_raw_text(args, wechat_start_text(args.default_author_id, args.default_tid))
+            return
         push_feishu_card(args, start_form_card(args.default_author_id, args.default_tid))
         return
     if command.action == "setting":
         manager = ai_manager_for_args(args)
+        if is_wechat_channel(args):
+            target_user = str(getattr(args, "wechat_bot_target_user_id", "") or "").strip()
+            if target_user:
+                wechat_bot.WeChatMenuState(wechat_client_for_args(args).config.state_dir).set(target_user, "setting")
+            push_channel_raw_text(args, wechat_settings_text(args, manager))
+            return
         push_feishu_card(args, settings_card_for_args(args, manager))
         return
 
@@ -2809,17 +3102,17 @@ def run_bot_command(args: argparse.Namespace, command: BotCommand) -> None:
         title += f"（请求 {command.count} 条，NGA 临时限流时会先返回已获取部分）"
     if command.action == "pack":
         file_name = f"nga_{command.target_type}_{command.target_id or 'any'}_{len(posts)}_{int(time.time())}.txt"
-        push_feishu_file(args, file_name, posts_to_txt(posts, title))
+        push_channel_file(args, file_name, posts_to_txt(posts, title))
     else:
-        creds = feishu_credentials(args)
-        if args.message_format == "card" and len(posts) > 20:
+        if not is_wechat_channel(args) and args.message_format == "card" and len(posts) > 20:
+            creds = feishu_credentials(args)
             for start in range(0, len(posts), 20):
                 chunk = posts[start : start + 20]
                 chunk_title = f"{title} ({start + 1}-{start + len(chunk)})"
                 push_feishu_app_posts(*creds, chunk, chunk_title, args.timeout, args.message_format, args=args)
                 time.sleep(0.4)
         else:
-            push_feishu_app_posts(*creds, posts, title, args.timeout, args.message_format, args=args)
+            push_channel_posts(args, posts, title)
 
 
 def run_command_background(args: argparse.Namespace, command: BotCommand, label: str) -> None:
@@ -2838,7 +3131,7 @@ def run_command_background(args: argparse.Namespace, command: BotCommand, label:
                     url="https://bbs.nga.cn/",
                     post_time=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
                 )
-                push_feishu_app_posts(*feishu_credentials(args), [err_post], "NGA 命令处理失败", args.timeout, "text")
+                push_channel_posts(args, [err_post], "NGA 命令处理失败")
             except Exception as nested:
                 print(f"发送错误消息失败: {nested}", file=sys.stderr)
 
@@ -2869,6 +3162,28 @@ def card_action_chat_id(event: Any, fallback: str) -> str:
 def card_action_sender_id(event: Any) -> str:
     event_body = getattr(event, "event", None)
     return object_sender_id(event_body) or object_sender_id(event)
+
+
+def start_wechat_poll(args: argparse.Namespace) -> None:
+    if not getattr(args, "ws_no_watch", False):
+        def watch_loop() -> None:
+            while True:
+                try:
+                    run_once(args)
+                    maybe_run_ai_schedule(args)
+                except Exception as exc:
+                    print(f"NGA 监听循环失败: {exc}", file=sys.stderr)
+                jitter = random.uniform(-args.jitter, args.jitter) if args.jitter > 0 else 0
+                time.sleep(max(1, args.interval + jitter))
+
+        threading.Thread(target=watch_loop, daemon=True).start()
+
+    while True:
+        try:
+            handle_wechat_commands(args)
+        except Exception as exc:
+            print(f"微信 Bot 长轮询失败: {exc}", file=sys.stderr)
+            time.sleep(5)
 
 
 def start_ws(args: argparse.Namespace) -> None:
@@ -3052,6 +3367,10 @@ def send_test_message(args: argparse.Namespace) -> None:
         url="https://bbs.nga.cn/thread.php?searchpost=1&authorid=150058",
         post_time=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
     )
+    if is_wechat_channel(args):
+        push_channel_posts(args, [post], "NGA 监听测试")
+        print("测试消息已发送。")
+        return
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     if app_id and app_secret and receive_id:
         push_feishu_app_posts(
@@ -3075,6 +3394,10 @@ def push_deferred_summary(args: argparse.Namespace, posts: list[NgaPost]) -> Non
         return
     state = read_json(Path(args.state_path), {})
     mention_user_id = feishu_mention_user_id(args, state)
+    if is_wechat_channel(args):
+        title = f"免打扰期间新回复汇总（{len(posts)} 条）"
+        push_channel_posts(args, posts, title)
+        return
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     webhook = args.webhook or os.getenv("FEISHU_WEBHOOK", "")
     secret = args.secret or os.getenv("FEISHU_SECRET")
@@ -3108,6 +3431,9 @@ def push_deferred_summary(args: argparse.Namespace, posts: list[NgaPost]) -> Non
 
 
 def push_to_feishu(args: argparse.Namespace, post: NgaPost, mention_user_id: str = "") -> None:
+    if is_wechat_channel(args):
+        push_channel_raw_text(args, wechat_posts_text([post], "NGA 新回复"))
+        return
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     webhook = args.webhook or os.getenv("FEISHU_WEBHOOK", "")
     secret = args.secret or os.getenv("FEISHU_SECRET")
@@ -3359,6 +3685,144 @@ def handle_feishu_commands(args: argparse.Namespace, state: dict[str, Any]) -> b
     return changed
 
 
+def wechat_attachment_paths(message: wechat_bot.WeChatMessage) -> tuple[list[Path], list[Path]]:
+    image_paths: list[Path] = []
+    file_paths: list[Path] = []
+    for attachment in message.attachments:
+        if attachment.kind == "image":
+            image_paths.append(attachment.path)
+        else:
+            file_paths.append(attachment.path)
+    return image_paths, file_paths
+
+
+def path_is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except Exception:
+        return False
+
+
+def local_file_paths_from_wechat_text(args: argparse.Namespace, text: str) -> list[Path]:
+    if not text:
+        return []
+    roots = [
+        wechat_client_for_args(args).config.state_dir,
+        ai_analysis.AIConfig.from_namespace(args).work_dir,
+    ]
+    paths: list[Path] = []
+    seen: set[str] = set()
+    patterns = [
+        r"(?:本地文件|Local file)\s*[:：]\s*(.+?)(?=\s+\|\s+|[\r\n\]]|$)",
+        r"`([A-Za-z]:\\[^`]+)`",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            raw = (match.group(1) or "").strip().strip("`'\"")
+            if not raw:
+                continue
+            candidate = Path(raw)
+            try:
+                resolved = candidate.expanduser().resolve()
+            except Exception:
+                continue
+            if not resolved.exists() or not resolved.is_file():
+                continue
+            if not any(path_is_under(resolved, root) for root in roots):
+                continue
+            key = str(resolved).lower()
+            if key not in seen:
+                seen.add(key)
+                paths.append(resolved)
+    return paths
+
+
+def enqueue_ai_direct_job(
+    args: argparse.Namespace,
+    label: str,
+    fn: Callable[[], None],
+) -> None:
+    def queued_job() -> None:
+        try:
+            print(f"开始处理 {label}")
+            fn()
+            print(f"处理完成 {label}")
+        except Exception as exc:
+            print(f"AI 微信任务失败 {label}: {exc}", file=sys.stderr)
+            try:
+                if ai_analysis.AIConfig.from_namespace(args).send_errors_to_feishu:
+                    push_channel_text(args, "AI task failed", str(exc))
+            except Exception as nested:
+                print(f"发送 AI 微信错误消息失败: {nested}", file=sys.stderr)
+
+    enqueue_ai_feishu_job(args, label, queued_job)
+
+
+def handle_wechat_commands(args: argparse.Namespace) -> bool:
+    if args.disable_commands:
+        return False
+    client = wechat_client_for_args(args)
+    changed = False
+    for message in client.get_updates():
+        if client.is_handled(message):
+            continue
+        scoped_args = args_for_wechat_user(args, message.user_id)
+        text = wechat_normalize_short_command(scoped_args, message.user_id, message.text)
+        sender_id = message.user_id
+        image_paths, file_paths = wechat_attachment_paths(message)
+        file_paths.extend(local_file_paths_from_wechat_text(scoped_args, text))
+        try:
+            if ai_analysis.parse_ai_command(text) is not None:
+                enqueue_ai_direct_job(
+                    scoped_args,
+                    f"微信消息:{message.message_id} /ai",
+                    lambda scoped_args=scoped_args, text=text, sender_id=sender_id, image_paths=image_paths, file_paths=file_paths: run_ai_command(
+                        scoped_args,
+                        text,
+                        sender_id,
+                        image_paths,
+                        file_paths,
+                    ),
+                )
+            else:
+                if text == "/wechat binding":
+                    push_channel_raw_text(scoped_args, wechat_bot.describe_binding(client.config))
+                    client.mark_handled(message)
+                    changed = True
+                    continue
+                command = parse_bot_command(text, args.default_author_id, args.default_tid)
+                if command is not None:
+                    run_command_background(scoped_args, command, f"微信消息:{message.message_id}")
+                elif (image_paths or file_paths) or should_forward_plain_text_to_ai(scoped_args, text, sender_id, [], []):
+                    manager = ai_manager_for_args(scoped_args)
+                    if not manager.effective_enabled() or not manager.is_authorized(sender_id):
+                        client.mark_handled(message)
+                        changed = True
+                        continue
+                    prompt_text = text or ("请分析我发送的图片。" if image_paths and not file_paths else "请分析我发送的附件。")
+                    enqueue_ai_direct_job(
+                        scoped_args,
+                        f"微信消息:{message.message_id} AI conversation",
+                        lambda scoped_args=scoped_args, text=prompt_text, sender_id=sender_id, image_paths=image_paths, file_paths=file_paths: run_ai_plain_text(
+                            scoped_args,
+                            text,
+                            sender_id,
+                            image_paths,
+                            file_paths,
+                        ),
+                    )
+        except Exception as exc:
+            print(f"微信消息处理失败 {message.message_id}: {exc}", file=sys.stderr)
+            try:
+                push_channel_text(scoped_args, "微信命令处理失败", str(exc))
+            except Exception as nested:
+                print(f"发送微信错误消息失败: {nested}", file=sys.stderr)
+        client.mark_handled(message)
+        changed = True
+    return changed
+
+
 def run_once(args: argparse.Namespace) -> int:
     cookie = args.cookie or os.getenv("NGA_COOKIE", "")
     if not cookie:
@@ -3445,7 +3909,8 @@ def run_once(args: argparse.Namespace) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Watch an NGA user's replies and push new ones to Feishu.")
+    parser = argparse.ArgumentParser(description="Watch an NGA user's replies and push new ones to Feishu or WeChat.")
+    parser.add_argument("--bot-channel", choices=["feishu", "wechat"], default=os.getenv("NGA_BOT_CHANNEL", "feishu"))
     parser.add_argument("--author-id", default=os.getenv("NGA_AUTHOR_ID", DEFAULT_AUTHOR_ID))
     parser.add_argument("--default-author-id", default=os.getenv("NGA_DEFAULT_AUTHOR_ID", DEFAULT_AUTHOR_ID))
     parser.add_argument("--default-tid", default=os.getenv("NGA_DEFAULT_TID", DEFAULT_TID))
@@ -3493,6 +3958,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--disable-commands", action="store_true", help="不轮询飞书群组普通消息命令。")
     parser.add_argument("--command-lookback", type=int, default=int(os.getenv("FEISHU_COMMAND_LOOKBACK", "600")))
+    parser.add_argument("--wechat-bot-token", default=os.getenv("WECHAT_BOT_TOKEN", ""), help="微信 ilink bot Bearer token。")
+    parser.add_argument("--wechat-bot-base-url", default=os.getenv("WECHAT_BOT_BASE_URL", wechat_bot.DEFAULT_WECHAT_BASE_URL))
+    parser.add_argument("--wechat-bot-cdn-base-url", default=os.getenv("WECHAT_BOT_CDN_BASE_URL", wechat_bot.DEFAULT_WECHAT_CDN_BASE_URL))
+    parser.add_argument("--wechat-bot-target-user-id", default=os.getenv("WECHAT_BOT_TARGET_USER_ID", ""))
+    parser.add_argument("--wechat-bot-allowed-user-ids", default=os.getenv("WECHAT_BOT_ALLOWED_USER_IDS", ""))
+    parser.add_argument("--wechat-bot-poll-timeout-ms", type=int, default=int(os.getenv("WECHAT_BOT_POLL_TIMEOUT_MS", str(wechat_bot.DEFAULT_WECHAT_POLL_TIMEOUT_MS))))
+    parser.add_argument("--wechat-bot-route-tag", default=os.getenv("WECHAT_BOT_ROUTE_TAG", ""))
+    parser.add_argument("--wechat-bot-account-id", default=os.getenv("WECHAT_BOT_ACCOUNT_ID", "default"))
+    parser.add_argument("--wechat-bot-state-dir", default=os.getenv("WECHAT_BOT_STATE_DIR", ""))
+    parser.add_argument("--wechat-poll", action="store_true", help="使用微信 ilink 长轮询接收消息。bot_channel=wechat 时会自动启用。")
     parser.add_argument("--retries", type=int, default=int(os.getenv("NGA_RETRIES", "10")))
     parser.add_argument("--retry-delay", type=float, default=float(os.getenv("NGA_RETRY_DELAY", "2")))
     parser.add_argument("--nga-page-delay", type=float, default=float(os.getenv("NGA_PAGE_DELAY", str(DEFAULT_NGA_PAGE_DELAY))))
@@ -3514,7 +3989,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if args.ws:
+    if args.ws and not is_wechat_channel(args):
         start_ws(args)
         return
     if args.list_feishu_chats:
@@ -3537,16 +4012,23 @@ def main() -> None:
     if args.mark_seen:
         run_once(args)
         return
+    if is_wechat_channel(args) and not args.once:
+        start_wechat_poll(args)
+        return
 
     while True:
         try:
             state_path = Path(args.state_path)
             state = read_json(state_path, {"seen": []})
             try:
-                if handle_feishu_commands(args, state):
+                if is_wechat_channel(args):
+                    changed = handle_wechat_commands(args)
+                else:
+                    changed = handle_feishu_commands(args, state)
+                if changed:
                     write_watcher_state(state_path, state)
             except Exception as exc:
-                print(f"飞书命令轮询失败: {exc}", file=sys.stderr)
+                print(f"{bot_channel(args)} 命令轮询失败: {exc}", file=sys.stderr)
             run_once(args)
             maybe_run_ai_schedule(args)
         except Exception as exc:

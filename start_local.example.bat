@@ -10,6 +10,16 @@ set "FEISHU_APP_SECRET="
 set "FEISHU_RECEIVE_ID="
 set "FEISHU_ID_TYPE=chat_id"
 
+rem Message channel. Default is feishu. Set to wechat to ignore Feishu settings.
+set "NGA_BOT_CHANNEL=feishu"
+rem set "WECHAT_BOT_TOKEN="
+rem set "WECHAT_BOT_BASE_URL=https://ilinkai.weixin.qq.com"
+rem set "WECHAT_BOT_CDN_BASE_URL=https://novac2c.cdn.weixin.qq.com/c2c"
+rem set "WECHAT_BOT_TARGET_USER_ID="
+rem set "WECHAT_BOT_ALLOWED_USER_IDS="
+rem set "WECHAT_BOT_POLL_TIMEOUT_MS=35000"
+rem set "WECHAT_BOT_ACCOUNT_ID=default"
+
 rem Optional defaults.
 set "NGA_DEFAULT_AUTHOR_ID=150058"
 set "NGA_DEFAULT_TID=45974302"
