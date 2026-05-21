@@ -59,8 +59,16 @@ DEFAULT_QUIET_END_TIME = "00:00"
 DEFAULT_QUIET_POLICY = "ignore"
 DEFAULT_NGA_PAGE_DELAY = 2.0
 DEFAULT_NGA_UNAVAILABLE_RETRIES = 3
+DEFAULT_RETRY_INITIAL_DELAY = 1.0
+DEFAULT_NGA_REQUEST_MIN_INTERVAL = 1.0
+DEFAULT_NGA_CACHE_TTL = 15.0
+DEFAULT_NGA_TARGET_MIN_DELAY = 2.0
+DEFAULT_NGA_TARGET_MAX_DELAY = 6.0
+DEFAULT_NGA_UNAVAILABLE_BACKOFF_BASE = 60.0
+DEFAULT_NGA_UNAVAILABLE_BACKOFF_MAX = 600.0
 DEFAULT_FEISHU_CARD_IMAGE_LIMIT = 6
 FEISHU_IMAGE_MAX_BYTES = 10 * 1024 * 1024
+NGA_TEMPORARY_STATUS_CODES = {429, 500, 502, 503, 504}
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -71,18 +79,45 @@ _AI_FEISHU_QUEUES: dict[tuple[str, str], "queue.Queue[Callable[[], None]]"] = {}
 _AI_FEISHU_QUEUE_LOCK = threading.Lock()
 _WATCHER_STATE_LOCK = threading.Lock()
 _FEISHU_IMAGE_CACHE_LOCK = threading.Lock()
+_NGA_REQUEST_LOCK = threading.Lock()
+_NGA_LAST_REQUEST_AT = 0.0
+_NGA_JSON_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _WECHAT_CLIENTS: dict[tuple[str, str], wechat_bot.WeChatBotClient] = {}
 
 
 class NgaTemporaryUnavailable(RuntimeError):
-    pass
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def nga_status_code(exc: BaseException | None) -> int | None:
+    current = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        status = getattr(current, "status_code", None) or getattr(current, "code", None)
+        try:
+            if int(status) in range(100, 600):
+                return int(status)
+        except (TypeError, ValueError):
+            pass
+        text = str(current)
+        for match in re.finditer(r"(?:状态码|status(?:_code)?|HTTP(?:\s+Error)?|code)\s*[=: ]\s*(\d{3})", text, flags=re.I):
+            code = int(match.group(1))
+            if code in range(100, 600):
+                return code
+        current = current.__cause__ or current.__context__
+    return None
 
 
 def is_nga_temporary_unavailable(exc: Exception) -> bool:
-    text = str(exc)
-    return isinstance(exc, NgaTemporaryUnavailable) or any(
-        marker in text for marker in ("状态码=429", "状态码=500", "状态码=502", "状态码=503", "状态码=504")
-    )
+    status = nga_status_code(exc)
+    return isinstance(exc, NgaTemporaryUnavailable) or status in NGA_TEMPORARY_STATUS_CODES
+
+
+def is_nga_service_unavailable(exc: Exception) -> bool:
+    return nga_status_code(exc) == 503
 
 
 @dataclass(frozen=True)
@@ -117,6 +152,15 @@ class NgaPost:
     author_id: str = ""
     floor: str = ""
     image_urls: tuple[str, ...] = ()
+    source_type: str = ""
+    source_id: str = ""
+    source_label: str = ""
+
+
+@dataclass(frozen=True)
+class WatchTarget:
+    id: str
+    label: str = ""
 
 
 @dataclass(frozen=True)
@@ -165,6 +209,106 @@ def feishu_credentials(args: argparse.Namespace) -> tuple[str, str, str, str]:
     receive_id = args.feishu_receive_id or os.getenv("FEISHU_RECEIVE_ID", "")
     receive_id_type = args.feishu_id_type or os.getenv("FEISHU_ID_TYPE", "chat_id")
     return app_id, app_secret, receive_id, receive_id_type
+
+
+TARGET_INLINE_SEPARATOR_RE = re.compile(r"[,，;；](?=\s*\d+(?:\s*[:=]|\s*(?:[,，;；]|$)))")
+
+
+def parse_target_list(raw: Any, fallback_id: str = "") -> list[WatchTarget]:
+    text = str(raw or "").strip()
+    targets: list[WatchTarget] = []
+    seen: set[str] = set()
+    parts: list[str] = []
+    for line in re.split(r"[\r\n]+", text):
+        item = line.strip()
+        if not item:
+            continue
+        parts.extend(part.strip() for part in TARGET_INLINE_SEPARATOR_RE.split(item) if part.strip())
+    for part in parts:
+        item = part.strip()
+        if not item:
+            continue
+        if "=" in item:
+            raw_id, raw_label = item.split("=", 1)
+        elif ":" in item:
+            raw_id, raw_label = item.split(":", 1)
+        else:
+            raw_id, raw_label = item, ""
+        target_id = raw_id.strip()
+        label = raw_label.strip()
+        if not target_id or target_id in seen:
+            continue
+        seen.add(target_id)
+        targets.append(WatchTarget(target_id, label))
+    fallback = str(fallback_id or "").strip()
+    if not targets and fallback:
+        targets.append(WatchTarget(fallback, ""))
+    return targets
+
+
+def target_display_name(target: WatchTarget) -> str:
+    return f"{target.label}({target.id})" if target.label else target.id
+
+
+def post_source_display_name(post: NgaPost) -> str:
+    return (post.source_label or post.source_id or "").strip()
+
+
+def new_reply_title(post: NgaPost) -> str:
+    source_name = post_source_display_name(post)
+    if source_name:
+        if post.source_label:
+            return f"{source_name} 新回复"
+        if post.source_type == "author":
+            return f"用户 {source_name} 新回复"
+        return f"{source_name} 新回复"
+    return "NGA 新回复"
+
+
+def watch_author_targets(args: argparse.Namespace) -> list[WatchTarget]:
+    raw = getattr(args, "author_ids", "") or getattr(args, "watch_author_ids", "")
+    return parse_target_list(raw, getattr(args, "author_id", "") or getattr(args, "default_author_id", DEFAULT_AUTHOR_ID))
+
+
+def preset_thread_targets(args: argparse.Namespace) -> list[WatchTarget]:
+    raw = getattr(args, "preset_thread_ids", "")
+    return parse_target_list(raw, getattr(args, "default_tid", DEFAULT_TID))
+
+
+def default_author_target(args: argparse.Namespace) -> WatchTarget:
+    return watch_author_targets(args)[0]
+
+
+def default_thread_target(args: argparse.Namespace) -> WatchTarget:
+    return preset_thread_targets(args)[0]
+
+
+def resolve_target_alias(token: str, targets: list[WatchTarget], prefix: str) -> str:
+    text = str(token or "").strip()
+    match = re.fullmatch(rf"{re.escape(prefix)}(\d+)", text, flags=re.I)
+    if not match:
+        return text
+    index = int(match.group(1)) - 1
+    if 0 <= index < len(targets):
+        return targets[index].id
+    return text
+
+
+def add_post_source(post: NgaPost, source_type: str, target: WatchTarget) -> NgaPost:
+    return NgaPost(
+        key=post.key,
+        subject=post.subject,
+        content=post.content,
+        url=post.url,
+        post_time=post.post_time,
+        author=post.author,
+        author_id=post.author_id,
+        floor=post.floor,
+        image_urls=post.image_urls,
+        source_type=source_type,
+        source_id=target.id,
+        source_label=target.label,
+    )
 
 
 def bot_channel(args: argparse.Namespace) -> str:
@@ -333,7 +477,14 @@ def is_quiet_time(args: argparse.Namespace, now: time.struct_time | None = None)
     return is_weekly_range_time(start_day, start, end_day, end, local_now)
 
 
-def fetch_nga_page(author_id: str, page: int, cookie: str, timeout: int) -> dict[str, Any]:
+def fetch_nga_page(
+    author_id: str,
+    page: int,
+    cookie: str,
+    timeout: int,
+    request_min_interval: float = DEFAULT_NGA_REQUEST_MIN_INTERVAL,
+    cache_ttl: float = DEFAULT_NGA_CACHE_TTL,
+) -> dict[str, Any]:
     params = {
         "searchpost": "1",
         "page": str(page),
@@ -342,22 +493,79 @@ def fetch_nga_page(author_id: str, page: int, cookie: str, timeout: int) -> dict
     if author_id and author_id != "0":
         params["authorid"] = author_id
     query = urllib.parse.urlencode(params)
-    return fetch_nga_json(f"{NGA_ENDPOINT}?{query}", cookie, timeout, f"用户回复第 {page} 页")
+    referer = "https://bbs.nga.cn/"
+    if author_id and author_id != "0":
+        referer = f"https://bbs.nga.cn/nuke.php?func=ucp&uid={urllib.parse.quote(str(author_id), safe='')}"
+    return fetch_nga_json(f"{NGA_ENDPOINT}?{query}", cookie, timeout, f"用户回复第 {page} 页", request_min_interval, cache_ttl, referer)
 
 
-def fetch_nga_thread_page(tid: str, page: int, cookie: str, timeout: int) -> dict[str, Any]:
+def fetch_nga_thread_page(
+    tid: str,
+    page: int,
+    cookie: str,
+    timeout: int,
+    request_min_interval: float = DEFAULT_NGA_REQUEST_MIN_INTERVAL,
+    cache_ttl: float = DEFAULT_NGA_CACHE_TTL,
+) -> dict[str, Any]:
     query = urllib.parse.urlencode({"tid": tid, "page": str(page), "__output": "8"})
-    return fetch_nga_json(f"{NGA_READ_ENDPOINT}?{query}", cookie, timeout, f"帖子 {tid} 第 {page} 页")
+    referer = f"https://bbs.nga.cn/read.php?tid={urllib.parse.quote(str(tid), safe='')}"
+    return fetch_nga_json(f"{NGA_READ_ENDPOINT}?{query}", cookie, timeout, f"帖子 {tid} 第 {page} 页", request_min_interval, cache_ttl, referer)
 
 
-def fetch_nga_json(url: str, cookie: str, timeout: int, label: str) -> dict[str, Any]:
+def nga_json_cache_key(url: str, cookie: str) -> str:
+    cookie_hash = hashlib.sha256(cookie.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    return f"{cookie_hash}:{url}"
+
+
+def fetch_nga_json(
+    url: str,
+    cookie: str,
+    timeout: int,
+    label: str,
+    request_min_interval: float = DEFAULT_NGA_REQUEST_MIN_INTERVAL,
+    cache_ttl: float = DEFAULT_NGA_CACHE_TTL,
+    referer: str = "https://bbs.nga.cn/",
+) -> dict[str, Any]:
+    global _NGA_LAST_REQUEST_AT
+    request_min_interval = max(0.0, float(request_min_interval))
+    cache_ttl = max(0.0, float(cache_ttl))
+    cache_key = nga_json_cache_key(url, cookie)
+    with _NGA_REQUEST_LOCK:
+        now = time.monotonic()
+        cached = _NGA_JSON_CACHE.get(cache_key)
+        if cached and cache_ttl > 0 and now - cached[0] <= cache_ttl:
+            return copy.deepcopy(cached[1])
+        if cache_ttl > 0:
+            expired_before = now - cache_ttl
+            for key, (cached_at, _) in list(_NGA_JSON_CACHE.items()):
+                if cached_at < expired_before:
+                    _NGA_JSON_CACHE.pop(key, None)
+        wait_for = request_min_interval - (now - _NGA_LAST_REQUEST_AT)
+        if wait_for > 0:
+            time.sleep(wait_for)
+        try:
+            payload = fetch_nga_json_uncached(url, cookie, timeout, label, referer)
+        finally:
+            _NGA_LAST_REQUEST_AT = time.monotonic()
+        if cache_ttl > 0:
+            _NGA_JSON_CACHE[cache_key] = (_NGA_LAST_REQUEST_AT, copy.deepcopy(payload))
+        return payload
+
+
+def fetch_nga_json_uncached(url: str, cookie: str, timeout: int, label: str, referer: str = "https://bbs.nga.cn/") -> dict[str, Any]:
     req = urllib.request.Request(
         url,
         headers={
             "User-Agent": DEFAULT_USER_AGENT,
             "Cookie": cookie,
             "Accept": "application/json,text/plain,*/*",
-            "Referer": "https://bbs.nga.cn/",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Referer": referer or "https://bbs.nga.cn/",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
         },
     )
     try:
@@ -379,11 +587,18 @@ def fetch_nga_json(url: str, cookie: str, timeout: int, label: str) -> dict[str,
         preview = re.sub(r"\s+", " ", text[:300]).strip()
         if not preview:
             preview = "<空响应>"
-        error_cls = NgaTemporaryUnavailable if status in {429, 500, 502, 503, 504} else RuntimeError
-        raise error_cls(
+        message = (
             f"NGA 在 {label} 返回的不是 JSON："
             f"状态码={status}，内容类型={content_type}，响应预览={preview}"
-        ) from exc
+        )
+        if status in NGA_TEMPORARY_STATUS_CODES:
+            raise NgaTemporaryUnavailable(message, status_code=status) from exc
+        raise RuntimeError(message) from exc
+    if status >= 400:
+        message = f"NGA 在 {label} 返回 HTTP 状态码={status}，内容类型={content_type}"
+        if status in NGA_TEMPORARY_STATUS_CODES:
+            raise NgaTemporaryUnavailable(message, status_code=status)
+        raise RuntimeError(message)
     if payload.get("error"):
         err = payload["error"]
         message = err.get("0") if isinstance(err, dict) else str(err)
@@ -552,6 +767,12 @@ def post_in_quiet_range(args: argparse.Namespace, post: NgaPost) -> bool:
     return is_quiet_time(args, post_time)
 
 
+def post_sort_key(post: NgaPost) -> tuple[float, str]:
+    parsed = parse_post_time(post.post_time)
+    timestamp = time.mktime(parsed) if parsed is not None else 0.0
+    return timestamp, post.key
+
+
 def extract_posts(payload: dict[str, Any]) -> list[NgaPost]:
     seen: set[str] = set()
     posts: list[NgaPost] = []
@@ -615,14 +836,19 @@ def feishu_message_text(post: NgaPost) -> str:
     byline = f"Author: {post.author or post.author_id or 'unknown'}"
     if post.floor:
         byline += f" Floor: {post.floor}"
+    source_line = ""
+    if post.source_id:
+        source_name = post.source_label or post.source_id
+        source_kind = "user" if post.source_type == "author" else post.source_type or "target"
+        source_line = f"Watch: {source_kind} {source_name} ({post.source_id})"
     lines = [
-        f"NGA new reply: {post.subject}",
+        f"{new_reply_title(post)}: {post.subject}",
         f"Time: {post.post_time or 'unknown'}",
         byline,
-        f"Link: {post.url}",
-        "",
-        friendly_post_content(post.content, quote_limit=700, reply_limit=1200)[:1800],
     ]
+    if source_line:
+        lines.append(source_line)
+    lines.extend([f"Link: {post.url}", "", friendly_post_content(post.content, quote_limit=700, reply_limit=1200)[:1800]])
     if post.image_urls:
         lines.extend(["", "Images:", *[f"- {url}" for url in post.image_urls]])
     return "\n".join(lines)
@@ -638,6 +864,8 @@ def feishu_history_text(posts: list[NgaPost], title: str) -> str:
             meta += f" | {post.author or post.author_id}"
         if post.floor:
             meta += f" | #{post.floor}"
+        if post.source_id:
+            meta += f" | watch {post.source_label or post.source_id}"
         lines.append(f"{meta} {post.url}")
         lines.append(excerpt)
         if post.image_urls:
@@ -656,6 +884,8 @@ def wechat_posts_text(posts: list[NgaPost], title: str) -> str:
             meta += f" | {post.author or post.author_id}"
         if post.floor:
             meta += f" | #{post.floor}"
+        if post.source_id:
+            meta += f" | watch {post.source_label or post.source_id}"
         lines.append(meta)
         lines.append(post.url)
         lines.append("")
@@ -676,6 +906,8 @@ def posts_to_txt(posts: list[NgaPost], title: str) -> str:
         ]
         if post.floor:
             meta.append(f"floor: {post.floor}")
+        if post.source_id:
+            meta.append(f"watch: {post.source_type or 'target'} {post.source_label or post.source_id} ({post.source_id})")
         if post.image_urls:
             meta.extend(f"image: {url}" for url in post.image_urls)
         chunks.append("\n".join(meta))
@@ -766,12 +998,17 @@ def post_card_element(post: NgaPost, image_keys_by_url: dict[str, str] | None = 
     time_text = lark_md_escape(post.post_time or "unknown")
     author_text = lark_md_escape(post.author or post.author_id or "unknown")
     floor_text = f" | #{lark_md_escape(post.floor)}" if post.floor else ""
+    source_text = ""
+    if post.source_id:
+        source_name = post.source_label or post.source_id
+        source_kind = "user" if post.source_type == "author" else post.source_type or "target"
+        source_text = f"\nWatch: {lark_md_escape(source_kind)} {lark_md_escape(source_name)} ({lark_md_escape(post.source_id)})"
     elements: list[dict[str, Any]] = [
         {
             "tag": "div",
             "text": {
                 "tag": "lark_md",
-                "content": f"**{title}**\n{time_text} | {author_text}{floor_text}",
+                "content": f"**{title}**\n{time_text} | {author_text}{floor_text}{source_text}",
             },
         },
     ]
@@ -996,6 +1233,9 @@ def deserialize_post(value: Any) -> NgaPost | None:
             author_id=str(value.get("author_id") or ""),
             floor=str(value.get("floor") or ""),
             image_urls=image_urls,
+            source_type=str(value.get("source_type") or ""),
+            source_id=str(value.get("source_id") or ""),
+            source_label=str(value.get("source_label") or ""),
         )
     except Exception:
         return None
@@ -1025,6 +1265,12 @@ def append_deferred_posts(state: dict[str, Any], posts: list[NgaPost]) -> int:
         state.setdefault("deferred_started_at", int(time.time()))
         state["deferred_updated_at"] = int(time.time())
     return added
+
+
+def state_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    return []
 
 
 def push_feishu(webhook: str, secret: str | None, post: NgaPost, timeout: int) -> None:
@@ -1101,7 +1347,8 @@ def push_feishu_app(
     else:
         msg_type = "interactive"
         image_keys_by_url = feishu_image_keys_for_posts(args, app_id, app_secret, [post])
-        content = json.dumps(feishu_posts_card([post], "NGA new reply", mention_user_id, image_keys_by_url), ensure_ascii=False)
+        title = new_reply_title(post)
+        content = json.dumps(feishu_posts_card([post], title, mention_user_id, image_keys_by_url), ensure_ascii=False)
     result = feishu_app_request(
         app_id,
         app_secret,
@@ -2117,6 +2364,38 @@ def after_posts_pushed_for_ai(args: argparse.Namespace, posts: list[NgaPost]) ->
         print(f"AI 新帖保存/分析失败: {exc}", file=sys.stderr)
 
 
+def save_posts_for_ai_history(args: argparse.Namespace, posts: list[NgaPost]) -> None:
+    if not posts:
+        return
+    try:
+        manager = ai_manager_for_args(args)
+        for post in posts:
+            manager.save_post_event(post, force=True)
+    except Exception as exc:
+        print(f"AI 初始化历史保存失败: {exc}", file=sys.stderr)
+
+
+def ai_source_history_needs_backfill(args: argparse.Namespace, target: WatchTarget) -> bool:
+    try:
+        config = ai_analysis.AIConfig.from_namespace(args)
+        key = f"author_{ai_analysis.safe_key(target.id)}"
+        history_path = config.work_dir / "events" / "by_source" / f"{key}.jsonl"
+        if not history_path.exists() or history_path.stat().st_size <= 0:
+            return True
+        index = ai_analysis.read_json(config.work_dir / "events" / "source_index.json", {})
+        sources = index.get("sources") if isinstance(index, dict) else {}
+        item = sources.get(key) if isinstance(sources, dict) else None
+        if not isinstance(item, dict):
+            return True
+        label = target.label.strip()
+        if not label:
+            return False
+        aliases = {str(alias).strip() for alias in item.get("aliases") or [] if str(alias).strip()}
+        return label != str(item.get("label") or "").strip() and label not in aliases
+    except Exception:
+        return False
+
+
 def maybe_run_ai_schedule(args: argparse.Namespace) -> None:
     try:
         ai_manager_for_args(args).maybe_scheduled_analysis()
@@ -2330,8 +2609,20 @@ def default_command_count(command_name: str) -> int:
     return DEFAULT_THREAD_COUNT if command_name.endswith("_t") else DEFAULT_REPLY_COUNT
 
 
-def parse_bot_command(text: str, default_author_id: str, default_tid: str) -> BotCommand | None:
+def parse_bot_command(
+    text: str,
+    default_author_id: str,
+    default_tid: str,
+    author_targets: list[WatchTarget] | None = None,
+    thread_targets: list[WatchTarget] | None = None,
+    effective_author_id: str = "",
+    effective_tid: str = "",
+) -> BotCommand | None:
     compact = " ".join(text.split())
+    author_targets = author_targets or parse_target_list("", default_author_id)
+    thread_targets = thread_targets or parse_target_list("", default_tid)
+    effective_author_id = str(effective_author_id or "").strip() or (author_targets[0].id if author_targets else default_author_id)
+    effective_tid = str(effective_tid or "").strip() or (thread_targets[0].id if thread_targets else default_tid)
     if re.search(r"(?:^|\s)/start(?:\s|$)", compact):
         return BotCommand(action="start")
     if re.search(r"(?:^|\s)/setting(?:s)?(?:\s|$)", compact):
@@ -2342,18 +2633,21 @@ def parse_bot_command(text: str, default_author_id: str, default_tid: str) -> Bo
         return BotCommand(
             action="history",
             target_type="reply",
-            target_id=default_author_id,
+            target_id=effective_author_id,
             count=clamp_count(legacy.group(1), DEFAULT_REPLY_COUNT, 50),
         )
 
-    match = re.search(r"(?:^|\s)/(history_r|pack_r|history_t|pack_t)(?:\s+(\d+))?(?:\s+(\d{1,4}))?(?:\s|$)", compact)
+    match = re.search(r"(?:^|\s)/(history_r|pack_r|history_t|pack_t)(?:\s+([A-Za-z]?\d+))?(?:\s+(\d{1,4}))?(?:\s|$)", compact)
     if not match:
         return None
 
     name, raw_target, raw_count = match.groups()
-    target = raw_target or (default_tid if name.endswith("_t") else default_author_id)
-    count = clamp_count(raw_count, default_command_count(name), 500 if name.startswith("pack_") else 100)
     target_type = "thread" if name.endswith("_t") else "reply"
+    if target_type == "thread":
+        target = resolve_target_alias(raw_target or "", thread_targets, "t") or effective_tid
+    else:
+        target = resolve_target_alias(raw_target or "", author_targets, "u") or effective_author_id
+    count = clamp_count(raw_count, default_command_count(name), 500 if name.startswith("pack_") else 100)
 
     # Compatibility for the older "/pack_r <default tid> <count>" spelling.
     if name == "pack_r" and target == default_tid:
@@ -2363,13 +2657,26 @@ def parse_bot_command(text: str, default_author_id: str, default_tid: str) -> Bo
     return BotCommand(action=action, target_type=target_type, target_id=target, count=count)
 
 
-def bot_command_from_form(form: dict[str, Any], default_author_id: str, default_tid: str) -> BotCommand:
+def bot_command_from_form(
+    form: dict[str, Any],
+    default_author_id: str,
+    default_tid: str,
+    author_targets: list[WatchTarget] | None = None,
+    thread_targets: list[WatchTarget] | None = None,
+) -> BotCommand:
     raw_name = str(form.get("command") or form.get("action") or "history_r")
-    raw_target = str(form.get("target_id") or "").strip()
+    raw_custom_target = str(form.get("custom_target_id") or "").strip()
+    raw_preset_target = str(form.get("preset_target_id") or "").strip()
+    raw_target = raw_custom_target or raw_preset_target or str(form.get("target_id") or "").strip()
     raw_count = str(form.get("count") or "").strip()
     if raw_name not in {"history_r", "pack_r", "history_t", "pack_t"}:
         raw_name = "history_r"
-    target = raw_target or (default_tid if raw_name.endswith("_t") else default_author_id)
+    author_targets = author_targets or parse_target_list("", default_author_id)
+    thread_targets = thread_targets or parse_target_list("", default_tid)
+    if raw_name.endswith("_t"):
+        target = resolve_target_alias(raw_target, thread_targets, "t") or (thread_targets[0].id if thread_targets else default_tid)
+    else:
+        target = resolve_target_alias(raw_target, author_targets, "u") or (author_targets[0].id if author_targets else default_author_id)
     count = clamp_count(raw_count or None, default_command_count(raw_name), 500 if raw_name.startswith("pack_") else 100)
     target_type = "thread" if raw_name.endswith("_t") else "reply"
     action = "pack" if raw_name.startswith("pack_") else "history"
@@ -2609,7 +2916,21 @@ def preset_button_column(label: str, command: str, target_id: str, count: str) -
     }
 
 
-def command_form_card(command: str, target_id: str, count: str) -> dict[str, Any]:
+def target_select_options(targets: list[WatchTarget], prefix: str) -> list[dict[str, Any]]:
+    options: list[dict[str, Any]] = []
+    for index, target in enumerate(targets, 1):
+        label = target_display_name(target)
+        options.append({"text": {"tag": "plain_text", "content": f"{prefix}{index} {label}"[:80]}, "value": target.id})
+    return options
+
+
+def command_form_card(
+    command: str,
+    target_id: str,
+    count: str,
+    author_targets: list[WatchTarget] | None = None,
+    thread_targets: list[WatchTarget] | None = None,
+) -> dict[str, Any]:
     labels = {
         "history_r": "查询用户回复",
         "pack_r": "打包用户回复",
@@ -2617,6 +2938,9 @@ def command_form_card(command: str, target_id: str, count: str) -> dict[str, Any
         "pack_t": "打包帖子回复",
     }
     target_label = "uid" if command.endswith("_r") else "tid"
+    targets = author_targets if command.endswith("_r") else thread_targets
+    targets = targets or [WatchTarget(target_id, "")]
+    prefix = "u" if command.endswith("_r") else "t"
     return {
         "schema": "2.0",
         "config": {"wide_screen_mode": True},
@@ -2632,10 +2956,16 @@ def command_form_card(command: str, target_id: str, count: str) -> dict[str, Any
                     "name": "nga_command_form",
                     "elements": [
                         {
+                            "tag": "select_static",
+                            "name": "preset_target_id",
+                            "placeholder": {"tag": "plain_text", "content": "Preset target"},
+                            "options": target_select_options(targets, prefix),
+                        },
+                        {
                             "tag": "input",
-                            "name": "target_id",
-                            "placeholder": {"tag": "plain_text", "content": target_label},
-                            "default_value": target_id,
+                            "name": "custom_target_id",
+                            "placeholder": {"tag": "plain_text", "content": f"Custom {target_label} (optional)"},
+                            "default_value": "",
                         },
                         {
                             "tag": "input",
@@ -2904,29 +3234,149 @@ def ai_mode_text(manager: ai_analysis.AIManager) -> str:
     return "\n".join(lines)
 
 
-def wechat_start_text(default_author_id: str, default_tid: str) -> str:
-    return "\n".join(
-        [
-            "NGA 快捷菜单",
-            f"默认 uid {default_author_id} = 狼大",
-            f"默认 tid {default_tid} = 狼大贴",
-            "",
-            f"1 查询狼大最近 {DEFAULT_REPLY_COUNT} 条回复",
-            "2 打包狼大最近 20 条回复",
-            f"3 查询狼大帖最近 {DEFAULT_THREAD_COUNT} 条",
-            "4 打包狼大帖最近 50 条",
-            "5 打开设置",
-            "",
-            "也可以直接发送：",
-            "hr10 查询狼大最近 10 条回复",
-            "pr20 打包狼大最近 20 条回复",
-            "ht10 查询狼大贴最近 10 条",
-            "pt50 打包狼大贴最近 50 条",
-            "s 打开设置",
-            "完整命令仍可用：/history_r、/pack_r、/history_t、/pack_t",
-        ]
-    )
+def wechat_target_state_path(args: argparse.Namespace) -> Path:
+    return wechat_client_for_args(args).config.state_dir / "target_state.json"
 
+
+def wechat_user_target_state(args: argparse.Namespace, user_id: str) -> dict[str, str]:
+    data = read_json(wechat_target_state_path(args), {})
+    if not isinstance(data, dict):
+        return {}
+    item = data.get(user_id or "default")
+    if not isinstance(item, dict):
+        return {}
+    return {str(key): str(value) for key, value in item.items() if value is not None}
+
+
+def wechat_set_active_target(args: argparse.Namespace, user_id: str, target_type: str, target_id: str) -> None:
+    path = wechat_target_state_path(args)
+    data = read_json(path, {})
+    if not isinstance(data, dict):
+        data = {}
+    key = user_id or "default"
+    item = data.get(key)
+    if not isinstance(item, dict):
+        item = {}
+    if target_type == "author":
+        item["author_id"] = str(target_id)
+    elif target_type == "thread":
+        item["thread_id"] = str(target_id)
+    item["updated_at"] = int(time.time())
+    data[key] = item
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(path, data)
+
+
+def target_id_exists(targets: list[WatchTarget], target_id: str) -> bool:
+    return any(target.id == target_id for target in targets)
+
+
+def wechat_active_target_ids(
+    args: argparse.Namespace,
+    user_id: str,
+    author_targets: list[WatchTarget] | None = None,
+    thread_targets: list[WatchTarget] | None = None,
+) -> tuple[str, str]:
+    author_targets = author_targets or watch_author_targets(args)
+    thread_targets = thread_targets or preset_thread_targets(args)
+    default_uid = author_targets[0].id if author_targets else str(getattr(args, "default_author_id", DEFAULT_AUTHOR_ID))
+    default_tid = thread_targets[0].id if thread_targets else str(getattr(args, "default_tid", DEFAULT_TID))
+    state = wechat_user_target_state(args, user_id)
+    active_uid = str(state.get("author_id") or "").strip()
+    active_tid = str(state.get("thread_id") or "").strip()
+    if not active_uid or not target_id_exists(author_targets, active_uid):
+        active_uid = default_uid
+    if not active_tid or not target_id_exists(thread_targets, active_tid):
+        active_tid = default_tid
+    return active_uid, active_tid
+
+
+def target_alias_label(targets: list[WatchTarget], target_id: str, prefix: str) -> str:
+    for index, target in enumerate(targets, 1):
+        if target.id == target_id:
+            return f"{prefix}{index} {target_display_name(target)}"
+    return target_id
+
+
+def command_target_label(target_type: str, target_id: str, author_targets: list[WatchTarget], thread_targets: list[WatchTarget]) -> str:
+    if target_type == "reply":
+        if not target_id or target_id == "0":
+            return "用户 任意"
+        for target in author_targets:
+            if target.id == target_id:
+                return f"用户 {target_display_name(target)}"
+        return f"用户 {target_id}"
+    if target_type == "thread":
+        for target in thread_targets:
+            if target.id == target_id:
+                return f"帖子 {target_display_name(target)}"
+        return f"帖子 {target_id}"
+    return target_id or "未知目标"
+
+
+def target_from_alias(token: str, targets: list[WatchTarget], prefix: str) -> WatchTarget | None:
+    match = re.fullmatch(rf"{re.escape(prefix)}\s*(\d+)", str(token or "").strip(), flags=re.I)
+    if not match:
+        return None
+    index = int(match.group(1)) - 1
+    if 0 <= index < len(targets):
+        return targets[index]
+    return None
+
+
+def wechat_start_text(
+    default_author_id: str,
+    default_tid: str,
+    author_targets: list[WatchTarget] | None = None,
+    thread_targets: list[WatchTarget] | None = None,
+    active_author_id: str = "",
+    active_tid: str = "",
+) -> str:
+    author_targets = author_targets or parse_target_list("", default_author_id)
+    thread_targets = thread_targets or parse_target_list("", default_tid)
+    active_author_id = active_author_id or (author_targets[0].id if author_targets else default_author_id)
+    active_tid = active_tid or (thread_targets[0].id if thread_targets else default_tid)
+
+    lines = [
+        "NGA 快捷菜单",
+        "",
+        "当前默认",
+        f"用户: {target_alias_label(author_targets, active_author_id, 'u')}",
+        f"帖子: {target_alias_label(thread_targets, active_tid, 't')}",
+        "",
+        "数字菜单",
+        f"1 查询当前用户最近 {DEFAULT_REPLY_COUNT} 条回复",
+        "2 打包当前用户最近 20 条回复",
+        f"3 查询当前帖子最近 {DEFAULT_THREAD_COUNT} 条",
+        "4 打包当前帖子最近 50 条",
+        "5 打开设置",
+        "",
+        "快捷命令",
+        "hr10  查询当前用户最近 10 条回复",
+        "pr20  打包当前用户最近 20 条回复",
+        "ht10  查询当前帖子最近 10 条",
+        "pt50  打包当前帖子最近 50 条",
+        "u1    切换默认用户到第 1 个预设",
+        "t1    切换默认帖子到第 1 个预设",
+        "s     打开设置",
+        "",
+        "一次性指定",
+        "/history_r u1 20  查询第 1 个用户预设",
+        "/pack_t t1 50     打包第 1 个帖子预设",
+        "完整命令: /history_r /pack_r /history_t /pack_t",
+    ]
+    if author_targets:
+        lines.extend(["", "用户预设"])
+        for index, target in enumerate(author_targets, 1):
+            marker = "*" if target.id == active_author_id else " "
+            lines.append(f"{marker} u{index} {target_display_name(target)}")
+    if thread_targets:
+        lines.extend(["", "帖子预设"])
+        for index, target in enumerate(thread_targets, 1):
+            marker = "*" if target.id == active_tid else " "
+            lines.append(f"{marker} t{index} {target_display_name(target)}")
+    # WeChat text bubbles collapse single newlines, so use paragraph breaks for menu items.
+    return "\n\n".join(line for line in lines if line)
 
 def wechat_settings_text(args: argparse.Namespace, manager: ai_analysis.AIManager) -> str:
     effective = manager.effective_config()
@@ -2979,6 +3429,9 @@ def wechat_normalize_short_command(args: argparse.Namespace, user_id: str, text:
     if not compact:
         return raw
     menu = wechat_bot.WeChatMenuState(wechat_client_for_args(args).config.state_dir).get(user_id)
+    author_targets = watch_author_targets(args)
+    thread_targets = preset_thread_targets(args)
+    default_uid, default_tid = wechat_active_target_ids(args, user_id, author_targets, thread_targets)
 
     def parse_short_count(prefix: str, default: int) -> int | None:
         match = re.fullmatch(rf"{re.escape(prefix)}(?:\s*(\d{{1,3}}))?", compact)
@@ -3001,24 +3454,32 @@ def wechat_normalize_short_command(args: argparse.Namespace, user_id: str, text:
     }
     if compact in aliases:
         return aliases[compact]
+    author_switch = target_from_alias(compact, author_targets, "u")
+    if author_switch is not None:
+        wechat_set_active_target(args, user_id, "author", author_switch.id)
+        return "/start"
+    thread_switch = target_from_alias(compact, thread_targets, "t")
+    if thread_switch is not None:
+        wechat_set_active_target(args, user_id, "thread", thread_switch.id)
+        return "/start"
     hr_count = parse_short_count("hr", DEFAULT_REPLY_COUNT)
     if hr_count is not None:
-        return f"/history_r {args.default_author_id} {hr_count}"
+        return f"/history_r {default_uid} {hr_count}"
     pr_count = parse_short_count("pr", 20)
     if pr_count is not None:
-        return f"/pack_r {args.default_author_id} {pr_count}"
+        return f"/pack_r {default_uid} {pr_count}"
     ht_count = parse_short_count("ht", DEFAULT_THREAD_COUNT)
     if ht_count is not None:
-        return f"/history_t {args.default_tid} {ht_count}"
+        return f"/history_t {default_tid} {ht_count}"
     pt_count = parse_short_count("pt", 50)
     if pt_count is not None:
-        return f"/pack_t {args.default_tid} {pt_count}"
+        return f"/pack_t {default_tid} {pt_count}"
     if compact in {"1", "2", "3", "4", "5"} and menu == "start":
         return {
-            "1": f"/history_r {args.default_author_id} {DEFAULT_REPLY_COUNT}",
-            "2": f"/pack_r {args.default_author_id} 20",
-            "3": f"/history_t {args.default_tid} {DEFAULT_THREAD_COUNT}",
-            "4": f"/pack_t {args.default_tid} 50",
+            "1": f"/history_r {default_uid} {DEFAULT_REPLY_COUNT}",
+            "2": f"/pack_r {default_uid} 20",
+            "3": f"/history_t {default_tid} {DEFAULT_THREAD_COUNT}",
+            "4": f"/pack_t {default_tid} 50",
             "5": "/setting",
         }[compact]
     if compact in {"1", "2", "3", "4", "5", "6", "7", "8"} and menu == "setting":
@@ -3073,7 +3534,10 @@ def run_bot_command(args: argparse.Namespace, command: BotCommand) -> None:
             target_user = str(getattr(args, "wechat_bot_target_user_id", "") or "").strip()
             if target_user:
                 wechat_bot.WeChatMenuState(wechat_client_for_args(args).config.state_dir).set(target_user, "start")
-            push_channel_raw_text(args, wechat_start_text(args.default_author_id, args.default_tid))
+            author_targets = watch_author_targets(args)
+            thread_targets = preset_thread_targets(args)
+            active_uid, active_tid = wechat_active_target_ids(args, target_user, author_targets, thread_targets)
+            push_channel_raw_text(args, wechat_start_text(args.default_author_id, args.default_tid, author_targets, thread_targets, active_uid, active_tid))
             return
         push_feishu_card(args, start_form_card(args.default_author_id, args.default_tid))
         return
@@ -3088,12 +3552,14 @@ def run_bot_command(args: argparse.Namespace, command: BotCommand) -> None:
         push_feishu_card(args, settings_card_for_args(args, manager))
         return
 
+    author_targets = watch_author_targets(args)
+    thread_targets = preset_thread_targets(args)
     if command.target_type == "reply":
         posts = collect_replies_with_retries(args, command.target_id, command.count)
-        label = f"用户 {command.target_id or '任意'}"
+        label = command_target_label(command.target_type, command.target_id, author_targets, thread_targets)
     elif command.target_type == "thread":
         posts = collect_thread_tail_with_retries(args, command.target_id, command.count)
-        label = f"帖子 {command.target_id}"
+        label = command_target_label(command.target_type, command.target_id, author_targets, thread_targets)
     else:
         raise RuntimeError(f"未知命令目标：{command}")
 
@@ -3167,14 +3633,24 @@ def card_action_sender_id(event: Any) -> str:
 def start_wechat_poll(args: argparse.Namespace) -> None:
     if not getattr(args, "ws_no_watch", False):
         def watch_loop() -> None:
+            service_unavailable_failures = 0
             while True:
+                round_error: Exception | None = None
                 try:
                     run_once(args)
                     maybe_run_ai_schedule(args)
+                    service_unavailable_failures = 0
                 except Exception as exc:
+                    round_error = exc
+                    if is_nga_service_unavailable(exc):
+                        service_unavailable_failures += 1
+                    else:
+                        service_unavailable_failures = 0
                     print(f"NGA 监听循环失败: {exc}", file=sys.stderr)
-                jitter = random.uniform(-args.jitter, args.jitter) if args.jitter > 0 else 0
-                time.sleep(max(1, args.interval + jitter))
+                sleep_for = watch_sleep_seconds(args, round_error, service_unavailable_failures)
+                if round_error is not None and is_nga_service_unavailable(round_error):
+                    print(f"NGA 503 backoff: next watch round in {sleep_for:.1f}s", file=sys.stderr)
+                time.sleep(sleep_for)
 
         threading.Thread(target=watch_loop, daemon=True).start()
 
@@ -3215,7 +3691,7 @@ def start_ws(args: argparse.Namespace) -> None:
         if ai_analysis.parse_ai_command(text) is not None:
             run_ai_command_background(args_for_chat(args, chat_id), text, sender_id, f"飞书消息:{message_id}", message_id, image_refs, file_refs, reply_context)
             return
-        command = parse_bot_command(text, args.default_author_id, args.default_tid)
+        command = parse_bot_command(text, args.default_author_id, args.default_tid, watch_author_targets(args), preset_thread_targets(args))
         if command is None:
             if should_forward_plain_text_to_ai(args_for_chat(args, chat_id), text, sender_id, image_keys, file_refs):
                 run_ai_plain_text_background(args_for_chat(args, chat_id), text, sender_id, f"飞书消息:{message_id}", message_id, image_refs, file_refs, reply_context)
@@ -3321,8 +3797,8 @@ def start_ws(args: argparse.Namespace) -> None:
                 command_name = str(form.get("command") or "history_r")
                 target_id = str(form.get("target_id") or (args.default_tid if command_name.endswith("_t") else args.default_author_id))
                 count = str(form.get("count") or default_command_count(command_name))
-                return card_response(command_form_card(command_name, target_id, count), "已打开预填表单")
-            command = bot_command_from_form(form, args.default_author_id, args.default_tid)
+                return card_response(command_form_card(command_name, target_id, count, watch_author_targets(scoped_args), preset_thread_targets(scoped_args)), "已打开预填表单")
+            command = bot_command_from_form(form, args.default_author_id, args.default_tid, watch_author_targets(scoped_args), preset_thread_targets(scoped_args))
             run_command_background(scoped_args, command, "卡片操作")
             return card_response(processing_card("正在处理", f"已收到 `{command}`，结果会发送到当前群。", "open_fetch_menu"), "已收到，正在处理")
         except Exception as exc:
@@ -3337,14 +3813,24 @@ def start_ws(args: argparse.Namespace) -> None:
 
     if not args.ws_no_watch:
         def watch_loop() -> None:
+            service_unavailable_failures = 0
             while True:
+                round_error: Exception | None = None
                 try:
                     run_once(args)
                     maybe_run_ai_schedule(args)
+                    service_unavailable_failures = 0
                 except Exception as exc:
+                    round_error = exc
+                    if is_nga_service_unavailable(exc):
+                        service_unavailable_failures += 1
+                    else:
+                        service_unavailable_failures = 0
                     print(f"NGA 监听循环失败: {exc}", file=sys.stderr)
-                jitter = random.uniform(-args.jitter, args.jitter) if args.jitter > 0 else 0
-                time.sleep(max(1, args.interval + jitter))
+                sleep_for = watch_sleep_seconds(args, round_error, service_unavailable_failures)
+                if round_error is not None and is_nga_service_unavailable(round_error):
+                    print(f"NGA 503 backoff: next watch round in {sleep_for:.1f}s", file=sys.stderr)
+                time.sleep(sleep_for)
 
         threading.Thread(target=watch_loop, daemon=True).start()
         print("已启动 NGA 后台监听循环。")
@@ -3432,7 +3918,7 @@ def push_deferred_summary(args: argparse.Namespace, posts: list[NgaPost]) -> Non
 
 def push_to_feishu(args: argparse.Namespace, post: NgaPost, mention_user_id: str = "") -> None:
     if is_wechat_channel(args):
-        push_channel_raw_text(args, wechat_posts_text([post], "NGA 新回复"))
+        push_channel_raw_text(args, wechat_posts_text([post], new_reply_title(post)))
         return
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     webhook = args.webhook or os.getenv("FEISHU_WEBHOOK", "")
@@ -3455,14 +3941,33 @@ def sleep_between_nga_pages(page_delay: float) -> None:
     time.sleep(page_delay + random.uniform(0, page_delay * 0.5))
 
 
+def sleep_between_watch_targets(args: argparse.Namespace, target_index: int, total_targets: int) -> None:
+    if total_targets <= 1 or target_index >= total_targets - 1:
+        return
+    min_delay = max(0.0, float(getattr(args, "nga_target_min_delay", DEFAULT_NGA_TARGET_MIN_DELAY)))
+    max_delay = max(0.0, float(getattr(args, "nga_target_max_delay", DEFAULT_NGA_TARGET_MAX_DELAY)))
+    if max_delay <= 0:
+        return
+    if max_delay < min_delay:
+        max_delay = min_delay
+    time.sleep(random.uniform(min_delay, max_delay))
+
+
+def format_target_fetch_counts(counts: list[tuple[str, int]]) -> str:
+    return "；".join(f"{name} {count}" for name, count in counts)
+
+
 def collect_posts(
     author_id: str,
     cookie: str,
     max_pages: int,
     timeout: int,
     attempts: int = 1,
+    retry_initial_delay: float = DEFAULT_RETRY_INITIAL_DELAY,
     retry_delay: float = 0,
     page_delay: float = DEFAULT_NGA_PAGE_DELAY,
+    request_min_interval: float = DEFAULT_NGA_REQUEST_MIN_INTERVAL,
+    cache_ttl: float = DEFAULT_NGA_CACHE_TTL,
     allow_partial: bool = False,
 ) -> list[NgaPost]:
     posts: list[NgaPost] = []
@@ -3471,8 +3976,9 @@ def collect_posts(
             payload = with_retries(
                 f"NGA 用户回复第 {page} 页",
                 attempts,
+                retry_initial_delay,
                 retry_delay,
-                lambda page=page: fetch_nga_page(author_id, page, cookie, timeout),
+                lambda page=page: fetch_nga_page(author_id, page, cookie, timeout, request_min_interval, cache_ttl),
             )
         except Exception as exc:
             if allow_partial and posts and is_nga_temporary_unavailable(exc):
@@ -3494,12 +4000,15 @@ def collect_recent_replies(
     cookie: str,
     timeout: int,
     attempts: int = 1,
+    retry_initial_delay: float = DEFAULT_RETRY_INITIAL_DELAY,
     retry_delay: float = 0,
     page_delay: float = DEFAULT_NGA_PAGE_DELAY,
+    request_min_interval: float = DEFAULT_NGA_REQUEST_MIN_INTERVAL,
+    cache_ttl: float = DEFAULT_NGA_CACHE_TTL,
     allow_partial: bool = False,
 ) -> list[NgaPost]:
     pages = max(1, (count + 19) // 20)
-    return collect_posts(author_id, cookie, pages, timeout, attempts, retry_delay, page_delay, allow_partial)[:count]
+    return collect_posts(author_id, cookie, pages, timeout, attempts, retry_initial_delay, retry_delay, page_delay, request_min_interval, cache_ttl, allow_partial)[:count]
 
 
 def collect_thread_tail(
@@ -3508,15 +4017,19 @@ def collect_thread_tail(
     cookie: str,
     timeout: int,
     attempts: int = 1,
+    retry_initial_delay: float = DEFAULT_RETRY_INITIAL_DELAY,
     retry_delay: float = 0,
     page_delay: float = DEFAULT_NGA_PAGE_DELAY,
+    request_min_interval: float = DEFAULT_NGA_REQUEST_MIN_INTERVAL,
+    cache_ttl: float = DEFAULT_NGA_CACHE_TTL,
     allow_partial: bool = False,
 ) -> list[NgaPost]:
     first_payload = with_retries(
         f"NGA 帖子 {tid} 最新页",
         attempts,
+        retry_initial_delay,
         retry_delay,
-        lambda: fetch_nga_thread_page(tid, 99999, cookie, timeout),
+        lambda: fetch_nga_thread_page(tid, 99999, cookie, timeout, request_min_interval, cache_ttl),
     )
     first_posts, last_page = extract_thread_posts(first_payload)
     if not last_page:
@@ -3530,8 +4043,9 @@ def collect_thread_tail(
             payload = with_retries(
                 f"NGA 帖子 {tid} 第 {page} 页",
                 attempts,
+                retry_initial_delay,
                 retry_delay,
-                lambda page=page: fetch_nga_thread_page(tid, page, cookie, timeout),
+                lambda page=page: fetch_nga_thread_page(tid, page, cookie, timeout, request_min_interval, cache_ttl),
             )
         except Exception as exc:
             if allow_partial and posts_by_page and is_nga_temporary_unavailable(exc):
@@ -3544,9 +4058,11 @@ def collect_thread_tail(
     return posts_by_page[-count:]
 
 
-def with_retries(label: str, attempts: int, delay: float, fn: Any) -> Any:
+def with_retries(label: str, attempts: int, initial_delay: float, step_delay: float, fn: Any) -> Any:
     last_exc: Exception | None = None
     unavailable_limit = max(1, int(os.getenv("NGA_UNAVAILABLE_RETRIES", str(DEFAULT_NGA_UNAVAILABLE_RETRIES))))
+    initial_delay = max(0.0, float(initial_delay))
+    step_delay = max(0.0, float(step_delay))
     for attempt in range(1, attempts + 1):
         try:
             return fn()
@@ -3555,16 +4071,35 @@ def with_retries(label: str, attempts: int, delay: float, fn: Any) -> Any:
             effective_attempts = min(attempts, unavailable_limit) if is_nga_temporary_unavailable(exc) else attempts
             if attempt >= effective_attempts:
                 break
-            if is_nga_temporary_unavailable(exc):
-                sleep_for = max(delay * attempt, 5 * attempt) + random.uniform(0, max(delay, 2))
-            else:
-                sleep_for = delay * attempt + random.uniform(0, delay)
+            sleep_for = initial_delay + step_delay * (attempt - 1)
             print(f"{label} 失败（{attempt}/{effective_attempts}）：{exc}；{sleep_for:.1f} 秒后重试", file=sys.stderr)
             time.sleep(sleep_for)
     message = f"{label} 在 {effective_attempts} 次尝试后仍失败：{last_exc}"
     if last_exc and is_nga_temporary_unavailable(last_exc):
-        raise NgaTemporaryUnavailable(message) from last_exc
+        raise NgaTemporaryUnavailable(message, status_code=nga_status_code(last_exc)) from last_exc
     raise RuntimeError(message)
+
+
+def regular_watch_sleep_seconds(args: argparse.Namespace) -> float:
+    jitter = random.uniform(-args.jitter, args.jitter) if args.jitter > 0 else 0
+    return max(1.0, float(args.interval) + jitter)
+
+
+def nga_unavailable_backoff_sleep_seconds(args: argparse.Namespace, failures: int) -> float:
+    base = max(1.0, float(getattr(args, "nga_unavailable_backoff_base", DEFAULT_NGA_UNAVAILABLE_BACKOFF_BASE)))
+    maximum = max(base, float(getattr(args, "nga_unavailable_backoff_max", DEFAULT_NGA_UNAVAILABLE_BACKOFF_MAX)))
+    multiplier = 2 ** min(max(0, failures - 1), 6)
+    sleep_for = min(maximum, base * multiplier)
+    jitter = max(0.0, float(getattr(args, "jitter", 0)))
+    if jitter > 0:
+        sleep_for += random.uniform(0, min(jitter, max(1.0, sleep_for * 0.2)))
+    return max(1.0, sleep_for)
+
+
+def watch_sleep_seconds(args: argparse.Namespace, round_error: Exception | None, service_unavailable_failures: int) -> float:
+    if round_error is not None and is_nga_service_unavailable(round_error):
+        return nga_unavailable_backoff_sleep_seconds(args, service_unavailable_failures)
+    return regular_watch_sleep_seconds(args)
 
 
 def collect_posts_with_retries(args: argparse.Namespace, count_pages: int | None = None) -> list[NgaPost]:
@@ -3578,10 +4113,19 @@ def collect_posts_with_retries(args: argparse.Namespace, count_pages: int | None
         max_pages,
         args.timeout,
         args.retries,
+        getattr(args, "retry_initial_delay", DEFAULT_RETRY_INITIAL_DELAY),
         args.retry_delay,
         getattr(args, "nga_page_delay", DEFAULT_NGA_PAGE_DELAY),
+        getattr(args, "nga_request_min_interval", DEFAULT_NGA_REQUEST_MIN_INTERVAL),
+        getattr(args, "nga_cache_ttl", DEFAULT_NGA_CACHE_TTL),
         False,
     )
+
+
+def collect_posts_for_author_with_retries(args: argparse.Namespace, author_id: str, count_pages: int | None = None) -> list[NgaPost]:
+    cloned = copy.copy(args)
+    cloned.author_id = author_id
+    return collect_posts_with_retries(cloned, count_pages)
 
 
 def collect_replies_with_retries(args: argparse.Namespace, author_id: str, count: int) -> list[NgaPost]:
@@ -3594,8 +4138,11 @@ def collect_replies_with_retries(args: argparse.Namespace, author_id: str, count
         cookie,
         args.timeout,
         args.retries,
+        getattr(args, "retry_initial_delay", DEFAULT_RETRY_INITIAL_DELAY),
         args.retry_delay,
         getattr(args, "nga_page_delay", DEFAULT_NGA_PAGE_DELAY),
+        getattr(args, "nga_request_min_interval", DEFAULT_NGA_REQUEST_MIN_INTERVAL),
+        getattr(args, "nga_cache_ttl", DEFAULT_NGA_CACHE_TTL),
         True,
     )
 
@@ -3610,8 +4157,11 @@ def collect_thread_tail_with_retries(args: argparse.Namespace, tid: str, count: 
         cookie,
         args.timeout,
         args.retries,
+        getattr(args, "retry_initial_delay", DEFAULT_RETRY_INITIAL_DELAY),
         args.retry_delay,
         getattr(args, "nga_page_delay", DEFAULT_NGA_PAGE_DELAY),
+        getattr(args, "nga_request_min_interval", DEFAULT_NGA_REQUEST_MIN_INTERVAL),
+        getattr(args, "nga_cache_ttl", DEFAULT_NGA_CACHE_TTL),
         True,
     )
 
@@ -3648,7 +4198,7 @@ def handle_feishu_commands(args: argparse.Namespace, state: dict[str, Any]) -> b
             handled.add(message_id)
             changed = True
             continue
-        command = parse_bot_command(text, args.default_author_id, args.default_tid)
+        command = parse_bot_command(text, args.default_author_id, args.default_tid, watch_author_targets(args), preset_thread_targets(args))
         if command is None:
             if should_forward_plain_text_to_ai(args, text, sender_id, image_keys, file_refs):
                 run_ai_plain_text_background(args, text, sender_id, f"飞书消息轮询:{message_id}", message_id, image_refs, file_refs, reply_context)
@@ -3791,7 +4341,10 @@ def handle_wechat_commands(args: argparse.Namespace) -> bool:
                     client.mark_handled(message)
                     changed = True
                     continue
-                command = parse_bot_command(text, args.default_author_id, args.default_tid)
+                author_targets = watch_author_targets(scoped_args)
+                thread_targets = preset_thread_targets(scoped_args)
+                active_uid, active_tid = wechat_active_target_ids(scoped_args, message.user_id, author_targets, thread_targets)
+                command = parse_bot_command(text, args.default_author_id, args.default_tid, author_targets, thread_targets, active_uid, active_tid)
                 if command is not None:
                     run_command_background(scoped_args, command, f"微信消息:{message.message_id}")
                 elif (image_paths or file_paths) or should_forward_plain_text_to_ai(scoped_args, text, sender_id, [], []):
@@ -3833,18 +4386,74 @@ def run_once(args: argparse.Namespace) -> int:
     seen = set(state.get("seen", []))
     mention_user_id = feishu_mention_user_id(args, state)
 
-    posts = collect_posts_with_retries(args)
+    author_targets = watch_author_targets(args)
+    has_author_init_state = isinstance(state.get("watch_author_initialized_ids"), list)
+    initialized_author_ids = set(state_list(state.get("watch_author_initialized_ids")))
+    posts: list[NgaPost] = []
+    seen_in_fetch: set[str] = set()
+    initialized_this_run = 0
+    initialized_ai_posts: list[NgaPost] = []
+    ai_backfill_posts: list[NgaPost] = []
+    total_author_targets = len(author_targets)
+    fetched_target_counts: list[tuple[str, int]] = []
+    for target_index, target in enumerate(author_targets):
+        try:
+            target_posts = collect_posts_for_author_with_retries(args, target.id)
+        except Exception as exc:
+            if is_nga_service_unavailable(exc):
+                raise NgaTemporaryUnavailable(
+                    f"NGA 503 while watching {target_display_name(target)}; circuit-breaking current watch round.",
+                    status_code=503,
+                ) from exc
+            raise
+        sourced_posts: list[NgaPost] = []
+        for post in target_posts:
+            sourced = add_post_source(post, "author", target)
+            sourced_posts.append(sourced)
+        fetched_target_counts.append((target_display_name(target), len(sourced_posts)))
+        if args.mark_seen:
+            posts.extend(sourced_posts)
+            initialized_author_ids.add(target.id)
+            sleep_between_watch_targets(args, target_index, total_author_targets)
+            continue
+
+        if target.id not in initialized_author_ids:
+            previously_seen_for_target = any(post.key in seen for post in sourced_posts)
+            legacy_existing_target = not has_author_init_state and target_index == 0 and previously_seen_for_target
+            if not legacy_existing_target:
+                for post in sourced_posts:
+                    seen.add(post.key)
+                initialized_ai_posts.extend(sourced_posts)
+                initialized_author_ids.add(target.id)
+                initialized_this_run += len(sourced_posts)
+                print(f"首次监听用户 {target_display_name(target)}，已把当前抓到的 {len(sourced_posts)} 条回复标记为已读。")
+                sleep_between_watch_targets(args, target_index, total_author_targets)
+                continue
+            initialized_author_ids.add(target.id)
+
+        if sourced_posts and not args.dry_run and ai_source_history_needs_backfill(args, target):
+            ai_backfill_posts.extend(sourced_posts)
+
+        for sourced in sourced_posts:
+            if sourced.key in seen_in_fetch:
+                continue
+            seen_in_fetch.add(sourced.key)
+            posts.append(sourced)
+        sleep_between_watch_targets(args, target_index, total_author_targets)
     if args.mark_seen:
         for post in posts:
             seen.add(post.key)
         state["seen"] = sorted(seen)
+        state["watch_author_initialized_ids"] = sorted(initialized_author_ids)
         state["updated_at"] = int(time.time())
         write_watcher_state(state_path, state)
-        print(f"已标记 {len(posts)} 条已抓取回复为已读。")
+        detail = format_target_fetch_counts(fetched_target_counts)
+        suffix = f"（{detail}）" if detail else ""
+        print(f"已标记 {len(posts)} 条已抓取回复为已读{suffix}。")
         return len(posts)
 
     new_posts = [post for post in posts if post.key not in seen]
-    new_posts.reverse()
+    new_posts.sort(key=post_sort_key)
 
     quiet_now = is_quiet_time(args)
     quiet_policy = str(getattr(args, "quiet_policy", DEFAULT_QUIET_POLICY) or DEFAULT_QUIET_POLICY).strip().lower()
@@ -3885,6 +4494,10 @@ def run_once(args: argparse.Namespace) -> int:
             print(f"当前处于免打扰时段，已标记 {len(deliver_posts)} 条非免打扰区间旧回复为已读，不纳入汇总。")
         deliver_posts = []
 
+    ai_history_seed_posts = initialized_ai_posts + ai_backfill_posts
+    if ai_history_seed_posts and not args.dry_run:
+        save_posts_for_ai_history(args, ai_history_seed_posts)
+
     ai_pushed_posts: list[NgaPost] = []
     for post in new_posts:
         if post not in deliver_posts:
@@ -3901,10 +4514,16 @@ def run_once(args: argparse.Namespace) -> int:
 
     if not args.dry_run:
         state["seen"] = sorted(seen)
+        state["watch_author_initialized_ids"] = sorted(initialized_author_ids)
+        if initialized_this_run:
+            state["watch_author_initialized_at"] = int(time.time())
         state["updated_at"] = int(time.time())
         write_watcher_state(state_path, state)
     pushed_count = 0 if quiet_now else len(deliver_posts)
-    print(f"已抓取 {len(posts)} 条回复，已推送 {pushed_count} 条新回复。")
+    fetched_total = sum(count for _, count in fetched_target_counts)
+    detail = format_target_fetch_counts(fetched_target_counts)
+    suffix = f"（{detail}）" if detail else ""
+    print(f"已抓取 {fetched_total} 条回复{suffix}，新回复 {len(new_posts)} 条，已推送 {pushed_count} 条。")
     return len(new_posts)
 
 
@@ -3912,8 +4531,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Watch an NGA user's replies and push new ones to Feishu or WeChat.")
     parser.add_argument("--bot-channel", choices=["feishu", "wechat"], default=os.getenv("NGA_BOT_CHANNEL", "feishu"))
     parser.add_argument("--author-id", default=os.getenv("NGA_AUTHOR_ID", DEFAULT_AUTHOR_ID))
+    parser.add_argument("--author-ids", default=os.getenv("NGA_AUTHOR_IDS", ""), help="Comma or newline separated NGA user IDs to watch. Supports id=label.")
     parser.add_argument("--default-author-id", default=os.getenv("NGA_DEFAULT_AUTHOR_ID", DEFAULT_AUTHOR_ID))
     parser.add_argument("--default-tid", default=os.getenv("NGA_DEFAULT_TID", DEFAULT_TID))
+    parser.add_argument("--preset-thread-ids", default=os.getenv("NGA_PRESET_TIDS", ""), help="Comma or newline separated thread presets. Supports tid=label.")
     parser.add_argument("--max-pages", type=int, default=int(os.getenv("NGA_MAX_PAGES", "1")))
     parser.add_argument("--state-path", default=os.getenv("NGA_STATE_PATH", ".nga_seen.json"))
     parser.add_argument("--cookie", default="")
@@ -3969,9 +4590,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wechat-bot-state-dir", default=os.getenv("WECHAT_BOT_STATE_DIR", ""))
     parser.add_argument("--wechat-poll", action="store_true", help="使用微信 ilink 长轮询接收消息。bot_channel=wechat 时会自动启用。")
     parser.add_argument("--retries", type=int, default=int(os.getenv("NGA_RETRIES", "10")))
-    parser.add_argument("--retry-delay", type=float, default=float(os.getenv("NGA_RETRY_DELAY", "2")))
+    parser.add_argument(
+        "--retry-initial-delay",
+        type=float,
+        default=float(os.getenv("NGA_RETRY_INITIAL_DELAY", str(DEFAULT_RETRY_INITIAL_DELAY))),
+        help="失败后第一次重试前等待的秒数。",
+    )
+    parser.add_argument("--retry-delay", type=float, default=float(os.getenv("NGA_RETRY_DELAY", "1")), help="每次失败后额外递增的重试等待秒数。")
     parser.add_argument("--nga-page-delay", type=float, default=float(os.getenv("NGA_PAGE_DELAY", str(DEFAULT_NGA_PAGE_DELAY))))
-    parser.add_argument("--interval", type=int, default=int(os.getenv("NGA_INTERVAL", "60")))
+    parser.add_argument("--nga-request-min-interval", type=float, default=float(os.getenv("NGA_REQUEST_MIN_INTERVAL", str(DEFAULT_NGA_REQUEST_MIN_INTERVAL))))
+    parser.add_argument("--nga-cache-ttl", type=float, default=float(os.getenv("NGA_CACHE_TTL", str(DEFAULT_NGA_CACHE_TTL))))
+    parser.add_argument("--nga-target-min-delay", type=float, default=float(os.getenv("NGA_TARGET_MIN_DELAY", str(DEFAULT_NGA_TARGET_MIN_DELAY))))
+    parser.add_argument("--nga-target-max-delay", type=float, default=float(os.getenv("NGA_TARGET_MAX_DELAY", str(DEFAULT_NGA_TARGET_MAX_DELAY))))
+    parser.add_argument(
+        "--nga-unavailable-backoff-base",
+        type=float,
+        default=float(os.getenv("NGA_UNAVAILABLE_BACKOFF_BASE", str(DEFAULT_NGA_UNAVAILABLE_BACKOFF_BASE))),
+    )
+    parser.add_argument(
+        "--nga-unavailable-backoff-max",
+        type=float,
+        default=float(os.getenv("NGA_UNAVAILABLE_BACKOFF_MAX", str(DEFAULT_NGA_UNAVAILABLE_BACKOFF_MAX))),
+    )
+    parser.add_argument("--interval", type=int, default=int(os.getenv("NGA_INTERVAL", "30")))
     parser.add_argument("--jitter", type=int, default=int(os.getenv("NGA_JITTER", "20")))
     parser.add_argument("--quiet-hours-enabled", action="store_true", default=os.getenv("NGA_QUIET_HOURS_ENABLED", "").lower() in {"1", "true", "yes", "on"})
     parser.add_argument("--quiet-start-day", type=int, default=int(os.getenv("NGA_QUIET_START_DAY", str(DEFAULT_QUIET_START_DAY))))
@@ -3987,8 +4628,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def normalize_multi_target_defaults(args: argparse.Namespace) -> None:
+    author_targets = watch_author_targets(args)
+    thread_targets = preset_thread_targets(args)
+    if author_targets:
+        args.author_id = author_targets[0].id
+        args.default_author_id = author_targets[0].id
+    if thread_targets:
+        args.default_tid = thread_targets[0].id
+
+
 def main() -> None:
     args = parse_args()
+    normalize_multi_target_defaults(args)
     if args.ws and not is_wechat_channel(args):
         start_ws(args)
         return
@@ -4016,7 +4668,9 @@ def main() -> None:
         start_wechat_poll(args)
         return
 
+    service_unavailable_failures = 0
     while True:
+        round_error: Exception | None = None
         try:
             state_path = Path(args.state_path)
             state = read_json(state_path, {"seen": []})
@@ -4031,14 +4685,21 @@ def main() -> None:
                 print(f"{bot_channel(args)} 命令轮询失败: {exc}", file=sys.stderr)
             run_once(args)
             maybe_run_ai_schedule(args)
+            service_unavailable_failures = 0
         except Exception as exc:
+            round_error = exc
+            if is_nga_service_unavailable(exc):
+                service_unavailable_failures += 1
+            else:
+                service_unavailable_failures = 0
             print(f"错误: {exc}", file=sys.stderr)
             if args.once:
                 raise SystemExit(1)
         if args.once:
             return
-        jitter = random.uniform(-args.jitter, args.jitter) if args.jitter > 0 else 0
-        sleep_for = max(1, args.interval + jitter)
+        sleep_for = watch_sleep_seconds(args, round_error, service_unavailable_failures)
+        if round_error is not None and is_nga_service_unavailable(round_error):
+            print(f"NGA 503 backoff: next watch round in {sleep_for:.1f}s", file=sys.stderr)
         time.sleep(sleep_for)
 
 

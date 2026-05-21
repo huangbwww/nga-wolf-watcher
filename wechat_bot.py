@@ -9,6 +9,7 @@ import os
 import random
 import re
 import secrets
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -26,6 +27,7 @@ DEFAULT_WECHAT_BOT_TYPE = "3"
 MAX_WECHAT_CHARS = 3800
 MAX_WECHAT_MEDIA_BYTES = 100 * 1024 * 1024
 WECHAT_UPLOAD_MEDIA_TYPE_FILE = 3
+WECHAT_TEXT_ASSUMED_DELIVERED_RETS = {-2}
 
 
 @dataclass(frozen=True)
@@ -350,7 +352,14 @@ class WeChatBotClient:
                 "base_info": {"channel_version": "nga-wolf-watcher-wechat/1.0"},
             },
         )
-        if int(resp.get("ret") or 0) != 0:
+        ret = int(resp.get("ret") or 0)
+        if ret in WECHAT_TEXT_ASSUMED_DELIVERED_RETS:
+            print(
+                f"微信 sendMessage 返回 ret={ret}，但文本消息可能已投递，按已发送处理：to={user_id} chars={len(text)} resp={resp}",
+                file=sys.stderr,
+            )
+            return
+        if ret != 0:
             raise RuntimeError(f"微信 sendMessage 失败：{resp}")
 
     def send_file(self, user_id: str, path: Path, file_name: str = "", caption: str = "") -> None:

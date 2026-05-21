@@ -186,10 +186,14 @@ Optional defaults:
 ```powershell
 $env:NGA_DEFAULT_AUTHOR_ID = '150058'
 $env:NGA_DEFAULT_TID = '45974302'
-$env:NGA_INTERVAL = '60'
+$env:NGA_INTERVAL = '30'
 $env:NGA_JITTER = '20'
 $env:NGA_RETRIES = '10'
+$env:NGA_RETRY_INITIAL_DELAY = '1'
+$env:NGA_RETRY_DELAY = '1'
 $env:NGA_PAGE_DELAY = '2.0'
+$env:NGA_REQUEST_MIN_INTERVAL = '1.0'
+$env:NGA_CACHE_TTL = '15'
 $env:NGA_UNAVAILABLE_RETRIES = '3'
 ```
 
@@ -257,8 +261,12 @@ python .\nga_feishu_watch.py --once
 Tune polling and retries:
 
 ```powershell
-python .\nga_feishu_watch.py --interval 60 --jitter 20 --retries 10 --retry-delay 2
+python .\nga_feishu_watch.py --interval 30 --jitter 20 --retries 10 --retry-initial-delay 3 --retry-delay 1
 ```
+
+`--retry-initial-delay` is the wait before the first retry, and `--retry-delay` is the extra step added after each failure. The example above retries after 3 seconds, then 4 seconds, then 5 seconds. The matching environment variables are `NGA_RETRY_INITIAL_DELAY` and `NGA_RETRY_DELAY`. NGA 503 responses are treated as ordinary failures and use the full `NGA_RETRIES` count. Other temporary-unavailable responses such as 429/500/502/504 use the same delay schedule, while `NGA_UNAVAILABLE_RETRIES` limits how many of those temporary failures are retried.
+
+Watcher polling and manual commands share the same NGA request coordinator. `NGA_REQUEST_MIN_INTERVAL` enforces a minimum gap between NGA HTTP requests in the same process, and `NGA_CACHE_TTL` briefly reuses successful JSON responses for the same URL. This lets a manual “latest reply” command reuse the page that the watcher just fetched instead of immediately hitting NGA again.
 
 Disable command polling in non-WebSocket mode:
 

@@ -23,11 +23,22 @@ rem set "WECHAT_BOT_ACCOUNT_ID=default"
 rem Optional defaults.
 set "NGA_DEFAULT_AUTHOR_ID=150058"
 set "NGA_DEFAULT_TID=45974302"
-set "NGA_INTERVAL=60"
+rem Multi target presets. Supports comma/newline-separated id or id=label.
+rem set "NGA_AUTHOR_IDS=150058=wolf,123456=other"
+rem set "NGA_PRESET_TIDS=45974302=wolf thread,888888=other thread"
+set "NGA_INTERVAL=30"
 set "NGA_JITTER=20"
 set "NGA_RETRIES=10"
+set "NGA_RETRY_INITIAL_DELAY=1"
+set "NGA_RETRY_DELAY=1"
 set "NGA_PAGE_DELAY=2.0"
+set "NGA_REQUEST_MIN_INTERVAL=1.0"
+set "NGA_CACHE_TTL=15"
+set "NGA_TARGET_MIN_DELAY=2.0"
+set "NGA_TARGET_MAX_DELAY=6.0"
 set "NGA_UNAVAILABLE_RETRIES=3"
+set "NGA_UNAVAILABLE_BACKOFF_BASE=60"
+set "NGA_UNAVAILABLE_BACKOFF_MAX=600"
 
 rem Optional local AI Agent enhancement. Disabled by default.
 rem set "AI_ENABLED=false"

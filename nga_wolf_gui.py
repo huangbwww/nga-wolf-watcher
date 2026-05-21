@@ -11,7 +11,7 @@ import webbrowser
 import ctypes
 from argparse import Namespace
 from pathlib import Path
-from tkinter import BooleanVar, StringVar, messagebox
+from tkinter import BooleanVar, END, Listbox, SINGLE, StringVar, messagebox
 from typing import Callable
 
 import customtkinter as ctk
@@ -60,10 +60,19 @@ DEFAULT_CONFIG = {
     "wechat_bot_account_id": "default",
     "default_author_id": "150058",
     "default_tid": "45974302",
-    "interval": "60",
+    "watch_author_ids": "",
+    "preset_thread_ids": "",
+    "interval": "30",
     "jitter": "20",
     "retries": "10",
-    "retry_delay": "2",
+    "retry_initial_delay": "1",
+    "retry_delay": "1",
+    "nga_request_min_interval": "1",
+    "nga_cache_ttl": "15",
+    "nga_target_min_delay": "2",
+    "nga_target_max_delay": "6",
+    "nga_unavailable_backoff_base": "60",
+    "nga_unavailable_backoff_max": "600",
     "timeout": "20",
     "state_path": ".nga_seen.json",
     "auto_mark_seen_first_start": True,
@@ -275,12 +284,20 @@ def build_args(
     ws: bool = False,
     ws_no_watch: bool = False,
 ) -> Namespace:
-    author_id = str(config.get("default_author_id") or "150058").strip()
+    watch_author_ids = str(config.get("watch_author_ids") or "").strip()
+    preset_thread_ids = str(config.get("preset_thread_ids") or "").strip()
+    author_targets = nga_feishu_watch.parse_target_list(watch_author_ids, str(config.get("default_author_id") or "150058").strip())
+    thread_targets = nga_feishu_watch.parse_target_list(preset_thread_ids, str(config.get("default_tid") or "45974302").strip())
+    author_id = author_targets[0].id if author_targets else str(config.get("default_author_id") or "150058").strip()
+    default_tid = thread_targets[0].id if thread_targets else str(config.get("default_tid") or "45974302").strip()
     return Namespace(
         bot_channel=str(config.get("bot_channel") or "feishu").strip(),
         author_id=author_id,
+        author_ids=watch_author_ids,
+        watch_author_ids=watch_author_ids,
         default_author_id=author_id,
-        default_tid=str(config.get("default_tid") or "45974302").strip(),
+        default_tid=default_tid,
+        preset_thread_ids=preset_thread_ids,
         max_pages=1,
         state_path=str(resolved_state_path(config)),
         cookie=str(config.get("nga_cookie") or "").strip(),
@@ -309,8 +326,15 @@ def build_args(
         disable_commands=False,
         command_lookback=600,
         retries=int_value(config, "retries", 10),
-        retry_delay=float_value(config, "retry_delay", 2.0),
-        interval=int_value(config, "interval", 60),
+        retry_initial_delay=float_value(config, "retry_initial_delay", 1.0),
+        retry_delay=float_value(config, "retry_delay", 1.0),
+        nga_request_min_interval=float_value(config, "nga_request_min_interval", 1.0),
+        nga_cache_ttl=float_value(config, "nga_cache_ttl", 15.0),
+        nga_target_min_delay=float_value(config, "nga_target_min_delay", 2.0),
+        nga_target_max_delay=float_value(config, "nga_target_max_delay", 6.0),
+        nga_unavailable_backoff_base=float_value(config, "nga_unavailable_backoff_base", 60.0),
+        nga_unavailable_backoff_max=float_value(config, "nga_unavailable_backoff_max", 600.0),
+        interval=int_value(config, "interval", 30),
         jitter=int_value(config, "jitter", 20),
         quiet_hours_enabled=bool(config.get("quiet_hours_enabled", False)),
         quiet_start_day=int(str(config.get("quiet_start_day", "5") or "5")),
@@ -373,11 +397,21 @@ def validate_config(
     if require_cookie:
         required.append(("nga_cookie", "NGA Cookie"))
     errors = [label for key, label in required if not str(config.get(key) or "").strip()]
+    for key, label, fallback in [
+        ("watch_author_ids", "监听用户 ID 列表", str(config.get("default_author_id") or "150058").strip()),
+        ("preset_thread_ids", "帖子预设 ID 列表", str(config.get("default_tid") or "45974302").strip()),
+    ]:
+        for target in nga_feishu_watch.parse_target_list(config.get(key), fallback):
+            if not target.id.isdigit():
+                errors.append(f"{label} 包含非数字 ID：{target.id}")
     for key, label in [
         ("interval", "轮询间隔"),
         ("jitter", "随机抖动"),
         ("retries", "重试次数"),
+        ("retry_initial_delay", "重试初始等待"),
         ("retry_delay", "重试延迟"),
+        ("nga_request_min_interval", "NGA 请求最小间隔"),
+        ("nga_cache_ttl", "NGA 短缓存"),
         ("timeout", "请求超时"),
         ("ai_timeout", "AI 超时"),
         ("ai_schedule_interval_minutes", "AI 定时间隔"),
@@ -535,7 +569,14 @@ class App:
                 "interval",
                 "jitter",
                 "retries",
+                "retry_initial_delay",
                 "retry_delay",
+                "nga_request_min_interval",
+                "nga_cache_ttl",
+                "nga_target_min_delay",
+                "nga_target_max_delay",
+                "nga_unavailable_backoff_base",
+                "nga_unavailable_backoff_max",
                 "timeout",
                 "state_path",
                 "ai_provider",
@@ -600,6 +641,9 @@ class App:
         self.nav_buttons: dict[str, ctk.CTkButton] = {}
         self.current_page: str | None = None
         self.cookie_textboxes: list[ctk.CTkTextbox] = []
+        self.target_lists: dict[str, list[nga_feishu_watch.WatchTarget]] = {}
+        self.target_listboxes: dict[str, list[Listbox]] = {}
+        self.selected_target_indices: dict[str, int] = {}
         self.chat_result_frames: list[ctk.CTkFrame] = []
         self.feishu_frames: list[ctk.CTkFrame] = []
         self.wechat_frames: list[ctk.CTkFrame] = []
@@ -861,7 +905,14 @@ class App:
             ("轮询间隔（秒）", "interval"),
             ("随机抖动（秒）", "jitter"),
             ("重试次数", "retries"),
-            ("重试延迟（秒）", "retry_delay"),
+            ("重试初始等待（秒）", "retry_initial_delay"),
+            ("重试递增步长（秒）", "retry_delay"),
+            ("NGA 请求最小间隔（秒）", "nga_request_min_interval"),
+            ("NGA 短缓存（秒）", "nga_cache_ttl"),
+            ("多用户最小间隔（秒）", "nga_target_min_delay"),
+            ("多用户最大间隔（秒）", "nga_target_max_delay"),
+            ("503 退避起始（秒）", "nga_unavailable_backoff_base"),
+            ("503 退避上限（秒）", "nga_unavailable_backoff_max"),
             ("请求超时（秒）", "timeout"),
             ("状态文件名", "state_path"),
         ]
@@ -1298,8 +1349,8 @@ class App:
         cookie_box.insert("1.0", str(self.config.get("nga_cookie") or ""))
         cookie_box.bind("<KeyRelease>", lambda _event, box=cookie_box: self.sync_cookie_boxes(box))
         self.cookie_textboxes.append(cookie_box)
-        self.add_entry(frame, "默认用户 ID", "default_author_id", 2)
-        self.add_entry(frame, "默认帖子 ID", "default_tid", 3, bottom=True)
+        self.add_target_list_editor(frame, "监听用户 ID 列表", "watch_author_ids", 2, fallback_key="default_author_id")
+        self.add_target_list_editor(frame, "帖子预设 ID 列表", "preset_thread_ids", 3, fallback_key="default_tid", bottom=True)
 
     def actions_card(self, parent: ctk.CTkFrame, row: int) -> None:
         frame = self.card(parent, row)
@@ -1583,6 +1634,257 @@ class App:
             text_color=TEXT,
         ).grid(row=row, column=1, sticky="ew", padx=(0, 16), pady=pady)
 
+    def add_target_list_editor(
+        self,
+        parent: ctk.CTkFrame,
+        label: str,
+        key: str,
+        row: int,
+        *,
+        fallback_key: str = "",
+        bottom: bool = False,
+    ) -> None:
+        pady = (6, 16) if bottom else (6, 8)
+        ctk.CTkLabel(parent, text=label, anchor="w", text_color=TEXT).grid(row=row, column=0, sticky="nw", padx=16, pady=pady)
+        if key not in self.target_lists:
+            fallback = str(self.config.get(fallback_key) or "").strip() if fallback_key else ""
+            self.target_lists[key] = list(nga_feishu_watch.parse_target_list(self.config.get(key), fallback))
+
+        container = ctk.CTkFrame(parent, fg_color="transparent")
+        container.grid(row=row, column=1, sticky="ew", padx=(0, 16), pady=pady)
+        container.grid_columnconfigure(0, weight=1)
+
+        listbox = Listbox(
+            container,
+            height=4,
+            selectmode=SINGLE,
+            exportselection=False,
+            activestyle="dotbox",
+            bg="#f8fafc",
+            fg=TEXT,
+            selectbackground="#dbeafe",
+            selectforeground=TEXT,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=PRIMARY,
+            relief="flat",
+        )
+        listbox.grid(row=0, column=0, sticky="ew")
+        listbox.bind("<<ListboxSelect>>", lambda event, item_key=key: self.target_listbox_selected(item_key, event.widget))
+        listbox.bind("<Double-Button-1>", lambda event, item_key=key: self.target_listbox_double_clicked(item_key, event))
+
+        button_frame = ctk.CTkFrame(container, fg_color="transparent")
+        button_frame.grid(row=0, column=1, sticky="ns", padx=(8, 0))
+        ctk.CTkButton(
+            button_frame,
+            text="+",
+            width=34,
+            height=30,
+            corner_radius=8,
+            fg_color=PRIMARY,
+            hover_color=PRIMARY_HOVER,
+            command=lambda item_key=key, item_label=label: self.target_add_clicked(item_key, item_label),
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        ctk.CTkButton(
+            button_frame,
+            text="-",
+            width=34,
+            height=30,
+            corner_radius=8,
+            fg_color="#e2e8f0",
+            hover_color="#cbd5e1",
+            text_color=TEXT,
+            command=lambda item_key=key, source=listbox: self.target_delete_clicked(item_key, source),
+        ).grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        ctk.CTkButton(
+            button_frame,
+            text="编辑",
+            width=48,
+            height=30,
+            corner_radius=8,
+            fg_color="#e2e8f0",
+            hover_color="#cbd5e1",
+            text_color=TEXT,
+            command=lambda item_key=key, source=listbox: self.target_edit_current_clicked(item_key, source),
+        ).grid(row=2, column=0, sticky="ew")
+
+        self.target_listboxes.setdefault(key, []).append(listbox)
+        if key not in self.selected_target_indices:
+            self.selected_target_indices[key] = 0 if self.target_lists[key] else -1
+        self.refresh_target_list(key)
+
+    def refresh_target_list(self, key: str) -> None:
+        for listbox in self.target_listboxes.get(key, []):
+            self.render_target_listbox(key, listbox)
+
+    def render_target_listbox(self, key: str, listbox: Listbox) -> None:
+        targets = self.target_lists.get(key, [])
+        selected = self.selected_target_indices.get(key, -1)
+
+        listbox.delete(0, END)
+        if not targets:
+            self.selected_target_indices[key] = -1
+            listbox.insert(END, "暂无条目，点击 + 添加")
+            listbox.itemconfig(0, foreground=MUTED)
+            listbox.selection_clear(0, END)
+            listbox.update_idletasks()
+            return
+
+        for index, target in enumerate(targets, 1):
+            listbox.insert(END, f"{index}. {nga_feishu_watch.target_display_name(target)}")
+
+        if selected < 0 or selected >= len(targets):
+            selected = 0
+        self.selected_target_indices[key] = selected
+        listbox.selection_clear(0, END)
+        listbox.selection_set(selected)
+        listbox.activate(selected)
+        listbox.see(selected)
+        listbox.update_idletasks()
+
+    def target_listbox_selected(self, key: str, listbox: Listbox | None = None) -> None:
+        targets = self.target_lists.get(key, [])
+        if not targets:
+            self.selected_target_indices[key] = -1
+            return
+        if listbox is None:
+            listbox = next((box for box in self.target_listboxes.get(key, []) if box.curselection()), None)
+        if listbox is None:
+            return
+        selection = listbox.curselection()
+        if not selection:
+            return
+        index = int(selection[0])
+        if 0 <= index < len(targets):
+            self.selected_target_indices[key] = index
+        else:
+            self.selected_target_indices[key] = -1
+            listbox.selection_clear(0, END)
+
+    def target_listbox_double_clicked(self, key: str, event: object) -> None:
+        boxes = self.target_listboxes.get(key, [])
+        listbox = getattr(event, "widget", None)
+        if listbox not in boxes:
+            listbox = boxes[0] if boxes else None
+        targets = self.target_lists.get(key, [])
+        if listbox is None or not targets:
+            return
+        index = int(listbox.nearest(int(getattr(event, "y", 0))))
+        if not (0 <= index < len(targets)):
+            return
+        self.selected_target_indices[key] = index
+        self.refresh_target_list(key)
+        self.target_dialog(key, "编辑条目", edit_index=index)
+
+    def target_list_config_text(self, key: str) -> str:
+        lines: list[str] = []
+        for target in self.target_lists.get(key, []):
+            if target.label:
+                lines.append(f"{target.id}={target.label}")
+            else:
+                lines.append(target.id)
+        return "\n".join(lines)
+
+    def target_add_clicked(self, key: str, label: str) -> None:
+        self.target_dialog(key, label)
+
+    def target_select_clicked(self, key: str, index: int) -> None:
+        if not (0 <= index < len(self.target_lists.get(key, []))):
+            return
+        self.selected_target_indices[key] = index
+        self.refresh_target_list(key)
+
+    def target_edit_clicked(self, key: str, index: int) -> None:
+        if not (0 <= index < len(self.target_lists.get(key, []))):
+            return
+        self.selected_target_indices[key] = index
+        self.refresh_target_list(key)
+        self.target_dialog(key, "编辑条目", edit_index=index)
+
+    def target_edit_current_clicked(self, key: str, listbox: Listbox | None = None) -> None:
+        self.target_listbox_selected(key, listbox)
+        index = self.selected_target_indices.get(key, -1)
+        if not (0 <= index < len(self.target_lists.get(key, []))):
+            self.set_action_feedback("请先选中要编辑的条目。")
+            return
+        self.target_dialog(key, "编辑条目", edit_index=index)
+
+    def target_delete_clicked(self, key: str, listbox: Listbox | None = None) -> None:
+        self.target_listbox_selected(key, listbox)
+        index = self.selected_target_indices.get(key, -1)
+        targets = self.target_lists.get(key, [])
+        if not (0 <= index < len(targets)):
+            self.set_action_feedback("请先选中要删除的条目。")
+            return
+        targets.pop(index)
+        self.selected_target_indices[key] = min(index, len(targets) - 1)
+        self.refresh_target_list(key)
+        self.mark_dirty()
+        self.set_action_feedback("列表已更新，记得保存配置。")
+        self.root.update_idletasks()
+
+    def open_target_add_dialog(self, key: str, label: str) -> None:
+        self.target_add_clicked(key, label)
+
+    def open_target_edit_dialog(self, key: str, index: int) -> None:
+        self.target_edit_clicked(key, index)
+
+    def remove_selected_target(self, key: str) -> None:
+        self.target_delete_clicked(key)
+
+    def target_dialog(self, key: str, label: str, edit_index: int | None = None) -> None:
+        targets = self.target_lists.setdefault(key, [])
+        editing = edit_index is not None and 0 <= edit_index < len(targets)
+        current = targets[edit_index] if editing and edit_index is not None else None
+
+        window = ctk.CTkToplevel(self.root)
+        window.title("编辑条目" if editing else f"添加{label}")
+        window.geometry("420x210")
+        window.transient(self.root)
+        window.grab_set()
+        window.lift()
+        window.grid_columnconfigure(1, weight=1)
+
+        id_var = StringVar(value=current.id if current else "")
+        note_var = StringVar(value=current.label if current else "")
+        ctk.CTkLabel(window, text="ID", anchor="w", text_color=TEXT).grid(row=0, column=0, sticky="w", padx=18, pady=(20, 8))
+        id_entry = ctk.CTkEntry(window, textvariable=id_var, height=34, corner_radius=10, fg_color="#f8fafc", border_width=1, border_color=BORDER)
+        id_entry.grid(row=0, column=1, sticky="ew", padx=(0, 18), pady=(20, 8))
+        ctk.CTkLabel(window, text="备注", anchor="w", text_color=TEXT).grid(row=1, column=0, sticky="w", padx=18, pady=8)
+        note_entry = ctk.CTkEntry(window, textvariable=note_var, height=34, corner_radius=10, fg_color="#f8fafc", border_width=1, border_color=BORDER)
+        note_entry.grid(row=1, column=1, sticky="ew", padx=(0, 18), pady=8)
+        feedback_var = StringVar(value="")
+        ctk.CTkLabel(window, textvariable=feedback_var, anchor="w", text_color="#dc2626").grid(row=2, column=1, sticky="ew", padx=(0, 18), pady=(0, 8))
+
+        def confirm() -> None:
+            target_id = id_var.get().strip()
+            note = note_var.get().strip()
+            if not target_id.isdigit():
+                feedback_var.set("ID 必须是数字")
+                return
+            if any(item.id == target_id and (not editing or index != edit_index) for index, item in enumerate(targets)):
+                feedback_var.set("这个 ID 已经在列表里")
+                return
+            target = nga_feishu_watch.WatchTarget(target_id, note)
+            if editing and edit_index is not None:
+                targets[edit_index] = target
+                self.selected_target_indices[key] = edit_index
+            else:
+                targets.append(target)
+                self.selected_target_indices[key] = len(targets) - 1
+            self.refresh_target_list(key)
+            self.mark_dirty()
+            self.set_action_feedback("列表已更新，记得保存配置。")
+            window.destroy()
+            self.root.update_idletasks()
+
+        button_row = ctk.CTkFrame(window, fg_color="transparent")
+        button_row.grid(row=3, column=0, columnspan=2, sticky="e", padx=18, pady=(4, 18))
+        ctk.CTkButton(button_row, text="取消", width=82, height=32, fg_color="#e2e8f0", hover_color="#cbd5e1", text_color=TEXT, command=window.destroy).grid(row=0, column=0, padx=(0, 8))
+        ctk.CTkButton(button_row, text="确认", width=82, height=32, fg_color=PRIMARY, hover_color=PRIMARY_HOVER, command=confirm).grid(row=0, column=1)
+        id_entry.bind("<Return>", lambda _event: confirm())
+        note_entry.bind("<Return>", lambda _event: confirm())
+        id_entry.focus_set()
     def sync_cookie_boxes(self, source: ctk.CTkTextbox) -> None:
         if self.syncing_cookie:
             return
@@ -1658,6 +1960,18 @@ class App:
         config["nga_cookie"] = self.cookie_textboxes[0].get("1.0", "end").strip() if self.cookie_textboxes else ""
         for key, var in self.vars.items():
             config[key] = var.get().strip()
+        for key in self.target_lists:
+            config[key] = self.target_list_config_text(key)
+        author_targets = nga_feishu_watch.parse_target_list(config.get("watch_author_ids"), str(config.get("default_author_id") or "150058").strip())
+        thread_targets = nga_feishu_watch.parse_target_list(config.get("preset_thread_ids"), str(config.get("default_tid") or "45974302").strip())
+        if author_targets:
+            config["default_author_id"] = author_targets[0].id
+            if not str(config.get("watch_author_ids") or "").strip():
+                config["watch_author_ids"] = author_targets[0].id
+        if thread_targets:
+            config["default_tid"] = thread_targets[0].id
+            if not str(config.get("preset_thread_ids") or "").strip():
+                config["preset_thread_ids"] = thread_targets[0].id
         config["auto_mark_seen_first_start"] = self.auto_init_var.get()
         config["quiet_hours_enabled"] = self.quiet_enabled_var.get()
         config["quiet_start_day"] = str(weekday_index(self.quiet_start_day_var.get()))

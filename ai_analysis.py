@@ -52,6 +52,8 @@ DEFAULT_MEMORY = """# NGA Wolf Watcher local memory
 
 - NGA 最新回复：`events/latest_event.json`
 - NGA 回复历史：`events/wolf_history.jsonl`
+- NGA 来源索引：`events/source_index.json`，记录“狼大”“海”等备注对应的来源 ID 和历史文件
+- NGA 按来源历史：`events/by_source/author_<id>.jsonl`，当用户点名某个备注或用户时优先读取对应文件
 - NGA 回复图片：事件 JSON 里的 `image_urls` 是原图链接，`image_paths` 是已下载到本地的图片文件
 - 我的持仓信息：`context/positions.json`
 - 行情信息：需要时实时查询公开网页或公开 API
@@ -396,10 +398,96 @@ def tail_jsonl(path: Path, limit: int) -> list[dict[str, Any]]:
     return items
 
 
+def event_source_type(event: dict[str, Any]) -> str:
+    return str(event.get("watch_source_type") or "author").strip() or "author"
+
+
+def event_source_id(event: dict[str, Any]) -> str:
+    return str(event.get("watch_source_id") or event.get("author_id") or "").strip()
+
+
+def event_source_label(event: dict[str, Any]) -> str:
+    return str(event.get("watch_source_label") or event.get("author") or event_source_id(event)).strip()
+
+
+def event_source_key(event: dict[str, Any]) -> str:
+    source_id = event_source_id(event)
+    if not source_id:
+        return ""
+    return f"{safe_key(event_source_type(event))}_{safe_key(source_id)}"
+
+
+def source_history_path(work_dir: Path, event: dict[str, Any]) -> Path | None:
+    key = event_source_key(event)
+    if not key:
+        return None
+    return work_dir / "events" / "by_source" / f"{key}.jsonl"
+
+
+def update_source_index(work_dir: Path, event: dict[str, Any], history_path: Path) -> None:
+    key = event_source_key(event)
+    source_id = event_source_id(event)
+    if not key or not source_id:
+        return
+    index_path = work_dir / "events" / "source_index.json"
+    index = read_json(index_path, {})
+    if not isinstance(index, dict):
+        index = {}
+    sources = index.get("sources")
+    if not isinstance(sources, dict):
+        sources = {}
+    label = event_source_label(event)
+    aliases = {source_id}
+    if label:
+        aliases.add(label)
+    existing = sources.get(key)
+    if isinstance(existing, dict):
+        for alias in existing.get("aliases") or []:
+            if str(alias).strip():
+                aliases.add(str(alias).strip())
+    sources[key] = {
+        "key": key,
+        "source_type": event_source_type(event),
+        "source_id": source_id,
+        "label": label,
+        "aliases": sorted(aliases),
+        "history_file": str(history_path.relative_to(work_dir)),
+        "latest_event_at": event.get("post_time") or event.get("captured_at") or "",
+        "latest_event_key": event.get("key") or "",
+        "updated_at": utcish_now(),
+    }
+    index["sources"] = sources
+    index["updated_at"] = utcish_now()
+    write_json(index_path, index)
+
+
+def source_index_summary(work_dir: Path) -> str:
+    index_path = work_dir / "events" / "source_index.json"
+    index = read_json(index_path, {})
+    sources = index.get("sources") if isinstance(index, dict) else {}
+    if not isinstance(sources, dict) or not sources:
+        return ""
+    lines = [
+        "NGA source-specific history files:",
+        f"- source index: {index_path}",
+    ]
+    for item in sorted(sources.values(), key=lambda value: str(value.get("label") or value.get("source_id") or "")):
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or item.get("source_id") or "")
+        source_id = str(item.get("source_id") or "")
+        history_file = work_dir / str(item.get("history_file") or "")
+        aliases = ", ".join(str(alias) for alias in item.get("aliases") or [] if str(alias).strip())
+        lines.append(f"- {label} ({source_id}): {history_file}; aliases: {aliases}")
+    lines.append("If the user names a source label such as 狼大 or 海, read that source's history file first, then use the global history only for comparison.")
+    return "\n".join(lines)
+
+
 def ensure_workspace(config: AIConfig) -> None:
     work_dir = config.work_dir
     for name in ("events", "analysis", "prompts", "context", "logs", "attachments"):
         (work_dir / name).mkdir(parents=True, exist_ok=True)
+    (work_dir / "events" / "by_source").mkdir(parents=True, exist_ok=True)
     default_prompt = work_dir / "prompts" / "default_stock_analysis.md"
     scheduled_prompt = work_dir / "prompts" / "scheduled_analysis.md"
     if not default_prompt.exists():
@@ -427,12 +515,21 @@ def ensure_workspace(config: AIConfig) -> None:
                 + "\n\n- NGA 回复图片：事件 JSON 里的 `image_urls` 是原图链接，`image_paths` 是已下载到本地的图片文件。\n",
                 encoding="utf-8",
             )
+        elif "source_index.json" not in existing_memory:
+            memory.write_text(
+                existing_memory.rstrip()
+                + "\n\n- NGA 来源索引：`events/source_index.json`，记录“狼大”“海”等备注对应的来源 ID 和历史文件。\n"
+                + "- NGA 按来源历史：`events/by_source/author_<id>.jsonl`，当用户点名某个备注或用户时优先读取对应文件。\n",
+                encoding="utf-8",
+            )
     agents_md = work_dir / "AGENTS.md"
     if not agents_md.exists():
         agents_md.write_text(
             "Use `context/memory.md` as optional local memory for this workspace. "
             "Do not inject it into every answer; read it only when useful for the user's request.\n"
-            "When current A-share quotes are needed, query public web pages or public APIs in real time.\n",
+            "When current A-share quotes are needed, query public web pages or public APIs in real time.\n"
+            "When the user names a monitored NGA source label such as 狼大 or 海, use `events/source_index.json` "
+            "to resolve the label and read the matching `events/by_source/*.jsonl` history first.\n",
             encoding="utf-8",
         )
     else:
@@ -441,6 +538,12 @@ def ensure_workspace(config: AIConfig) -> None:
             with agents_md.open("a", encoding="utf-8") as f:
                 f.write(
                     "\nWhen current A-share quotes are needed, query public web pages or public APIs in real time.\n"
+                )
+        if "source_index.json" not in existing_agents:
+            with agents_md.open("a", encoding="utf-8") as f:
+                f.write(
+                    "\nWhen the user names a monitored NGA source label such as 狼大 or 海, use `events/source_index.json` "
+                    "to resolve the label and read the matching `events/by_source/*.jsonl` history first.\n"
                 )
     readme = work_dir / "context" / "README.md"
     if not readme.exists():
@@ -479,6 +582,9 @@ def event_from_post(post: Any) -> dict[str, Any]:
         "author": str(getattr(post, "author", "")),
         "author_id": str(getattr(post, "author_id", "")),
         "floor": str(getattr(post, "floor", "")),
+        "watch_source_type": str(getattr(post, "source_type", "")),
+        "watch_source_id": str(getattr(post, "source_id", "")),
+        "watch_source_label": str(getattr(post, "source_label", "")),
         "captured_at": utcish_now(),
         "source": SOURCE_NAME,
     }
@@ -936,6 +1042,8 @@ def command_values(task: AITask, prompt_file: Path) -> dict[str, Path | str]:
         "task_type": task.task_type,
         "latest_event": task.latest_event,
         "history_file": task.history_file,
+        "source_index": task.work_dir / "events" / "source_index.json",
+        "source_history_dir": task.work_dir / "events" / "by_source",
         "image_files": " ".join(quote_arg(str(path)) for path in task.image_paths),
         "file_files": " ".join(quote_arg(str(path)) for path in task.file_paths),
         "permission_mode": task.metadata.get("permission_mode") or "",
@@ -1158,8 +1266,8 @@ class AIManager:
                 logger.warning("failed to save NGA image %s: %s", url, exc)
         return saved
 
-    def save_post_event(self, post: Any) -> Path | None:
-        if not self.effective_enabled() and not self.config.auto_analyze_new_post and not self.state_path.exists():
+    def save_post_event(self, post: Any, *, force: bool = False) -> Path | None:
+        if not force and not self.effective_enabled() and not self.config.auto_analyze_new_post and not self.state_path.exists():
             return None
         self.ensure_ready()
         event = event_from_post(post)
@@ -1169,6 +1277,10 @@ class AIManager:
         write_json(event_path, event)
         write_json(self.latest_event_path, event)
         added = append_jsonl_unique(self.history_file, event)
+        by_source_path = source_history_path(self.config.work_dir, event)
+        if by_source_path is not None:
+            append_jsonl_unique(by_source_path, event)
+            update_source_index(self.config.work_dir, event, by_source_path)
         state = self.read_state()
         state["latest_event_key"] = event.get("key", "")
         state["latest_event_path"] = str(event_path)
@@ -1182,11 +1294,27 @@ class AIManager:
         timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         return self.config.work_dir / "analysis" / f"{timestamp}_{safe_key(task_type)}_{safe_key(key)}.md"
 
+    def local_history_context(self) -> str:
+        lines = [
+            "Local NGA context files:",
+            f"- latest event: {self.latest_event_path}",
+            f"- global history: {self.history_file}",
+        ]
+        summary = source_index_summary(self.config.work_dir)
+        if summary:
+            lines.extend(["", summary])
+        return "\n".join(lines)
+
     def build_prompt(self, task_type: str, user_prompt: str) -> str:
         base_prompt = self.load_base_prompt(task_type)
         if task_type == "manual_ask":
-            return self.build_manual_prompt(base_prompt, user_prompt)
-        return (user_prompt or base_prompt).strip() + "\n"
+            prompt = self.build_manual_prompt(base_prompt, user_prompt)
+        else:
+            prompt = (user_prompt or base_prompt).strip()
+        context = self.local_history_context()
+        if context:
+            prompt = prompt.rstrip() + "\n\n" + context
+        return prompt.strip() + "\n"
 
     def build_manual_prompt(self, base_prompt: str, user_prompt: str) -> str:
         return user_prompt.strip() + "\n"
