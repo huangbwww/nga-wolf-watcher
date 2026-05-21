@@ -1890,8 +1890,7 @@ class App:
                     self.vars["wechat_bot_base_url"].set(result["base_url"])
                 if result.get("user_id"):
                     self.vars["wechat_bot_target_user_id"].set(result["user_id"])
-                    if not self.vars["wechat_bot_allowed_user_ids"].get().strip():
-                        self.vars["wechat_bot_allowed_user_ids"].set(result["user_id"])
+                    self.vars["wechat_bot_allowed_user_ids"].set(result["user_id"])
                 if result.get("account_id"):
                     self.vars["wechat_bot_account_id"].set(result["account_id"])
                 self.mark_dirty()
