@@ -12,7 +12,8 @@ Environment variables:
   NGA_AUTHOR_ID      Defaults to 150058.
   NGA_MAX_PAGES      Defaults to 1.
   NGA_STATE_PATH     Defaults to .nga_seen.json.
-  NGA_INTERVAL       Defaults to 60 seconds in watch mode.
+  NGA_INTERVAL       Defaults to 30 seconds in watch mode.
+  NGA_THREAD_WATCH_INTERVAL Defaults to 10 seconds for thread-author scans.
 """
 
 from __future__ import annotations
@@ -51,6 +52,8 @@ DEFAULT_AUTHOR_ID = "150058"
 DEFAULT_TID = "45974302"
 DEFAULT_REPLY_COUNT = 5
 DEFAULT_THREAD_COUNT = 10
+DEFAULT_THREAD_WATCH_TAIL_COUNT = 20
+DEFAULT_THREAD_WATCH_INTERVAL = 10.0
 DEFAULT_QUIET_START_DAY = 5
 DEFAULT_QUIET_END_DAY = 0
 DEFAULT_QUIET_DAYS = [5, 6]
@@ -155,12 +158,86 @@ class NgaPost:
     source_type: str = ""
     source_id: str = ""
     source_label: str = ""
+    canonical_key: str = ""
 
 
 @dataclass(frozen=True)
 class WatchTarget:
     id: str
     label: str = ""
+    route_channel: str = ""
+    route_profile_id: str = ""
+    route_receive_id: str = ""
+    route_id_type: str = "chat_id"
+
+
+@dataclass(frozen=True)
+class ThreadAuthorWatch:
+    tid: str
+    author_id: str
+    label: str = ""
+    route_channel: str = ""
+    route_profile_id: str = ""
+    feishu_app_id: str = ""
+    feishu_app_secret: str = ""
+    feishu_receive_id: str = ""
+    feishu_id_type: str = "chat_id"
+
+    @property
+    def key(self) -> str:
+        return f"{self.tid}:{self.author_id}"
+
+
+@dataclass(frozen=True)
+class FeishuBotProfile:
+    id: str
+    label: str = ""
+    app_id: str = ""
+    app_secret: str = ""
+    id_type: str = "chat_id"
+    chats: tuple[dict[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class WeChatBotProfile:
+    id: str
+    label: str = ""
+    token: str = ""
+    base_url: str = wechat_bot.DEFAULT_WECHAT_BASE_URL
+    cdn_base_url: str = wechat_bot.DEFAULT_WECHAT_CDN_BASE_URL
+    target_user_id: str = ""
+    allowed_user_ids: str = ""
+    poll_timeout_ms: int = wechat_bot.DEFAULT_WECHAT_POLL_TIMEOUT_MS
+    route_tag: str = ""
+    account_id: str = "default"
+
+
+@dataclass(frozen=True)
+class PushTarget:
+    id: str
+    label: str = ""
+    channel: str = "feishu"
+    profile_id: str = ""
+    receive_id: str = ""
+    id_type: str = "chat_id"
+    default_author_id: str = ""
+    default_tid: str = ""
+
+
+@dataclass(frozen=True)
+class ListenRule:
+    id: str
+    label: str = ""
+    mode: str = "thread_author"
+    author_id: str = ""
+    tid: str = ""
+    target_ids: tuple[str, ...] = ()
+
+    @property
+    def source_key(self) -> str:
+        if self.mode == "thread_author":
+            return f"{self.tid}:{self.author_id}"
+        return self.author_id
 
 
 @dataclass(frozen=True)
@@ -214,6 +291,51 @@ def feishu_credentials(args: argparse.Namespace) -> tuple[str, str, str, str]:
 TARGET_INLINE_SEPARATOR_RE = re.compile(r"[,，;；](?=\s*\d+(?:\s*[:=]|\s*(?:[,，;；]|$)))")
 
 
+def stable_profile_id(prefix: str, *parts: str) -> str:
+    raw = "|".join(str(part or "") for part in parts)
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
+    return f"{prefix}_{digest}"
+
+
+def json_list_value(raw: Any) -> list[Any]:
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, tuple):
+        return list(raw)
+    if isinstance(raw, str) and raw.strip():
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        return value if isinstance(value, list) else []
+    return []
+
+
+def parse_route_parts(route_parts: list[str]) -> dict[str, str]:
+    route: dict[str, str] = {}
+    for part in route_parts:
+        text = part.strip()
+        if not text:
+            continue
+        if "=" in text:
+            key, value = text.split("=", 1)
+            route[key.strip().lower().replace("-", "_")] = value.strip()
+        elif text.startswith("oc_") or text.startswith("ou_") or text.startswith("on_"):
+            route["receive_id"] = text
+    return route
+
+
+def route_channel_from_parts(route: dict[str, str], default: str = "") -> str:
+    value = (route.get("channel") or route.get("route_channel") or default).strip().lower()
+    if value in {"feishu", "wechat"}:
+        return value
+    if route.get("wechat_profile") or route.get("wechat_profile_id"):
+        return "wechat"
+    if route.get("bot") or route.get("profile") or route.get("profile_id") or route.get("receive_id"):
+        return "feishu"
+    return ""
+
+
 def parse_target_list(raw: Any, fallback_id: str = "") -> list[WatchTarget]:
     text = str(raw or "").strip()
     targets: list[WatchTarget] = []
@@ -228,18 +350,29 @@ def parse_target_list(raw: Any, fallback_id: str = "") -> list[WatchTarget]:
         item = part.strip()
         if not item:
             continue
-        if "=" in item:
-            raw_id, raw_label = item.split("=", 1)
-        elif ":" in item:
-            raw_id, raw_label = item.split(":", 1)
+        main, *route_parts = [part.strip() for part in item.split("|")]
+        route = parse_route_parts(route_parts)
+        if "=" in main:
+            raw_id, raw_label = main.split("=", 1)
+        elif ":" in main:
+            raw_id, raw_label = main.split(":", 1)
         else:
-            raw_id, raw_label = item, ""
+            raw_id, raw_label = main, ""
         target_id = raw_id.strip()
         label = raw_label.strip()
         if not target_id or target_id in seen:
             continue
         seen.add(target_id)
-        targets.append(WatchTarget(target_id, label))
+        targets.append(
+            WatchTarget(
+                target_id,
+                label,
+                route_channel=route_channel_from_parts(route),
+                route_profile_id=route.get("bot", "") or route.get("profile", "") or route.get("profile_id", "") or route.get("wechat_profile", "") or route.get("wechat_profile_id", ""),
+                route_receive_id=route.get("receive_id", "") or route.get("feishu_receive_id", ""),
+                route_id_type=route.get("id_type", "") or route.get("receive_id_type", "") or route.get("feishu_id_type", "chat_id"),
+            )
+        )
     fallback = str(fallback_id or "").strip()
     if not targets and fallback:
         targets.append(WatchTarget(fallback, ""))
@@ -250,6 +383,54 @@ def target_display_name(target: WatchTarget) -> str:
     return f"{target.label}({target.id})" if target.label else target.id
 
 
+def thread_author_display_name(watch: ThreadAuthorWatch) -> str:
+    base = f"{watch.tid}:{watch.author_id}"
+    return f"{watch.label}({base})" if watch.label else base
+
+
+def parse_thread_author_watches(raw: Any) -> list[ThreadAuthorWatch]:
+    text = str(raw or "").strip()
+    watches: list[ThreadAuthorWatch] = []
+    seen: set[str] = set()
+    for line in re.split(r"[\r\n]+", text):
+        item = line.strip()
+        if not item or item.startswith("#"):
+            continue
+        main, *route_parts = [part.strip() for part in item.split("|")]
+        if "=" in main:
+            raw_pair, raw_label = main.split("=", 1)
+        else:
+            raw_pair, raw_label = main, ""
+        if ":" not in raw_pair:
+            continue
+        raw_tid, raw_authors = raw_pair.split(":", 1)
+        tid = raw_tid.strip()
+        label = raw_label.strip()
+        route = parse_route_parts(route_parts)
+        for author_part in re.split(r"[,，;；\s]+", raw_authors):
+            author_id = author_part.strip()
+            if not tid or not author_id:
+                continue
+            key = f"{tid}:{author_id}"
+            if key in seen:
+                continue
+            seen.add(key)
+            watches.append(
+                ThreadAuthorWatch(
+                    tid=tid,
+                    author_id=author_id,
+                    label=label,
+                    route_channel=route_channel_from_parts(route),
+                    route_profile_id=route.get("bot", "") or route.get("profile", "") or route.get("profile_id", "") or route.get("wechat_profile", "") or route.get("wechat_profile_id", ""),
+                    feishu_app_id=route.get("app_id", "") or route.get("feishu_app_id", ""),
+                    feishu_app_secret=route.get("app_secret", "") or route.get("feishu_app_secret", ""),
+                    feishu_receive_id=route.get("receive_id", "") or route.get("feishu_receive_id", ""),
+                    feishu_id_type=route.get("id_type", "") or route.get("receive_id_type", "") or route.get("feishu_id_type", "chat_id"),
+                )
+            )
+    return watches
+
+
 def post_source_display_name(post: NgaPost) -> str:
     return (post.source_label or post.source_id or "").strip()
 
@@ -257,6 +438,13 @@ def post_source_display_name(post: NgaPost) -> str:
 def new_reply_title(post: NgaPost) -> str:
     source_name = post_source_display_name(post)
     if source_name:
+        if post.source_type == "thread_author" and post.subject:
+            title = post.subject.strip()
+            if len(title) > 36:
+                title = title[:36].rstrip() + "..."
+            if post.source_label:
+                return f"{source_name} 在《{title}》新回复"
+            return f"帖内作者 {source_name} 在《{title}》新回复"
         if post.source_label:
             return f"{source_name} 新回复"
         if post.source_type == "author":
@@ -275,12 +463,377 @@ def preset_thread_targets(args: argparse.Namespace) -> list[WatchTarget]:
     return parse_target_list(raw, getattr(args, "default_tid", DEFAULT_TID))
 
 
+def thread_author_watches(args: argparse.Namespace) -> list[ThreadAuthorWatch]:
+    return parse_thread_author_watches(getattr(args, "thread_author_watches", "") or os.getenv("NGA_THREAD_AUTHOR_WATCHES", ""))
+
+
+def parse_feishu_bot_profiles(raw: Any) -> list[FeishuBotProfile]:
+    profiles: list[FeishuBotProfile] = []
+    seen: set[str] = set()
+    for item in json_list_value(raw):
+        if not isinstance(item, dict):
+            continue
+        app_id = str(item.get("app_id") or item.get("feishu_app_id") or "").strip()
+        app_secret = str(item.get("app_secret") or item.get("feishu_app_secret") or "").strip()
+        profile_id = str(item.get("id") or "").strip() or stable_profile_id("feishu", app_id, str(item.get("label") or ""))
+        if not profile_id or profile_id in seen:
+            continue
+        seen.add(profile_id)
+        raw_chats = item.get("chats") if isinstance(item.get("chats"), list) else []
+        chats: list[dict[str, str]] = []
+        for chat in raw_chats:
+            if not isinstance(chat, dict):
+                continue
+            chat_id = str(chat.get("chat_id") or chat.get("id") or "").strip()
+            if not chat_id:
+                continue
+            chats.append(
+                {
+                    "chat_id": chat_id,
+                    "name": str(chat.get("name") or chat.get("title") or "").strip(),
+                    "chat_type": str(chat.get("chat_type") or "").strip(),
+                }
+            )
+        profiles.append(
+            FeishuBotProfile(
+                id=profile_id,
+                label=str(item.get("label") or item.get("name") or "").strip(),
+                app_id=app_id,
+                app_secret=app_secret,
+                id_type=str(item.get("id_type") or item.get("feishu_id_type") or "chat_id").strip() or "chat_id",
+                chats=tuple(chats),
+            )
+        )
+    return profiles
+
+
+def parse_wechat_bot_profiles(raw: Any) -> list[WeChatBotProfile]:
+    profiles: list[WeChatBotProfile] = []
+    seen: set[str] = set()
+    for item in json_list_value(raw):
+        if not isinstance(item, dict):
+            continue
+        token = str(item.get("token") or item.get("wechat_bot_token") or "").strip()
+        account_id = str(item.get("account_id") or item.get("wechat_bot_account_id") or "default").strip() or "default"
+        profile_id = str(item.get("id") or "").strip() or stable_profile_id("wechat", account_id, token[:16])
+        if not profile_id or profile_id in seen:
+            continue
+        seen.add(profile_id)
+        profiles.append(
+            WeChatBotProfile(
+                id=profile_id,
+                label=str(item.get("label") or item.get("name") or "").strip(),
+                token=token,
+                base_url=str(item.get("base_url") or item.get("wechat_bot_base_url") or wechat_bot.DEFAULT_WECHAT_BASE_URL).strip() or wechat_bot.DEFAULT_WECHAT_BASE_URL,
+                cdn_base_url=str(item.get("cdn_base_url") or item.get("wechat_bot_cdn_base_url") or wechat_bot.DEFAULT_WECHAT_CDN_BASE_URL).strip() or wechat_bot.DEFAULT_WECHAT_CDN_BASE_URL,
+                target_user_id=str(item.get("target_user_id") or item.get("wechat_bot_target_user_id") or "").strip(),
+                allowed_user_ids=str(item.get("allowed_user_ids") or item.get("wechat_bot_allowed_user_ids") or "").strip(),
+                poll_timeout_ms=wechat_bot.safe_int(item.get("poll_timeout_ms") or item.get("wechat_bot_poll_timeout_ms"), wechat_bot.DEFAULT_WECHAT_POLL_TIMEOUT_MS),
+                route_tag=str(item.get("route_tag") or item.get("wechat_bot_route_tag") or "").strip(),
+                account_id=account_id,
+            )
+        )
+    return profiles
+
+
+def normalize_channel(raw: Any, default: str = "feishu") -> str:
+    value = str(raw or default).strip().lower()
+    return value if value in {"feishu", "wechat"} else default
+
+
+def normalize_listen_mode(raw: Any, default: str = "thread_author") -> str:
+    value = str(raw or default).strip().lower().replace("-", "_")
+    return value if value in {"author", "thread_author"} else default
+
+
+def parse_push_targets(raw: Any) -> list[PushTarget]:
+    targets: list[PushTarget] = []
+    seen: set[str] = set()
+    for item in json_list_value(raw):
+        if not isinstance(item, dict):
+            continue
+        channel = normalize_channel(item.get("channel") or item.get("route_channel"))
+        target_id = str(item.get("id") or "").strip()
+        profile_id = str(item.get("profile_id") or item.get("profile") or item.get("bot") or item.get("route_profile_id") or "").strip()
+        receive_id = str(
+            item.get("receive_id")
+            or item.get("chat_id")
+            or item.get("target_user_id")
+            or item.get("feishu_receive_id")
+            or item.get("route_receive_id")
+            or ""
+        ).strip()
+        if not target_id:
+            target_id = stable_profile_id("target", channel, profile_id, receive_id, str(item.get("label") or item.get("name") or ""))
+        if not target_id or target_id in seen:
+            continue
+        seen.add(target_id)
+        targets.append(
+            PushTarget(
+                id=target_id,
+                label=str(item.get("label") or item.get("name") or "").strip(),
+                channel=channel,
+                profile_id=profile_id,
+                receive_id=receive_id,
+                id_type=str(item.get("id_type") or item.get("receive_id_type") or item.get("feishu_id_type") or "chat_id").strip() or "chat_id",
+                default_author_id=str(item.get("default_author_id") or item.get("author_id") or "").strip(),
+                default_tid=str(item.get("default_tid") or item.get("tid") or "").strip(),
+            )
+        )
+    return targets
+
+
+def parse_listen_rules(raw: Any) -> list[ListenRule]:
+    rules: list[ListenRule] = []
+    seen: set[str] = set()
+    for item in json_list_value(raw):
+        if not isinstance(item, dict):
+            continue
+        mode = normalize_listen_mode(item.get("mode") or item.get("type") or item.get("watch_mode"))
+        author_id = str(item.get("author_id") or item.get("uid") or item.get("user_id") or "").strip()
+        tid = str(item.get("tid") or item.get("thread_id") or "").strip()
+        if mode == "author":
+            if not author_id:
+                continue
+            natural_id = f"author:{author_id}"
+        else:
+            if not (tid and author_id):
+                continue
+            natural_id = f"thread_author:{tid}:{author_id}"
+        rule_id = str(item.get("id") or "").strip() or natural_id
+        if rule_id in seen:
+            continue
+        seen.add(rule_id)
+        raw_targets = item.get("target_ids")
+        if raw_targets is None:
+            raw_targets = item.get("targets")
+        if isinstance(raw_targets, str):
+            target_ids = [part.strip() for part in re.split(r"[,，;；\s]+", raw_targets) if part.strip()]
+        elif isinstance(raw_targets, Iterable):
+            target_ids = [str(part).strip() for part in raw_targets if str(part).strip()]
+        else:
+            target_ids = []
+        rules.append(
+            ListenRule(
+                id=rule_id,
+                label=str(item.get("label") or item.get("name") or "").strip(),
+                mode=mode,
+                author_id=author_id,
+                tid=tid,
+                target_ids=tuple(dict.fromkeys(target_ids)),
+            )
+        )
+    return rules
+
+
+def feishu_bot_profiles(args: argparse.Namespace) -> list[FeishuBotProfile]:
+    raw = getattr(args, "feishu_bot_profiles", "") or os.getenv("FEISHU_BOT_PROFILES", "")
+    profiles = parse_feishu_bot_profiles(raw)
+    if profiles:
+        return profiles
+    app_id = getattr(args, "feishu_app_id", "") or os.getenv("FEISHU_APP_ID", "")
+    app_secret = getattr(args, "feishu_app_secret", "") or os.getenv("FEISHU_APP_SECRET", "")
+    if not (app_id or app_secret):
+        return []
+    return [
+        FeishuBotProfile(
+            id="default",
+            label="default",
+            app_id=str(app_id).strip(),
+            app_secret=str(app_secret).strip(),
+            id_type=str(getattr(args, "feishu_id_type", "") or os.getenv("FEISHU_ID_TYPE", "chat_id")).strip() or "chat_id",
+        )
+    ]
+
+
+def wechat_bot_profiles(args: argparse.Namespace) -> list[WeChatBotProfile]:
+    raw = getattr(args, "wechat_bot_profiles", "") or os.getenv("WECHAT_BOT_PROFILES", "")
+    profiles = parse_wechat_bot_profiles(raw)
+    if profiles:
+        return profiles
+    token = getattr(args, "wechat_bot_token", "") or os.getenv("WECHAT_BOT_TOKEN", "")
+    if not token:
+        return []
+    return [
+        WeChatBotProfile(
+            id="default",
+            label="default",
+            token=str(token).strip(),
+            base_url=str(getattr(args, "wechat_bot_base_url", "") or os.getenv("WECHAT_BOT_BASE_URL", wechat_bot.DEFAULT_WECHAT_BASE_URL)).strip() or wechat_bot.DEFAULT_WECHAT_BASE_URL,
+            cdn_base_url=str(getattr(args, "wechat_bot_cdn_base_url", "") or os.getenv("WECHAT_BOT_CDN_BASE_URL", wechat_bot.DEFAULT_WECHAT_CDN_BASE_URL)).strip() or wechat_bot.DEFAULT_WECHAT_CDN_BASE_URL,
+            target_user_id=str(getattr(args, "wechat_bot_target_user_id", "") or os.getenv("WECHAT_BOT_TARGET_USER_ID", "")).strip(),
+            allowed_user_ids=str(getattr(args, "wechat_bot_allowed_user_ids", "") or os.getenv("WECHAT_BOT_ALLOWED_USER_IDS", "")).strip(),
+            poll_timeout_ms=wechat_bot.safe_int(getattr(args, "wechat_bot_poll_timeout_ms", None) or os.getenv("WECHAT_BOT_POLL_TIMEOUT_MS", ""), wechat_bot.DEFAULT_WECHAT_POLL_TIMEOUT_MS),
+            route_tag=str(getattr(args, "wechat_bot_route_tag", "") or os.getenv("WECHAT_BOT_ROUTE_TAG", "")).strip(),
+            account_id=str(getattr(args, "wechat_bot_account_id", "") or os.getenv("WECHAT_BOT_ACCOUNT_ID", "default")).strip() or "default",
+        )
+    ]
+
+
+def configured_push_targets(args: argparse.Namespace) -> list[PushTarget]:
+    raw = getattr(args, "push_targets", "") or os.getenv("NGA_PUSH_TARGETS", "")
+    targets = parse_push_targets(raw)
+    if targets:
+        return targets
+    channel = bot_channel(args)
+    if channel == "wechat":
+        profile = find_wechat_profile(args, "")
+        receive_id = str(getattr(args, "wechat_bot_target_user_id", "") or "").strip()
+        if profile or receive_id:
+            return [
+                PushTarget(
+                    id="default",
+                    label="默认微信",
+                    channel="wechat",
+                    profile_id=profile.id if profile else "",
+                    receive_id=receive_id or (profile.target_user_id if profile else ""),
+                    default_author_id=str(getattr(args, "default_author_id", "") or DEFAULT_AUTHOR_ID),
+                    default_tid=str(getattr(args, "default_tid", "") or DEFAULT_TID),
+                )
+            ]
+        return []
+    app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
+    profile = find_feishu_profile(args, "")
+    if app_id or app_secret or receive_id or profile:
+        return [
+            PushTarget(
+                id="default",
+                label="默认飞书",
+                channel="feishu",
+                profile_id=profile.id if profile else "",
+                receive_id=receive_id,
+                id_type=receive_id_type or (profile.id_type if profile else "chat_id"),
+                default_author_id=str(getattr(args, "default_author_id", "") or DEFAULT_AUTHOR_ID),
+                default_tid=str(getattr(args, "default_tid", "") or DEFAULT_TID),
+            )
+        ]
+    return []
+
+
+def configured_listen_rules(args: argparse.Namespace) -> list[ListenRule]:
+    raw = getattr(args, "listen_rules", "") or os.getenv("NGA_LISTEN_RULES", "")
+    return parse_listen_rules(raw)
+
+
+def find_push_target(args: argparse.Namespace, target_id: str) -> PushTarget | None:
+    wanted = str(target_id or "").strip()
+    targets = configured_push_targets(args)
+    if not wanted and targets:
+        return targets[0]
+    for target in targets:
+        if wanted in {target.id, target.label, target.receive_id}:
+            return target
+    return None
+
+
+def push_target_for_channel_receive(args: argparse.Namespace, channel: str, receive_id: str) -> PushTarget | None:
+    wanted_channel = normalize_channel(channel)
+    wanted_receive = str(receive_id or "").strip()
+    if not wanted_receive:
+        return None
+    for target in configured_push_targets(args):
+        if target.channel == wanted_channel and target.receive_id == wanted_receive:
+            return target
+    return None
+
+
+def csv_values(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [part.strip() for part in re.split(r"[,，;；\s]+", value) if part.strip()]
+    if isinstance(value, Iterable):
+        return [str(part).strip() for part in value if str(part).strip()]
+    return []
+
+
+def ai_schedule_recipient_args(args: argparse.Namespace) -> list[argparse.Namespace]:
+    raw = getattr(args, "ai_schedule_target_ids", "") or os.getenv("AI_SCHEDULE_TARGET_IDS", "")
+    target_ids = csv_values(raw)
+    if any(target_id.lower() in {"__none__", "none", "off"} for target_id in target_ids):
+        return []
+    if not target_ids:
+        configured_targets = configured_push_targets(args)
+        if parse_push_targets(getattr(args, "push_targets", "")) and configured_targets:
+            first_target_id = next((target.id for target in configured_targets if target.id), "")
+            target_ids = [first_target_id] if first_target_id else []
+        else:
+            return [args]
+    recipients: list[argparse.Namespace] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for target_id in target_ids:
+        target = find_push_target(args, target_id)
+        if target is None:
+            continue
+        scoped = args_for_push_target(args, target)
+        key = channel_route_key(scoped)
+        if key in seen:
+            continue
+        seen.add(key)
+        recipients.append(scoped)
+    return recipients
+
+
+def args_for_push_target(args: argparse.Namespace, target: PushTarget) -> argparse.Namespace:
+    if target.channel == "wechat":
+        cloned = args_for_configured_route(args, route_channel="wechat", route_profile_id=target.profile_id)
+        if target.receive_id:
+            cloned.wechat_bot_target_user_id = target.receive_id
+        if target.default_author_id:
+            cloned.default_author_id = target.default_author_id
+        if target.default_tid:
+            cloned.default_tid = target.default_tid
+        return cloned
+    cloned = args_for_configured_route(
+        args,
+        route_channel="feishu",
+        route_profile_id=target.profile_id,
+        receive_id=target.receive_id,
+        receive_id_type=target.id_type,
+    )
+    if target.default_author_id:
+        cloned.default_author_id = target.default_author_id
+    if target.default_tid:
+        cloned.default_tid = target.default_tid
+    return cloned
+
+
+def watch_mode(args: argparse.Namespace) -> str:
+    value = str(getattr(args, "watch_mode", "") or os.getenv("NGA_WATCH_MODE", "author")).strip().lower().replace("-", "_")
+    return value if value in {"author", "thread_author", "both"} else "author"
+
+
 def default_author_target(args: argparse.Namespace) -> WatchTarget:
     return watch_author_targets(args)[0]
 
 
 def default_thread_target(args: argparse.Namespace) -> WatchTarget:
     return preset_thread_targets(args)[0]
+
+
+def watch_author_targets_for_watch(args: argparse.Namespace) -> list[WatchTarget]:
+    rules = [rule for rule in configured_listen_rules(args) if rule.mode == "author"]
+    if not rules:
+        mode = watch_mode(args)
+        return watch_author_targets(args) if mode in {"author", "both"} else []
+    labels_by_id: dict[str, str] = {}
+    for rule in rules:
+        labels_by_id.setdefault(rule.author_id, rule.label)
+    return [WatchTarget(author_id, label) for author_id, label in labels_by_id.items()]
+
+
+def thread_author_watches_for_watch(args: argparse.Namespace) -> list[ThreadAuthorWatch]:
+    rules = [rule for rule in configured_listen_rules(args) if rule.mode == "thread_author"]
+    if not rules:
+        mode = watch_mode(args)
+        return thread_author_watches(args) if mode in {"thread_author", "both"} else []
+    watches: list[ThreadAuthorWatch] = []
+    seen: set[str] = set()
+    for rule in rules:
+        key = f"{rule.tid}:{rule.author_id}"
+        if key in seen:
+            continue
+        seen.add(key)
+        watches.append(ThreadAuthorWatch(rule.tid, rule.author_id, rule.label))
+    return watches
 
 
 def resolve_target_alias(token: str, targets: list[WatchTarget], prefix: str) -> str:
@@ -308,6 +861,25 @@ def add_post_source(post: NgaPost, source_type: str, target: WatchTarget) -> Nga
         source_type=source_type,
         source_id=target.id,
         source_label=target.label,
+        canonical_key=post.canonical_key or post.key,
+    )
+
+
+def add_thread_author_source(post: NgaPost, watch: ThreadAuthorWatch) -> NgaPost:
+    return NgaPost(
+        key=f"thread_author:{watch.tid}:{watch.author_id}:{post.key}",
+        subject=post.subject,
+        content=post.content,
+        url=post.url,
+        post_time=post.post_time,
+        author=post.author,
+        author_id=post.author_id,
+        floor=post.floor,
+        image_urls=post.image_urls,
+        source_type="thread_author",
+        source_id=watch.key,
+        source_label=watch.label,
+        canonical_key=post.canonical_key or post.key,
     )
 
 
@@ -330,9 +902,83 @@ def wechat_client_for_args(args: argparse.Namespace) -> wechat_bot.WeChatBotClie
     return client
 
 
+def find_feishu_profile(args: argparse.Namespace, profile_id: str) -> FeishuBotProfile | None:
+    target = str(profile_id or "").strip()
+    profiles = feishu_bot_profiles(args)
+    if not target and profiles:
+        return profiles[0]
+    for profile in profiles:
+        if target in {profile.id, profile.label, profile.app_id}:
+            return profile
+    return None
+
+
+def find_wechat_profile(args: argparse.Namespace, profile_id: str) -> WeChatBotProfile | None:
+    target = str(profile_id or "").strip()
+    profiles = wechat_bot_profiles(args)
+    if not target and profiles:
+        return profiles[0]
+    for profile in profiles:
+        if target in {profile.id, profile.label, profile.account_id, profile.target_user_id}:
+            return profile
+    return None
+
+
+def args_for_configured_route(
+    args: argparse.Namespace,
+    *,
+    route_channel: str = "",
+    route_profile_id: str = "",
+    receive_id: str = "",
+    receive_id_type: str = "",
+    legacy_feishu_app_id: str = "",
+    legacy_feishu_app_secret: str = "",
+) -> argparse.Namespace:
+    channel = str(route_channel or "").strip().lower()
+    if channel == "wechat":
+        profile = find_wechat_profile(args, route_profile_id)
+        cloned = copy.copy(args)
+        cloned.bot_channel = "wechat"
+        cloned.wechat_poll = True
+        if profile:
+            cloned.wechat_bot_token = profile.token
+            cloned.wechat_bot_base_url = profile.base_url
+            cloned.wechat_bot_cdn_base_url = profile.cdn_base_url
+            cloned.wechat_bot_target_user_id = profile.target_user_id
+            cloned.wechat_bot_allowed_user_ids = profile.allowed_user_ids
+            cloned.wechat_bot_poll_timeout_ms = profile.poll_timeout_ms
+            cloned.wechat_bot_route_tag = profile.route_tag
+            cloned.wechat_bot_account_id = profile.account_id
+        return cloned
+    if channel == "feishu" or route_profile_id or receive_id or legacy_feishu_app_id or legacy_feishu_app_secret:
+        profile = find_feishu_profile(args, route_profile_id)
+        cloned = copy.copy(args)
+        cloned.bot_channel = "feishu"
+        if profile:
+            cloned.feishu_app_id = profile.app_id
+            cloned.feishu_app_secret = profile.app_secret
+            cloned.feishu_id_type = receive_id_type or profile.id_type or "chat_id"
+        if legacy_feishu_app_id:
+            cloned.feishu_app_id = legacy_feishu_app_id
+        if legacy_feishu_app_secret:
+            cloned.feishu_app_secret = legacy_feishu_app_secret
+        if receive_id:
+            cloned.feishu_receive_id = receive_id
+        if receive_id_type:
+            cloned.feishu_id_type = receive_id_type
+        return cloned
+    return args
+
+
 def args_for_wechat_user(args: argparse.Namespace, user_id: str) -> argparse.Namespace:
     cloned = copy.copy(args)
     cloned.wechat_bot_target_user_id = user_id
+    target = push_target_for_channel_receive(args, "wechat", user_id)
+    if target:
+        if target.default_author_id:
+            cloned.default_author_id = target.default_author_id
+        if target.default_tid:
+            cloned.default_tid = target.default_tid
     return cloned
 
 
@@ -731,6 +1377,7 @@ def make_post(item: dict[str, Any], fallback_subject: str = "") -> NgaPost | Non
         author_id=author_id,
         floor=floor,
         image_urls=image_urls,
+        canonical_key=key,
     )
 
 
@@ -771,6 +1418,23 @@ def post_sort_key(post: NgaPost) -> tuple[float, str]:
     parsed = parse_post_time(post.post_time)
     timestamp = time.mktime(parsed) if parsed is not None else 0.0
     return timestamp, post.key
+
+
+def post_identity_key(post: NgaPost) -> str:
+    return str(post.canonical_key or post.key or "").strip()
+
+
+def post_seen_keys(post: NgaPost) -> set[str]:
+    keys = {str(post.key or "").strip(), post_identity_key(post)}
+    return {key for key in keys if key}
+
+
+def mark_post_seen(seen: set[str], post: NgaPost) -> None:
+    seen.update(post_seen_keys(post))
+
+
+def is_post_seen(seen: set[str], post: NgaPost) -> bool:
+    return bool(post_seen_keys(post) & seen)
 
 
 def extract_posts(payload: dict[str, Any]) -> list[NgaPost]:
@@ -1236,6 +1900,7 @@ def deserialize_post(value: Any) -> NgaPost | None:
             source_type=str(value.get("source_type") or ""),
             source_id=str(value.get("source_id") or ""),
             source_label=str(value.get("source_label") or ""),
+            canonical_key=str(value.get("canonical_key") or value.get("key") or ""),
         )
     except Exception:
         return None
@@ -2130,6 +2795,33 @@ def ai_manager_for_args(args: argparse.Namespace) -> ai_analysis.AIManager:
     return manager
 
 
+def ai_manager_for_recipients(args: argparse.Namespace, recipients: list[argparse.Namespace], scope: str) -> ai_analysis.AIManager:
+    config = ai_analysis.AIConfig.from_namespace(args)
+    route_keys = sorted(":".join(channel_route_key(recipient)) for recipient in recipients)
+    digest = hashlib.sha1("\n".join(route_keys).encode("utf-8")).hexdigest()[:12] if route_keys else "default"
+    key = (str(config.work_dir.resolve()), f"{scope}:{digest}")
+    manager = _AI_MANAGERS.get(key)
+    if manager is not None:
+        manager.config = config
+        return manager
+
+    def send_text(text: str) -> None:
+        for recipient in recipients:
+            push_channel_text(recipient, "AI analysis", text)
+
+    def send_file(file_name: str, text: str) -> None:
+        for recipient in recipients:
+            push_channel_file(recipient, file_name, text)
+
+    def send_result(result: ai_analysis.AIResult) -> None:
+        for recipient in recipients:
+            push_ai_result(recipient, result)
+
+    manager = ai_analysis.AIManager(config, send_text=send_text, send_file=send_file, send_result=send_result)
+    _AI_MANAGERS[key] = manager
+    return manager
+
+
 def sender_id_from_message(message: dict[str, Any]) -> str:
     sender = message.get("sender", {})
     sender_id = sender.get("sender_id", {}) if isinstance(sender, dict) else {}
@@ -2196,8 +2888,7 @@ def should_forward_plain_text_to_ai(
 
 def ai_feishu_queue_for_args(args: argparse.Namespace) -> "queue.Queue[Callable[[], None]]":
     config = ai_analysis.AIConfig.from_namespace(args)
-    target = getattr(args, "wechat_bot_target_user_id", "") if is_wechat_channel(args) else getattr(args, "feishu_receive_id", "")
-    key = (str(config.work_dir.resolve()), f"{bot_channel(args)}:{target or ''}")
+    key = (str(config.work_dir.resolve()), "global")
     with _AI_FEISHU_QUEUE_LOCK:
         existing = _AI_FEISHU_QUEUES.get(key)
         if existing is not None:
@@ -2358,10 +3049,33 @@ def run_ai_plain_text_background(
 
 
 def after_posts_pushed_for_ai(args: argparse.Namespace, posts: list[NgaPost]) -> None:
-    try:
-        ai_manager_for_args(args).maybe_auto_analyze_posts(posts)
-    except Exception as exc:
-        print(f"AI 新帖保存/分析失败: {exc}", file=sys.stderr)
+    if configured_listen_rules(args):
+        grouped: dict[str, tuple[list[argparse.Namespace], list[NgaPost]]] = {}
+        for post in posts:
+            recipients = route_args_for_post(args, post)
+            route_keys = sorted(":".join(channel_route_key(recipient)) for recipient in recipients)
+            key = hashlib.sha1("\n".join(route_keys).encode("utf-8")).hexdigest()[:12] if route_keys else "default"
+            if key not in grouped:
+                grouped[key] = (recipients, [])
+            grouped[key][1].append(post)
+        for recipients, group_posts in grouped.values():
+            try:
+                ai_manager_for_recipients(args, recipients, "auto").maybe_auto_analyze_posts(group_posts)
+            except Exception as exc:
+                print(f"AI 新帖保存/分析失败: {exc}", file=sys.stderr)
+        return
+    grouped: dict[tuple[str, str, str, str, str], tuple[argparse.Namespace, list[NgaPost]]] = {}
+    for post in posts:
+        routed_args = args_for_thread_author_route(args, post)
+        key = channel_route_key(routed_args)
+        if key not in grouped:
+            grouped[key] = (routed_args, [])
+        grouped[key][1].append(post)
+    for routed_args, group_posts in grouped.values():
+        try:
+            ai_manager_for_args(routed_args).maybe_auto_analyze_posts(group_posts)
+        except Exception as exc:
+            print(f"AI 新帖保存/分析失败: {exc}", file=sys.stderr)
 
 
 def save_posts_for_ai_history(args: argparse.Namespace, posts: list[NgaPost]) -> None:
@@ -2396,9 +3110,27 @@ def ai_source_history_needs_backfill(args: argparse.Namespace, target: WatchTarg
         return False
 
 
+def collect_author_seed_posts_for_ai(args: argparse.Namespace, author_id: str, label: str = "") -> list[NgaPost]:
+    author_id = str(author_id or "").strip()
+    if not author_id:
+        return []
+    try:
+        target = WatchTarget(author_id, str(label or "").strip())
+        return [add_post_source(post, "author", target) for post in collect_posts_for_author_with_retries(args, author_id)]
+    except Exception as exc:
+        print(f"AI 历史初始化拉取用户 {author_id} 回复失败: {exc}", file=sys.stderr)
+        return []
+
+
 def maybe_run_ai_schedule(args: argparse.Namespace) -> None:
     try:
-        ai_manager_for_args(args).maybe_scheduled_analysis()
+        recipients = ai_schedule_recipient_args(args)
+        if not recipients:
+            return
+        if len(recipients) == 1 and recipients[0] is args:
+            ai_manager_for_args(args).maybe_scheduled_analysis()
+        else:
+            ai_manager_for_recipients(args, recipients, "schedule").maybe_scheduled_analysis()
     except Exception as exc:
         print(f"AI 定时分析检查失败: {exc}", file=sys.stderr)
 
@@ -2455,16 +3187,85 @@ def push_feishu_app_card(
         raise RuntimeError(f"飞书卡片发送失败：{result}")
 
 
-def list_feishu_chats(app_id: str, app_secret: str, timeout: int) -> list[dict[str, Any]]:
-    result = feishu_app_request(
-        app_id,
-        app_secret,
-        "/im/v1/chats?page_size=50",
-        timeout=timeout,
-    )
-    if result.get("code") != 0:
-        raise RuntimeError(f"飞书群组查询失败：{result}")
-    return list(result.get("data", {}).get("items", []))
+def normalize_feishu_chat_item(chat: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "chat_id": str(chat.get("chat_id") or chat.get("id") or "").strip(),
+        "name": str(chat.get("name") or chat.get("title") or "").strip(),
+        "chat_type": str(chat.get("chat_type") or "").strip(),
+        "description": str(chat.get("description") or "").strip(),
+    }
+
+
+def merge_feishu_chats(*chat_lists: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for chats in chat_lists:
+        for raw_chat in chats:
+            if not isinstance(raw_chat, dict):
+                continue
+            chat = normalize_feishu_chat_item(raw_chat)
+            chat_id = chat["chat_id"]
+            if not chat_id or chat_id in seen:
+                continue
+            seen.add(chat_id)
+            merged.append(chat)
+    return merged
+
+
+def search_feishu_chats(app_id: str, app_secret: str, timeout: int, query_text: str) -> list[dict[str, Any]]:
+    chats: list[dict[str, Any]] = []
+    page_token = ""
+    query_text = str(query_text or "").strip()
+    for _ in range(20):
+        query = {"page_size": "100", "user_id_type": "open_id"}
+        if query_text:
+            query["query"] = query_text
+        if page_token:
+            query["page_token"] = page_token
+        result = feishu_app_request(
+            app_id,
+            app_secret,
+            f"/im/v1/chats/search?{urllib.parse.urlencode(query)}",
+            timeout=timeout,
+        )
+        if result.get("code") != 0:
+            raise RuntimeError(f"飞书群组搜索失败：{result}")
+        data = result.get("data", {}) if isinstance(result.get("data"), dict) else {}
+        chats.extend(item for item in data.get("items", []) if isinstance(item, dict))
+        if not data.get("has_more"):
+            break
+        page_token = str(data.get("page_token") or "").strip()
+        if not page_token:
+            break
+    return merge_feishu_chats(chats)
+
+
+def list_feishu_chats(app_id: str, app_secret: str, timeout: int, search_query: str = "") -> list[dict[str, Any]]:
+    chats: list[dict[str, Any]] = []
+    page_token = ""
+    for _ in range(20):
+        query = {"page_size": "100"}
+        if page_token:
+            query["page_token"] = page_token
+        result = feishu_app_request(
+            app_id,
+            app_secret,
+            f"/im/v1/chats?{urllib.parse.urlencode(query)}",
+            timeout=timeout,
+        )
+        if result.get("code") != 0:
+            raise RuntimeError(f"飞书群组查询失败：{result}")
+        data = result.get("data", {}) if isinstance(result.get("data"), dict) else {}
+        chats.extend(item for item in data.get("items", []) if isinstance(item, dict))
+        if not data.get("has_more"):
+            break
+        page_token = str(data.get("page_token") or "").strip()
+        if not page_token:
+            break
+    query_text = str(search_query or "").strip()
+    if query_text:
+        return merge_feishu_chats(search_feishu_chats(app_id, app_secret, timeout, query_text), chats)
+    return merge_feishu_chats(chats)
 
 
 def list_feishu_messages(
@@ -3516,7 +4317,110 @@ def args_for_chat(args: argparse.Namespace, chat_id: str) -> argparse.Namespace:
     cloned = copy.copy(args)
     cloned.feishu_receive_id = chat_id
     cloned.feishu_id_type = "chat_id"
+    target = push_target_for_channel_receive(args, "feishu", chat_id)
+    if target:
+        if target.default_author_id:
+            cloned.default_author_id = target.default_author_id
+        if target.default_tid:
+            cloned.default_tid = target.default_tid
     return cloned
+
+
+def args_for_thread_author_route(args: argparse.Namespace, post: NgaPost) -> argparse.Namespace:
+    if not post.source_id:
+        return args
+    if post.source_type == "author":
+        for target in watch_author_targets(args):
+            if target.id != post.source_id:
+                continue
+            return args_for_configured_route(
+                args,
+                route_channel=target.route_channel,
+                route_profile_id=target.route_profile_id,
+                receive_id=target.route_receive_id,
+                receive_id_type=target.route_id_type,
+            )
+        return args
+    if post.source_type == "thread_author":
+        for watch in thread_author_watches(args):
+            if watch.key != post.source_id:
+                continue
+            return args_for_configured_route(
+                args,
+                route_channel=watch.route_channel,
+                route_profile_id=watch.route_profile_id,
+                receive_id=watch.feishu_receive_id,
+                receive_id_type=watch.feishu_id_type,
+                legacy_feishu_app_id=watch.feishu_app_id,
+                legacy_feishu_app_secret=watch.feishu_app_secret,
+            )
+    return args
+
+
+def post_tid(post: NgaPost) -> str:
+    try:
+        parsed = urllib.parse.urlparse(post.url)
+        query = urllib.parse.parse_qs(parsed.query)
+        return str((query.get("tid") or [""])[0]).strip()
+    except Exception:
+        return ""
+
+
+def route_args_for_post(args: argparse.Namespace, post: NgaPost) -> list[argparse.Namespace]:
+    rules = configured_listen_rules(args)
+    if not rules:
+        return [args_for_thread_author_route(args, post)]
+    matched_by_id: dict[str, ListenRule] = {}
+    author_id = str(post.author_id or (post.source_id if post.source_type == "author" else "")).strip()
+    tid = post_tid(post)
+    for rule in rules:
+        if rule.mode == "author" and author_id and rule.author_id == author_id:
+            matched_by_id[rule.id] = rule
+        elif rule.mode == "thread_author" and author_id and tid and rule.author_id == author_id and rule.tid == tid:
+            matched_by_id[rule.id] = rule
+        elif post.source_type == "thread_author" and rule.mode == "thread_author" and rule.source_key == post.source_id:
+            matched_by_id[rule.id] = rule
+    matched = list(matched_by_id.values())
+    if not matched:
+        return [args]
+    routed: list[argparse.Namespace] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for rule in matched:
+        if not rule.target_ids:
+            candidates = [None]
+        else:
+            candidates = [target for target_id in rule.target_ids if (target := find_push_target(args, target_id)) is not None]
+        for target in candidates:
+            scoped = args_for_push_target(args, target) if target is not None else args
+            key = channel_route_key(scoped)
+            if key in seen:
+                continue
+            seen.add(key)
+            routed.append(scoped)
+    return routed or [args]
+
+
+def feishu_route_key(args: argparse.Namespace) -> tuple[str, str, str, str, str]:
+    app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
+    webhook = getattr(args, "webhook", "") or os.getenv("FEISHU_WEBHOOK", "")
+    secret_hash = hashlib.sha1(app_secret.encode("utf-8")).hexdigest()[:12] if app_secret else ""
+    if app_id or app_secret or receive_id:
+        return ("app", app_id, secret_hash, receive_id, receive_id_type)
+    return ("webhook", webhook, "", "", "")
+
+
+def channel_route_key(args: argparse.Namespace) -> tuple[str, str, str, str, str]:
+    if is_wechat_channel(args):
+        token = str(getattr(args, "wechat_bot_token", "") or "")
+        token_hash = hashlib.sha1(token.encode("utf-8")).hexdigest()[:12] if token else ""
+        return (
+            "wechat",
+            str(getattr(args, "wechat_bot_account_id", "") or ""),
+            token_hash,
+            str(getattr(args, "wechat_bot_target_user_id", "") or ""),
+            str(getattr(args, "wechat_bot_route_tag", "") or ""),
+        )
+    return feishu_route_key(args)
 
 
 def settings_card_for_args(args: argparse.Namespace, manager: ai_analysis.AIManager) -> dict[str, Any]:
@@ -3660,6 +4564,73 @@ def start_wechat_poll(args: argparse.Namespace) -> None:
         except Exception as exc:
             print(f"微信 Bot 长轮询失败: {exc}", file=sys.stderr)
             time.sleep(5)
+
+
+def uses_structured_routes(args: argparse.Namespace) -> bool:
+    return bool(parse_push_targets(getattr(args, "push_targets", "")) or parse_listen_rules(getattr(args, "listen_rules", "")))
+
+
+def command_channel_args(args: argparse.Namespace) -> list[argparse.Namespace]:
+    channels: list[argparse.Namespace] = []
+    seen: set[tuple[str, str]] = set()
+    for profile in feishu_bot_profiles(args):
+        if not (profile.app_id and profile.app_secret):
+            continue
+        cloned = copy.copy(args)
+        cloned.bot_channel = "feishu"
+        cloned.feishu_app_id = profile.app_id
+        cloned.feishu_app_secret = profile.app_secret
+        cloned.feishu_id_type = profile.id_type or "chat_id"
+        cloned.ws_no_watch = True
+        key = ("feishu", profile.app_id)
+        if key not in seen:
+            seen.add(key)
+            channels.append(cloned)
+    for profile in wechat_bot_profiles(args):
+        if not profile.token:
+            continue
+        cloned = args_for_configured_route(args, route_channel="wechat", route_profile_id=profile.id)
+        cloned.ws_no_watch = True
+        key = ("wechat", profile.token)
+        if key not in seen:
+            seen.add(key)
+            channels.append(cloned)
+    return channels
+
+
+def start_multi_channel(args: argparse.Namespace) -> None:
+    def watch_loop() -> None:
+        service_unavailable_failures = 0
+        while True:
+            round_error: Exception | None = None
+            try:
+                run_once(args)
+                maybe_run_ai_schedule(args)
+                service_unavailable_failures = 0
+            except Exception as exc:
+                round_error = exc
+                if is_nga_service_unavailable(exc):
+                    service_unavailable_failures += 1
+                else:
+                    service_unavailable_failures = 0
+                print(f"NGA 监听循环失败: {exc}", file=sys.stderr)
+            sleep_for = watch_sleep_seconds(args, round_error, service_unavailable_failures)
+            if round_error is not None and is_nga_service_unavailable(round_error):
+                print(f"NGA 503 backoff: next watch round in {sleep_for:.1f}s", file=sys.stderr)
+            time.sleep(sleep_for)
+
+    threading.Thread(target=watch_loop, daemon=True).start()
+    started = 0
+    for scoped_args in command_channel_args(args):
+        if is_wechat_channel(scoped_args):
+            threading.Thread(target=start_wechat_poll, args=(scoped_args,), daemon=True).start()
+            started += 1
+        else:
+            threading.Thread(target=start_ws, args=(scoped_args,), daemon=True).start()
+            started += 1
+    print(f"已启动结构化多通道监听：命令入口 {started} 个，NGA 监听循环 1 个。")
+    while True:
+        time.sleep(3600)
 
 
 def start_ws(args: argparse.Namespace) -> None:
@@ -3875,13 +4846,11 @@ def send_test_message(args: argparse.Namespace) -> None:
     print("测试消息已发送。")
 
 
-def push_deferred_summary(args: argparse.Namespace, posts: list[NgaPost]) -> None:
+def push_deferred_summary_direct(args: argparse.Namespace, posts: list[NgaPost], mention_user_id: str = "") -> None:
     if not posts:
         return
-    state = read_json(Path(args.state_path), {})
-    mention_user_id = feishu_mention_user_id(args, state)
     if is_wechat_channel(args):
-        title = f"免打扰期间新回复汇总（{len(posts)} 条）"
+        title = f"Quiet-hours summary ({len(posts)} posts)"
         push_channel_posts(args, posts, title)
         return
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
@@ -3916,7 +4885,25 @@ def push_deferred_summary(args: argparse.Namespace, posts: list[NgaPost]) -> Non
     push_feishu(webhook, secret, summary, args.timeout)
 
 
-def push_to_feishu(args: argparse.Namespace, post: NgaPost, mention_user_id: str = "") -> None:
+def push_deferred_summary(args: argparse.Namespace, posts: list[NgaPost]) -> None:
+    if not posts:
+        return
+    state = read_json(Path(args.state_path), {})
+    mention_user_id = feishu_mention_user_id(args, state)
+    grouped: dict[tuple[str, str, str, str, str], tuple[argparse.Namespace, list[NgaPost]]] = {}
+    for post in posts:
+        for routed_args in route_args_for_post(args, post):
+            key = channel_route_key(routed_args)
+            if key not in grouped:
+                grouped[key] = (routed_args, [])
+            grouped[key][1].append(post)
+    if not grouped:
+        grouped[channel_route_key(args)] = (args, posts)
+    for routed_args, group_posts in grouped.values():
+        push_deferred_summary_direct(routed_args, group_posts, mention_user_id)
+
+
+def push_single_channel_post(args: argparse.Namespace, post: NgaPost, mention_user_id: str = "") -> None:
     if is_wechat_channel(args):
         push_channel_raw_text(args, wechat_posts_text([post], new_reply_title(post)))
         return
@@ -3933,6 +4920,12 @@ def push_to_feishu(args: argparse.Namespace, post: NgaPost, mention_user_id: str
     if not webhook:
         raise SystemExit("缺少飞书发送目标。请设置应用凭证和 Receive ID，或设置 FEISHU_WEBHOOK。")
     push_feishu(webhook, secret, post, args.timeout)
+
+
+def push_to_feishu(args: argparse.Namespace, post: NgaPost, mention_user_id: str = "") -> None:
+    routed_args = route_args_for_post(args, post)
+    for scoped_args in routed_args:
+        push_single_channel_post(scoped_args, post, mention_user_id)
 
 
 def sleep_between_nga_pages(page_delay: float) -> None:
@@ -4082,7 +5075,21 @@ def with_retries(label: str, attempts: int, initial_delay: float, step_delay: fl
 
 def regular_watch_sleep_seconds(args: argparse.Namespace) -> float:
     jitter = random.uniform(-args.jitter, args.jitter) if args.jitter > 0 else 0
-    return max(1.0, float(args.interval) + jitter)
+    base_interval = max(1.0, float(args.interval))
+    if thread_author_watches_for_watch(args):
+        thread_interval = max(1.0, float(getattr(args, "thread_watch_interval", DEFAULT_THREAD_WATCH_INTERVAL) or DEFAULT_THREAD_WATCH_INTERVAL))
+        base_interval = min(base_interval, thread_interval)
+    return max(1.0, base_interval + jitter)
+
+
+def watch_due(state: dict[str, Any], key: str, interval: float, *, force: bool = False) -> bool:
+    if force:
+        return True
+    try:
+        last_at = float(state.get(key) or 0)
+    except (TypeError, ValueError):
+        last_at = 0
+    return last_at <= 0 or time.time() - last_at >= max(1.0, float(interval))
 
 
 def nga_unavailable_backoff_sleep_seconds(args: argparse.Namespace, failures: int) -> float:
@@ -4164,6 +5171,26 @@ def collect_thread_tail_with_retries(args: argparse.Namespace, tid: str, count: 
         getattr(args, "nga_cache_ttl", DEFAULT_NGA_CACHE_TTL),
         True,
     )
+
+
+def collect_thread_author_watch_posts(args: argparse.Namespace, watches: list[ThreadAuthorWatch]) -> tuple[list[NgaPost], list[tuple[str, int]]]:
+    posts: list[NgaPost] = []
+    counts: list[tuple[str, int]] = []
+    if not watches:
+        return posts, counts
+    tail_count = max(1, int(getattr(args, "thread_watch_tail_count", DEFAULT_THREAD_WATCH_TAIL_COUNT) or DEFAULT_THREAD_WATCH_TAIL_COUNT))
+    by_tid: dict[str, list[ThreadAuthorWatch]] = {}
+    for watch in watches:
+        by_tid.setdefault(watch.tid, []).append(watch)
+    tids = list(by_tid)
+    for tid_index, tid in enumerate(tids):
+        thread_posts = collect_thread_tail_with_retries(args, tid, tail_count)
+        for watch in by_tid[tid]:
+            matched = [add_thread_author_source(post, watch) for post in thread_posts if str(post.author_id) == str(watch.author_id)]
+            posts.extend(matched)
+            counts.append((thread_author_display_name(watch), len(matched)))
+        sleep_between_watch_targets(args, tid_index, len(tids))
+    return posts, counts
 
 
 def handle_feishu_commands(args: argparse.Namespace, state: dict[str, Any]) -> bool:
@@ -4386,9 +5413,23 @@ def run_once(args: argparse.Namespace) -> int:
     seen = set(state.get("seen", []))
     mention_user_id = feishu_mention_user_id(args, state)
 
-    author_targets = watch_author_targets(args)
+    author_targets = watch_author_targets_for_watch(args)
+    thread_watches = thread_author_watches_for_watch(args)
+    force_watch = bool(getattr(args, "mark_seen", False) or getattr(args, "once", False))
+    author_due = bool(author_targets) and watch_due(state, "last_author_watch_at", float(getattr(args, "interval", 30) or 30), force=force_watch)
+    thread_due = bool(thread_watches) and watch_due(
+        state,
+        "last_thread_author_watch_at",
+        float(getattr(args, "thread_watch_interval", DEFAULT_THREAD_WATCH_INTERVAL) or DEFAULT_THREAD_WATCH_INTERVAL),
+        force=force_watch,
+    )
+    if not author_due:
+        author_targets = []
+    if not thread_due:
+        thread_watches = []
     has_author_init_state = isinstance(state.get("watch_author_initialized_ids"), list)
     initialized_author_ids = set(state_list(state.get("watch_author_initialized_ids")))
+    initialized_thread_author_keys = set(state_list(state.get("thread_author_initialized_keys")))
     posts: list[NgaPost] = []
     seen_in_fetch: set[str] = set()
     initialized_this_run = 0
@@ -4418,11 +5459,11 @@ def run_once(args: argparse.Namespace) -> int:
             continue
 
         if target.id not in initialized_author_ids:
-            previously_seen_for_target = any(post.key in seen for post in sourced_posts)
+            previously_seen_for_target = any(is_post_seen(seen, post) for post in sourced_posts)
             legacy_existing_target = not has_author_init_state and target_index == 0 and previously_seen_for_target
             if not legacy_existing_target:
                 for post in sourced_posts:
-                    seen.add(post.key)
+                    mark_post_seen(seen, post)
                 initialized_ai_posts.extend(sourced_posts)
                 initialized_author_ids.add(target.id)
                 initialized_this_run += len(sourced_posts)
@@ -4435,16 +5476,60 @@ def run_once(args: argparse.Namespace) -> int:
             ai_backfill_posts.extend(sourced_posts)
 
         for sourced in sourced_posts:
-            if sourced.key in seen_in_fetch:
+            identity = post_identity_key(sourced)
+            if identity in seen_in_fetch:
                 continue
-            seen_in_fetch.add(sourced.key)
+            seen_in_fetch.add(identity)
             posts.append(sourced)
         sleep_between_watch_targets(args, target_index, total_author_targets)
+    if author_due:
+        state["last_author_watch_at"] = int(time.time())
+
+    seeded_thread_author_ids: set[str] = set()
+    if thread_watches:
+        try:
+            thread_posts, thread_counts = collect_thread_author_watch_posts(args, thread_watches)
+        except Exception as exc:
+            if is_nga_service_unavailable(exc):
+                raise NgaTemporaryUnavailable(
+                    "NGA 503 while watching thread-author targets; circuit-breaking current watch round.",
+                    status_code=503,
+                ) from exc
+            raise
+        fetched_target_counts.extend(thread_counts)
+        for watch in thread_watches:
+            watch_posts = [post for post in thread_posts if post.source_id == watch.key]
+            if args.mark_seen:
+                posts.extend(watch_posts)
+                initialized_thread_author_keys.add(watch.key)
+                continue
+            if watch.key not in initialized_thread_author_keys:
+                for post in watch_posts:
+                    mark_post_seen(seen, post)
+                initialized_ai_posts.extend(watch_posts)
+                if watch.author_id not in seeded_thread_author_ids:
+                    initialized_ai_posts.extend(collect_author_seed_posts_for_ai(args, watch.author_id, watch.label))
+                    seeded_thread_author_ids.add(watch.author_id)
+                initialized_thread_author_keys.add(watch.key)
+                initialized_this_run += len(watch_posts)
+                print(f"首次监听帖内作者 {thread_author_display_name(watch)}，已把当前抓到的 {len(watch_posts)} 条回复标记为已读。")
+                continue
+            if watch.author_id not in seeded_thread_author_ids and ai_source_history_needs_backfill(args, WatchTarget(watch.author_id, watch.label)):
+                ai_backfill_posts.extend(collect_author_seed_posts_for_ai(args, watch.author_id, watch.label))
+                seeded_thread_author_ids.add(watch.author_id)
+            for sourced in watch_posts:
+                identity = post_identity_key(sourced)
+                if identity in seen_in_fetch:
+                    continue
+                seen_in_fetch.add(identity)
+                posts.append(sourced)
+        state["last_thread_author_watch_at"] = int(time.time())
     if args.mark_seen:
         for post in posts:
-            seen.add(post.key)
+            mark_post_seen(seen, post)
         state["seen"] = sorted(seen)
         state["watch_author_initialized_ids"] = sorted(initialized_author_ids)
+        state["thread_author_initialized_keys"] = sorted(initialized_thread_author_keys)
         state["updated_at"] = int(time.time())
         write_watcher_state(state_path, state)
         detail = format_target_fetch_counts(fetched_target_counts)
@@ -4452,7 +5537,7 @@ def run_once(args: argparse.Namespace) -> int:
         print(f"已标记 {len(posts)} 条已抓取回复为已读{suffix}。")
         return len(posts)
 
-    new_posts = [post for post in posts if post.key not in seen]
+    new_posts = [post for post in posts if not is_post_seen(seen, post)]
     new_posts.sort(key=post_sort_key)
 
     quiet_now = is_quiet_time(args)
@@ -4465,7 +5550,7 @@ def run_once(args: argparse.Namespace) -> int:
 
     if quiet_posts:
         for post in quiet_posts:
-            seen.add(post.key)
+            mark_post_seen(seen, post)
         if args.dry_run:
             print(f"[试运行] {len(quiet_posts)} 条新回复属于免打扰时段，不会立即推送。")
         elif quiet_policy == "defer":
@@ -4487,7 +5572,7 @@ def run_once(args: argparse.Namespace) -> int:
             print(f"已推送免打扰期间新回复汇总：{len(deferred_posts)} 条。")
     elif deliver_posts:
         for post in deliver_posts:
-            seen.add(post.key)
+            mark_post_seen(seen, post)
         if args.dry_run:
             print(f"[试运行] 当前处于免打扰时段，本轮 {len(deliver_posts)} 条新回复不会推送。")
         else:
@@ -4506,7 +5591,7 @@ def run_once(args: argparse.Namespace) -> int:
             print(f"[试运行] {post.subject} {post.url}\n{post.content[:500]}\n")
         else:
             push_to_feishu(args, post, mention_user_id)
-            seen.add(post.key)
+            mark_post_seen(seen, post)
             ai_pushed_posts.append(post)
 
     if ai_pushed_posts:
@@ -4515,6 +5600,7 @@ def run_once(args: argparse.Namespace) -> int:
     if not args.dry_run:
         state["seen"] = sorted(seen)
         state["watch_author_initialized_ids"] = sorted(initialized_author_ids)
+        state["thread_author_initialized_keys"] = sorted(initialized_thread_author_keys)
         if initialized_this_run:
             state["watch_author_initialized_at"] = int(time.time())
         state["updated_at"] = int(time.time())
@@ -4532,9 +5618,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bot-channel", choices=["feishu", "wechat"], default=os.getenv("NGA_BOT_CHANNEL", "feishu"))
     parser.add_argument("--author-id", default=os.getenv("NGA_AUTHOR_ID", DEFAULT_AUTHOR_ID))
     parser.add_argument("--author-ids", default=os.getenv("NGA_AUTHOR_IDS", ""), help="Comma or newline separated NGA user IDs to watch. Supports id=label.")
+    parser.add_argument("--watch-mode", choices=["author", "thread_author", "both"], default=os.getenv("NGA_WATCH_MODE", "author"))
     parser.add_argument("--default-author-id", default=os.getenv("NGA_DEFAULT_AUTHOR_ID", DEFAULT_AUTHOR_ID))
     parser.add_argument("--default-tid", default=os.getenv("NGA_DEFAULT_TID", DEFAULT_TID))
     parser.add_argument("--preset-thread-ids", default=os.getenv("NGA_PRESET_TIDS", ""), help="Comma or newline separated thread presets. Supports tid=label.")
+    parser.add_argument("--thread-author-watches", default=os.getenv("NGA_THREAD_AUTHOR_WATCHES", ""))
+    parser.add_argument("--push-targets", default=os.getenv("NGA_PUSH_TARGETS", ""), help="JSON list of message push targets.")
+    parser.add_argument("--listen-rules", default=os.getenv("NGA_LISTEN_RULES", ""), help="JSON list of NGA listen rules.")
+    parser.add_argument("--thread-watch-tail-count", type=int, default=int(os.getenv("NGA_THREAD_WATCH_TAIL_COUNT", str(DEFAULT_THREAD_WATCH_TAIL_COUNT))))
+    parser.add_argument("--thread-watch-interval", type=float, default=float(os.getenv("NGA_THREAD_WATCH_INTERVAL", str(DEFAULT_THREAD_WATCH_INTERVAL))))
     parser.add_argument("--max-pages", type=int, default=int(os.getenv("NGA_MAX_PAGES", "1")))
     parser.add_argument("--state-path", default=os.getenv("NGA_STATE_PATH", ".nga_seen.json"))
     parser.add_argument("--cookie", default="")
@@ -4544,6 +5636,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--feishu-app-secret", default="")
     parser.add_argument("--feishu-receive-id", default="")
     parser.add_argument("--feishu-id-type", default=os.getenv("FEISHU_ID_TYPE", "chat_id"))
+    parser.add_argument("--feishu-bot-profiles", default=os.getenv("FEISHU_BOT_PROFILES", ""))
     parser.add_argument("--timeout", type=int, default=20)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--mark-seen", action="store_true", help="把当前抓取到的回复记为已读，不推送。")
@@ -4588,6 +5681,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wechat-bot-route-tag", default=os.getenv("WECHAT_BOT_ROUTE_TAG", ""))
     parser.add_argument("--wechat-bot-account-id", default=os.getenv("WECHAT_BOT_ACCOUNT_ID", "default"))
     parser.add_argument("--wechat-bot-state-dir", default=os.getenv("WECHAT_BOT_STATE_DIR", ""))
+    parser.add_argument("--wechat-bot-profiles", default=os.getenv("WECHAT_BOT_PROFILES", ""))
     parser.add_argument("--wechat-poll", action="store_true", help="使用微信 ilink 长轮询接收消息。bot_channel=wechat 时会自动启用。")
     parser.add_argument("--retries", type=int, default=int(os.getenv("NGA_RETRIES", "10")))
     parser.add_argument(
@@ -4625,6 +5719,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ws", action="store_true", help="使用飞书 WebSocket 接收消息和卡片操作。")
     parser.add_argument("--ws-no-watch", action="store_true", help="在 WebSocket 模式下不启动 NGA 后台监听循环。")
     ai_analysis.add_cli_arguments(parser)
+    parser.add_argument("--ai-schedule-target-ids", default=os.getenv("AI_SCHEDULE_TARGET_IDS", ""), help="Comma separated push target ids that should receive one shared scheduled AI result.")
     return parser.parse_args()
 
 
@@ -4641,6 +5736,9 @@ def normalize_multi_target_defaults(args: argparse.Namespace) -> None:
 def main() -> None:
     args = parse_args()
     normalize_multi_target_defaults(args)
+    if uses_structured_routes(args) and not (args.once or args.mark_seen or args.send_test or args.list_feishu_chats):
+        start_multi_channel(args)
+        return
     if args.ws and not is_wechat_channel(args):
         start_ws(args)
         return

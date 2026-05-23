@@ -7,9 +7,12 @@ nga_wolf_runtime_config.json
 nga_wolf_gui.log
 __pycache__/
 *.pyc
+webui/node_modules/
 build/
-dist/
+/dist/
 *.spec
+!NGA-Wolf-Watcher.spec
+!NGA-Wolf-Watcher-Web.spec
 nga_sample*.html
 nga_output8*.bin
 nga_forum.bin

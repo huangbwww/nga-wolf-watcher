@@ -23,9 +23,18 @@ rem set "WECHAT_BOT_ACCOUNT_ID=default"
 rem Optional defaults.
 set "NGA_DEFAULT_AUTHOR_ID=150058"
 set "NGA_DEFAULT_TID=45974302"
+rem Watch mode: author, thread_author, or both.
+set "NGA_WATCH_MODE=author"
 rem Multi target presets. Supports comma/newline-separated id or id=label.
 rem set "NGA_AUTHOR_IDS=150058=wolf,123456=other"
 rem set "NGA_PRESET_TIDS=45974302=wolf thread,888888=other thread"
+rem Thread-author watch mode watches recent posts in a thread, then filters by author id.
+rem Format: tid:uid=label|receive_id=oc_xxx
+rem A receive_id-only route reuses the main Feishu bot and pushes this combo to another group.
+rem Add app_id/app_secret/receive_id to use a separate Feishu bot for this combo.
+rem set "NGA_THREAD_AUTHOR_WATCHES=45974302:150058=wolf|receive_id=oc_xxx"
+set "NGA_THREAD_WATCH_TAIL_COUNT=20"
+set "NGA_THREAD_WATCH_INTERVAL=10"
 set "NGA_INTERVAL=30"
 set "NGA_JITTER=20"
 set "NGA_RETRIES=10"
