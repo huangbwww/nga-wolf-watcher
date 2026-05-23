@@ -3725,6 +3725,17 @@ def target_select_options(targets: list[WatchTarget], prefix: str) -> list[dict[
     return options
 
 
+def target_select_initial_option(targets: list[WatchTarget], prefix: str, target_id: str) -> dict[str, Any] | None:
+    target_id = str(target_id or "").strip()
+    if not target_id:
+        return None
+    for index, target in enumerate(targets, 1):
+        if target.id == target_id:
+            label = target_display_name(target)
+            return {"text": {"tag": "plain_text", "content": f"{prefix}{index} {label}"[:80]}, "value": target.id}
+    return {"text": {"tag": "plain_text", "content": target_id[:80]}, "value": target_id}
+
+
 def command_form_card(
     command: str,
     target_id: str,
@@ -3742,6 +3753,18 @@ def command_form_card(
     targets = author_targets if command.endswith("_r") else thread_targets
     targets = targets or [WatchTarget(target_id, "")]
     prefix = "u" if command.endswith("_r") else "t"
+    target_options = target_select_options(targets, prefix)
+    initial_target = target_select_initial_option(targets, prefix, target_id)
+    if initial_target and all(option.get("value") != initial_target.get("value") for option in target_options):
+        target_options.append(initial_target)
+    target_select = {
+        "tag": "select_static",
+        "name": "preset_target_id",
+        "placeholder": {"tag": "plain_text", "content": "Preset target"},
+        "options": target_options,
+    }
+    if initial_target:
+        target_select["initial_option"] = initial_target
     return {
         "schema": "2.0",
         "config": {"wide_screen_mode": True},
@@ -3756,12 +3779,7 @@ def command_form_card(
                     "tag": "form",
                     "name": "nga_command_form",
                     "elements": [
-                        {
-                            "tag": "select_static",
-                            "name": "preset_target_id",
-                            "placeholder": {"tag": "plain_text", "content": "Preset target"},
-                            "options": target_select_options(targets, prefix),
-                        },
+                        target_select,
                         {
                             "tag": "input",
                             "name": "custom_target_id",
@@ -3785,6 +3803,8 @@ def command_form_card(
                                     "value": {
                                         "action": "run_nga_command",
                                         "command": command,
+                                        "target_id": target_id,
+                                        "count": count,
                                     },
                                 }
                             ],
@@ -5193,6 +5213,26 @@ def collect_thread_author_watch_posts(args: argparse.Namespace, watches: list[Th
     return posts, counts
 
 
+def collect_thread_author_startup_catchup_posts(args: argparse.Namespace, watches: list[ThreadAuthorWatch]) -> tuple[list[NgaPost], list[tuple[str, int]]]:
+    posts: list[NgaPost] = []
+    counts: list[tuple[str, int]] = []
+    if not watches:
+        return posts, counts
+    by_author: dict[str, list[ThreadAuthorWatch]] = {}
+    for watch in watches:
+        by_author.setdefault(watch.author_id, []).append(watch)
+    author_ids = list(by_author)
+    for author_index, author_id in enumerate(author_ids):
+        author_posts = collect_posts_for_author_with_retries(args, author_id)
+        watches_for_author = by_author[author_id]
+        for watch in watches_for_author:
+            matched = [add_thread_author_source(post, watch) for post in author_posts if post_tid(post) == watch.tid]
+            posts.extend(matched)
+            counts.append((f"{thread_author_display_name(watch)} 启动补抓", len(matched)))
+        sleep_between_watch_targets(args, author_index, len(author_ids))
+    return posts, counts
+
+
 def handle_feishu_commands(args: argparse.Namespace, state: dict[str, Any]) -> bool:
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     if args.disable_commands or not (app_id and app_secret and receive_id) or receive_id_type != "chat_id":
@@ -5487,6 +5527,28 @@ def run_once(args: argparse.Namespace) -> int:
 
     seeded_thread_author_ids: set[str] = set()
     if thread_watches:
+        startup_catchup_done = bool(getattr(args, "_thread_author_startup_catchup_done", False))
+        if not startup_catchup_done and not args.mark_seen:
+            catchup_watches = [watch for watch in thread_watches if watch.key in initialized_thread_author_keys]
+            try:
+                catchup_posts, catchup_counts = collect_thread_author_startup_catchup_posts(args, catchup_watches)
+                for sourced in catchup_posts:
+                    identity = post_identity_key(sourced)
+                    if identity in seen_in_fetch:
+                        continue
+                    seen_in_fetch.add(identity)
+                    posts.append(sourced)
+                fetched_target_counts.extend(catchup_counts)
+                if catchup_watches:
+                    print(f"启动补抓帖内作者用户回复完成：{sum(count for _, count in catchup_counts)} 条。")
+            except Exception as exc:
+                if is_nga_service_unavailable(exc):
+                    raise NgaTemporaryUnavailable(
+                        "NGA 503 while startup-catching thread-author targets; circuit-breaking current watch round.",
+                        status_code=503,
+                    ) from exc
+                print(f"启动补抓帖内作者用户回复失败，继续执行帖内扫描: {exc}", file=sys.stderr)
+            setattr(args, "_thread_author_startup_catchup_done", True)
         try:
             thread_posts, thread_counts = collect_thread_author_watch_posts(args, thread_watches)
         except Exception as exc:

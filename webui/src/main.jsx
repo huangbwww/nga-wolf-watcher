@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
@@ -7,26 +7,41 @@ import {
   ChevronDown,
   CircleStop,
   Database,
+  Edit3,
   FolderOpen,
+  ListChecks,
   MessageSquare,
+  Plus,
   Play,
   QrCode,
   RefreshCw,
   Save,
+  Search,
   Settings,
   ShieldCheck,
   TerminalSquare,
+  Trash2,
+  Users,
+  X,
 } from "lucide-react";
 import "./styles.css";
 
 const api = () => window.pywebview?.api;
+let closingFlag = false;
+const isClosing = () => closingFlag;
+const hasApiMethod = (method) => typeof api()?.[method] === "function";
+const DEFAULT_AI_ANALYSIS_PROMPT = "根据最新的 NGA 回复历史、我目前的持仓信息和观察列表，并实时查询公开 A 股行情信息，分析盘面变化、机会与风险，给出接下来需要重点观察的方向和操作建议。";
+const DEFAULT_SCHEDULE_WINDOWS = "weekday:09:30-11:30,13:00-15:00";
+const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+const QUIET_POLICY_OPTIONS = {
+  ignore: "忽略新回复",
+  defer: "暂存并在免打扰结束后汇总推送",
+};
 
 const fieldGroups = {
   common: [
     ["nga_cookie", "NGA Cookie", "textarea"],
     ["watch_mode", "监听模式", "select", ["author", "thread_author", "both"]],
-    ["thread_watch_tail_count", "帖内扫描条数", "number"],
-    ["thread_watch_interval", "帖内扫描间隔秒", "number"],
   ],
   feishu: [
     ["feishu_app_id", "App ID", "text"],
@@ -53,21 +68,27 @@ const fieldGroups = {
     ["ai_schedule_prompt", "定时提示词", "textarea"],
   ],
   runtime: [
+    ["thread_watch_tail_count", "帖内扫描条数", "number"],
+    ["thread_watch_interval", "帖内扫描间隔秒", "number"],
     ["interval", "轮询间隔秒", "number"],
     ["jitter", "随机抖动秒", "number"],
     ["retries", "重试次数", "number"],
     ["retry_initial_delay", "重试初始等待秒", "number"],
     ["retry_delay", "重试递增秒", "number"],
     ["nga_request_min_interval", "NGA 请求最小间隔秒", "number"],
-    ["quiet_hours_enabled", "免打扰", "checkbox"],
-    ["quiet_policy", "免打扰策略", "select", ["ignore", "defer"]],
-    ["quiet_start_time", "免打扰开始", "text"],
-    ["quiet_end_time", "免打扰结束", "text"],
+  ],
+  close: [
+    ["web_close_behavior", "关闭按钮行为", "select", ["ask", "minimize", "exit"]],
   ],
 };
 
 function normalizeConfig(config = {}, defaults = {}) {
-  return { ...defaults, ...config };
+  const merged = { ...defaults, ...config };
+  if (!String(merged.ai_auto_analysis_prompt || "").trim()) merged.ai_auto_analysis_prompt = DEFAULT_AI_ANALYSIS_PROMPT;
+  if (!String(merged.ai_schedule_prompt || "").trim()) merged.ai_schedule_prompt = DEFAULT_AI_ANALYSIS_PROMPT;
+  if (!String(merged.ai_schedule_windows || "").trim()) merged.ai_schedule_windows = DEFAULT_SCHEDULE_WINDOWS;
+  if (!String(merged.web_close_behavior || "").trim()) merged.web_close_behavior = "ask";
+  return merged;
 }
 
 function parseJsonList(raw) {
@@ -191,12 +212,23 @@ function parseTargetList(raw = "", fallback = "") {
   const text = String(raw || "").trim();
   const rows = [];
   const seen = new Set();
-  const items = text ? text.split(/[\r\n,，;；]+/) : [];
+  const splitLegacyTargets = (value) => {
+    const lines = String(value || "").split(/[\r\n]+/).map((item) => item.trim()).filter(Boolean);
+    if (lines.length > 1) return lines;
+    const single = lines[0] || "";
+    if (!single) return [];
+    const legacyParts = single.split(/[,，;；]+/).map((item) => item.trim()).filter(Boolean);
+    if (legacyParts.length <= 1) return [single];
+    const looksLikeId = (item) => /^[A-Za-z]?\d+$/.test(String(item || "").split("=")[0].trim());
+    return legacyParts.every(looksLikeId) ? legacyParts : [single];
+  };
+  const items = text ? splitLegacyTargets(text) : [];
   if (!items.length && fallback) items.push(String(fallback));
   for (const item of items) {
     const part = item.trim();
     if (!part) continue;
-    const [idPart, ...labelParts] = part.split("=");
+    const [visiblePart] = part.split("|");
+    const [idPart, ...labelParts] = visiblePart.split("=");
     const id = idPart.trim();
     if (!id || seen.has(id)) continue;
     seen.add(id);
@@ -270,8 +302,14 @@ function formatThreadAuthorWatches(rows) {
 
 function Field({ config, setConfig, spec }) {
   const [key, label, type, options] = spec;
-  const value = config[key] ?? "";
+  let value = config[key] ?? "";
+  if ((key === "ai_auto_analysis_prompt" || key === "ai_schedule_prompt") && !String(value || "").trim()) {
+    value = DEFAULT_AI_ANALYSIS_PROMPT;
+  }
   const update = (next) => setConfig((current) => ({ ...current, [key]: next }));
+  if (key === "ai_schedule_windows") {
+    return <ScheduleWindowField config={config} setConfig={setConfig} label={label} />;
+  }
   if (type === "textarea") {
     return (
       <label className="field field-wide">
@@ -281,13 +319,17 @@ function Field({ config, setConfig, spec }) {
     );
   }
   if (type === "select") {
+    const optionLabel = (option) => {
+      if (key === "web_close_behavior") return { ask: "每次询问", minimize: "最小化到后台图标", exit: "直接退出程序" }[option] || option;
+      return option;
+    };
     return (
       <label className="field">
         <span>{label}</span>
         <select value={value || options[0]} onChange={(event) => update(event.target.value)}>
           {options.map((option) => (
             <option key={option} value={option}>
-              {option}
+              {optionLabel(option)}
             </option>
           ))}
         </select>
@@ -298,7 +340,7 @@ function Field({ config, setConfig, spec }) {
     return (
       <label className="switch-row">
         <span>{label}</span>
-        <input type="checkbox" checked={Boolean(value)} onChange={(event) => update(event.target.checked)} />
+        <input type="checkbox" checked={Boolean(value)} onChange={(event) => update(event.target.checked)} aria-label={label} />
       </label>
     );
   }
@@ -308,6 +350,255 @@ function Field({ config, setConfig, spec }) {
       <input type={type || "text"} value={value || ""} onChange={(event) => update(event.target.value)} />
     </label>
   );
+}
+
+function ScheduleWindowField({ config, setConfig, label }) {
+  const parsed = parseScheduleWindows(config.ai_schedule_windows || DEFAULT_SCHEDULE_WINDOWS);
+  const save = (nextDays, nextRanges) => {
+    const expression = formatScheduleWindows(nextDays, nextRanges);
+    setConfig((configCurrent) => ({
+      ...configCurrent,
+      ai_schedule_window_mode: "a_share",
+      ai_schedule_windows: expression,
+    }));
+  };
+  const toggleDay = (day) => {
+    const days = parsed.days.includes(day) ? parsed.days.filter((item) => item !== day) : [...parsed.days, day].sort((a, b) => a - b);
+    save(days, parsed.ranges);
+  };
+  const updateRange = (index, patch) => {
+    const ranges = parsed.ranges.map((range, itemIndex) => (itemIndex === index ? { ...range, ...patch } : range));
+    save(parsed.days, ranges);
+  };
+  const addRange = () => save(parsed.days, [...parsed.ranges, { start: "09:30", end: "10:30" }]);
+  const removeRange = (index) => save(parsed.days, parsed.ranges.filter((_, itemIndex) => itemIndex !== index));
+  return (
+    <div className="field field-wide schedule-window-picker">
+      <span>{label}</span>
+      <div className="weekday-picker">
+        {WEEKDAYS.map((name, index) => (
+          <label className="day-chip" key={name}>
+            <input type="checkbox" checked={parsed.days.includes(index)} onChange={() => toggleDay(index)} />
+            <span>{name}</span>
+          </label>
+        ))}
+      </div>
+      <div className="time-range-list">
+        <div className="range-header">
+          <strong>每天时间段</strong>
+          <IconButton icon={Plus} label="添加时间段" kind="primary" onClick={addRange} />
+        </div>
+        {parsed.ranges.map((range, index) => (
+          <div className="time-range-row" key={`${range.start}-${range.end}-${index}`}>
+            <label>
+              <span>开始</span>
+              <input type="time" value={range.start} onChange={(event) => updateRange(index, { start: event.target.value })} />
+            </label>
+            <label>
+              <span>结束</span>
+              <input type="time" value={range.end} onChange={(event) => updateRange(index, { end: event.target.value })} />
+            </label>
+            <IconButton icon={Trash2} label="删除时间段" kind="danger" onClick={() => removeRange(index)} />
+          </div>
+        ))}
+        {!parsed.ranges.length ? <div className="empty-row">暂无时间段，点击 + 添加。</div> : null}
+      </div>
+      <div className="window-preview">
+        当前表达式：<code>{formatScheduleWindows(parsed.days, parsed.ranges)}</code>
+      </div>
+    </div>
+  );
+}
+
+function parseDayExpr(raw) {
+  const value = String(raw || "").trim().toLowerCase();
+  if (["weekday", "weekdays", "mon-fri"].includes(value)) return [0, 1, 2, 3, 4];
+  const names = { mon: 0, tue: 1, wed: 2, thu: 3, fri: 4, sat: 5, sun: 6 };
+  const dayFrom = (item) => {
+    if (names[item] !== undefined) return names[item];
+    const number = Number.parseInt(item, 10);
+    return Number.isFinite(number) ? Math.min(6, Math.max(0, number - 1)) : null;
+  };
+  if (value.includes("-")) {
+    const [left, right] = value.split("-", 2).map((item) => item.trim());
+    const start = dayFrom(left);
+    const end = dayFrom(right);
+    if (start === null || end === null) return [];
+    const days = [];
+    for (let day = start; day <= end; day += 1) days.push(day);
+    return days;
+  }
+  const single = dayFrom(value);
+  return single === null ? [] : [single];
+}
+
+function parseScheduleWindows(raw) {
+  const text = String(raw || DEFAULT_SCHEDULE_WINDOWS).trim() || DEFAULT_SCHEDULE_WINDOWS;
+  const days = new Set();
+  const rangeMap = new Map();
+  for (const block of text.split(";").map((item) => item.trim()).filter(Boolean)) {
+    if (!block.includes(":")) continue;
+    const [dayExpr, ...rangeParts] = block.split(":");
+    for (const day of parseDayExpr(dayExpr)) days.add(day);
+    for (const range of rangeParts.join(":").split(",").map((item) => item.trim()).filter(Boolean)) {
+      const [start, end] = range.split("-", 2).map((item) => item.trim());
+      if (/^\d{2}:\d{2}$/.test(start || "") && /^\d{2}:\d{2}$/.test(end || "")) {
+        rangeMap.set(`${start}-${end}`, { start, end });
+      }
+    }
+  }
+  return {
+    days: days.size ? [...days].sort((a, b) => a - b) : [0, 1, 2, 3, 4],
+    ranges: rangeMap.size ? [...rangeMap.values()] : [{ start: "09:30", end: "11:30" }, { start: "13:00", end: "15:00" }],
+  };
+}
+
+function formatDayExpression(days) {
+  const normalized = [...new Set(days)].sort((a, b) => a - b);
+  if (normalized.join(",") === "0,1,2,3,4") return "weekday";
+  if (!normalized.length) return "weekday";
+  const ranges = [];
+  let start = normalized[0];
+  let previous = normalized[0];
+  for (let index = 1; index <= normalized.length; index += 1) {
+    const current = normalized[index];
+    if (current === previous + 1) {
+      previous = current;
+      continue;
+    }
+    ranges.push(start === previous ? String(start + 1) : `${start + 1}-${previous + 1}`);
+    start = current;
+    previous = current;
+  }
+  return ranges.join(";");
+}
+
+function formatScheduleWindows(days, ranges) {
+  const rangeText = ranges
+    .filter((range) => /^\d{2}:\d{2}$/.test(range.start || "") && /^\d{2}:\d{2}$/.test(range.end || ""))
+    .map((range) => `${range.start}-${range.end}`)
+    .join(",");
+  const dayExpr = formatDayExpression(days);
+  if (!rangeText) return `${dayExpr}:`;
+  return dayExpr.split(";").map((day) => `${day}:${rangeText}`).join(";");
+}
+
+function QuietHoursControls({ config, setConfig }) {
+  const update = (patch) => setConfig((current) => ({ ...current, ...patch }));
+  const startDay = String(config.quiet_start_day ?? "5");
+  const endDay = String(config.quiet_end_day ?? "0");
+  const policy = String(config.quiet_policy || "ignore");
+  return (
+    <div id="quiet" className="grid">
+      <Field config={config} setConfig={setConfig} spec={["quiet_hours_enabled", "启用免打扰", "checkbox"]} />
+      <label className="field">
+        <span>免打扰期间的新回复</span>
+        <select value={policy} onChange={(event) => update({ quiet_policy: event.target.value })}>
+          {Object.entries(QUIET_POLICY_OPTIONS).map(([value, label]) => (
+            <option key={value} value={value}>{label}</option>
+          ))}
+        </select>
+      </label>
+      <div className="field field-wide quiet-window-card">
+        <span>免打扰时段</span>
+        <div className="quiet-time-grid">
+          <label>
+            <span>开始星期</span>
+            <select value={startDay} onChange={(event) => update({ quiet_start_day: event.target.value })}>
+              {WEEKDAYS.map((name, index) => <option key={name} value={String(index)}>{name}</option>)}
+            </select>
+          </label>
+          <label>
+            <span>开始时间</span>
+            <input type="time" value={String(config.quiet_start_time || "00:00")} onChange={(event) => update({ quiet_start_time: event.target.value })} />
+          </label>
+          <label>
+            <span>结束星期</span>
+            <select value={endDay} onChange={(event) => update({ quiet_end_day: event.target.value })}>
+              {WEEKDAYS.map((name, index) => <option key={name} value={String(index)}>{name}</option>)}
+            </select>
+          </label>
+          <label>
+            <span>结束时间</span>
+            <input type="time" value={String(config.quiet_end_time || "00:00")} onChange={(event) => update({ quiet_end_time: event.target.value })} />
+          </label>
+        </div>
+        <p className="field-hint">
+          例如：周五 18:00 到周一 08:00。忽略表示免打扰期间新回复不推送；暂存表示免打扰结束后汇总推送。
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function CloseConfirmModal({ step, request, setRequest, onCancel, onContinue, onFinish }) {
+  if (!step || !request) return null;
+  if (step === "dirty") {
+    return (
+      <div className="modal-backdrop">
+        <div className="modal-card small">
+          <div className="editor-header">
+            <div>
+              <h3>有未保存配置</h3>
+              <p>当前修改还没有保存，继续关闭会放弃这些修改。</p>
+            </div>
+            <IconButton icon={X} label="取消关闭" onClick={onCancel} />
+          </div>
+          <div className="inline-actions">
+            <button className="btn" type="button" onClick={onCancel}>返回</button>
+            <button className="btn primary" type="button" onClick={() => onContinue({ dirty: false })}>放弃修改并继续</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  if (step === "running") {
+    return (
+      <div className="modal-backdrop">
+        <div className="modal-card small">
+          <div className="editor-header">
+            <div>
+              <h3>监听仍在运行</h3>
+              <p>退出前需要先停止监听进程，避免后台继续推送。</p>
+            </div>
+            <IconButton icon={X} label="取消关闭" onClick={onCancel} />
+          </div>
+          <div className="inline-actions">
+            <button className="btn" type="button" onClick={onCancel}>返回</button>
+            <button className="btn primary" type="button" onClick={() => onContinue({ running: false, stopOnExit: true })}>停止监听并继续</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  if (step === "background") {
+    return (
+      <div className="modal-backdrop">
+        <div className="modal-card small">
+          <div className="editor-header">
+            <div>
+              <h3>关闭窗口</h3>
+              <p>可以直接退出程序，也可以最小化到后台图标，之后从托盘图标恢复窗口。</p>
+            </div>
+            <IconButton icon={X} label="取消关闭" onClick={onCancel} />
+          </div>
+          <label className="remember-row">
+            <input type="checkbox" checked={Boolean(request.remember)} onChange={(event) => setRequest((current) => ({ ...current, remember: event.target.checked }))} />
+            <span>记住这次选择</span>
+          </label>
+          <div className="inline-actions">
+            <button className="btn" type="button" onClick={onCancel}>取消</button>
+            <button className="btn" type="button" onClick={() => onFinish("exit", Boolean(request.remember))}>退出程序</button>
+            <button className="btn primary" type="button" onClick={() => onFinish("minimize", Boolean(request.remember))}>最小化到后台图标</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  if (step === "final") {
+    return null;
+  }
+  return null;
 }
 
 function Section({ icon: Icon, title, description, children, defaultOpen = true }) {
@@ -330,9 +621,17 @@ function Section({ icon: Icon, title, description, children, defaultOpen = true 
 
 function ActionButton({ icon: Icon, children, onClick, kind = "secondary", disabled = false }) {
   return (
-    <button className={`btn ${kind}`} onClick={onClick} disabled={disabled}>
+    <button className={`btn ${kind}`} type="button" onClick={onClick} disabled={disabled}>
       <Icon size={16} />
       {children}
+    </button>
+  );
+}
+
+function IconButton({ icon: Icon, label, onClick, kind = "default", disabled = false }) {
+  return (
+    <button className={`icon-btn ${kind}`} type="button" onClick={onClick} disabled={disabled} title={label} aria-label={label}>
+      <Icon size={16} />
     </button>
   );
 }
@@ -342,226 +641,428 @@ function Notice({ message, kind = "info" }) {
   return <div className={`notice ${kind}`}>{message}</div>;
 }
 
-function ChannelPicker({ config, setConfig }) {
+function ChannelPicker({ config, setConfig, channel, onChannelChange }) {
+  const value = channel || (config.bot_channel === "wechat" ? "wechat" : "feishu");
+  const update = (nextChannel) => {
+    onChannelChange?.(nextChannel);
+    setConfig((current) => ({ ...current, bot_channel: nextChannel }));
+  };
   return (
-    <label className="field">
-      <span>当前配置通道</span>
-      <select
-        value={config.bot_channel || "feishu"}
-        onChange={(event) => setConfig((current) => ({ ...current, bot_channel: event.target.value }))}
-      >
-        <option value="feishu">飞书</option>
-        <option value="wechat">微信</option>
-      </select>
-    </label>
+    <div className="channel-switch-card field-wide">
+      <div>
+        <span className="eyebrow">当前配置通道</span>
+        <strong>{value === "wechat" ? "微信 Bot" : "飞书 Bot"}</strong>
+        <p>这里只切换正在编辑的机器人配置；监听规则里再选择具体推送到哪个群或微信。</p>
+      </div>
+      <div className="segmented" role="group" aria-label="当前配置通道">
+        <button className={value === "feishu" ? "active" : ""} type="button" onClick={() => update("feishu")}>
+          飞书
+        </button>
+        <button className={value === "wechat" ? "active" : ""} type="button" onClick={() => update("wechat")}>
+          微信
+        </button>
+      </div>
+    </div>
   );
 }
 
+function SetupOverview({ channel, authorCount, threadCount, ruleCount, profileCount }) {
+  const steps = [
+    { icon: MessageSquare, title: "通道", value: `${channel === "wechat" ? "微信" : "飞书"} ${profileCount || 0} 组` },
+    { icon: Database, title: "Cookie", value: "用于读取 NGA" },
+    { icon: Users, title: "目标", value: `${authorCount || 0} 用户 / ${threadCount || 0} 帖子` },
+    { icon: ListChecks, title: "规则", value: `${ruleCount || 0} 条监听` },
+  ];
+  return (
+    <div className="setup-strip">
+      {steps.map(({ icon: Icon, title, value }) => (
+        <div className="setup-step" key={title}>
+          <Icon size={18} />
+          <div>
+            <strong>{title}</strong>
+            <span>{value}</span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function confirmRemove(label = "这个条目") {
+  return window.confirm(`确定删除${label}吗？`);
+}
+
 function TargetListEditor({ config, setConfig, configKey, fallbackKey, title, idLabel }) {
+  const [draft, setDraft] = useState(null);
   const rows = parseTargetList(config[configKey], config[fallbackKey]);
-  const updateRows = (nextRows) => setConfig((current) => ({ ...current, [configKey]: formatTargetList(nextRows) }));
+  const updateRows = (nextRows) => setConfig((current) => {
+    const formatted = formatTargetList(nextRows);
+    const firstId = String(nextRows.find((row) => String(row.id || "").trim())?.id || "").trim();
+    return { ...current, [configKey]: formatted, ...(fallbackKey && firstId ? { [fallbackKey]: firstId } : {}) };
+  });
   const updateRow = (index, patch) => updateRows(rows.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)));
-  const addRow = () => updateRows([...rows, { id: "", label: "" }]);
-  const deleteRow = (index) => updateRows(rows.filter((_, rowIndex) => rowIndex !== index));
+  const openAdd = () => setDraft({ index: -1, id: "", label: "", error: "" });
+  const openEdit = (index) => setDraft({ index, id: rows[index]?.id || "", label: rows[index]?.label || "", error: "" });
+  const confirmDraft = () => {
+    if (!draft) return;
+    const id = String(draft.id || "").trim();
+    if (!id) {
+      setDraft((current) => ({ ...current, error: "请填写 ID。" }));
+      return;
+    }
+    if (rows.some((row, index) => row.id === id && index !== draft.index)) {
+      setDraft((current) => ({ ...current, error: "这个 ID 已经在列表里。" }));
+      return;
+    }
+    if (draft.index >= 0) updateRow(draft.index, { id, label: String(draft.label || "").trim() });
+    else updateRows([...rows, { id, label: String(draft.label || "").trim() }]);
+    setDraft(null);
+  };
+  const deleteRow = (index) => {
+    if (!confirmRemove(rows[index]?.label || rows[index]?.id || "这个条目")) return;
+    updateRows(rows.filter((_, rowIndex) => rowIndex !== index));
+  };
   return (
     <div className="editor-card field-wide">
       <div className="editor-header">
         <div>
           <h3>{title}</h3>
-          <p>ID 和备注分开填写，保存时会自动转成兼容旧版的配置格式。</p>
+          <p>ID 和备注分开填写，点击 + 后在弹窗里添加。</p>
         </div>
-        <button className="small-btn primary" type="button" onClick={addRow}>
-          +
-        </button>
+        <IconButton icon={Plus} label={`添加${title}`} kind="primary" onClick={openAdd} />
       </div>
       <div className="row-list">
         {rows.length ? (
           rows.map((row, index) => (
-            <div className="config-row" key={`${configKey}-${index}`}>
-              <label>
-                <span>{idLabel}</span>
-                <input value={row.id || ""} onChange={(event) => updateRow(index, { id: event.target.value })} />
-              </label>
-              <label>
-                <span>备注</span>
-                <input value={row.label || ""} onChange={(event) => updateRow(index, { label: event.target.value })} />
-              </label>
-              <button className="small-btn" type="button" onClick={() => deleteRow(index)}>
-                -
-              </button>
+            <div className="list-row" key={`${configKey}-${index}`}>
+              <div>
+                <strong>{row.label || row.id}</strong>
+                <span>{row.label ? row.id : idLabel}</span>
+              </div>
+              <IconButton icon={Edit3} label="编辑" kind="ghost" onClick={() => openEdit(index)} />
+              <IconButton icon={Trash2} label="删除" kind="danger" onClick={() => deleteRow(index)} />
             </div>
           ))
         ) : (
           <div className="empty-row">暂无条目，点击 + 添加。</div>
         )}
       </div>
+      {draft ? (
+        <div className="modal-backdrop">
+          <div className="modal-card">
+            <div className="editor-header">
+              <div>
+                <h3>{draft.index >= 0 ? "编辑条目" : `添加${title}`}</h3>
+                <p>保存后会自动写回兼容旧版的配置格式。</p>
+              </div>
+              <IconButton icon={X} label="关闭" onClick={() => setDraft(null)} />
+            </div>
+            <div className="grid compact-form">
+              <label className="field">
+                <span>{idLabel}</span>
+                <input value={draft.id || ""} onChange={(event) => setDraft((current) => ({ ...current, id: event.target.value }))} />
+              </label>
+              <label className="field">
+                <span>备注</span>
+                <input value={draft.label || ""} onChange={(event) => setDraft((current) => ({ ...current, label: event.target.value }))} />
+              </label>
+            </div>
+            {draft.error ? <div className="notice error compact">{draft.error}</div> : null}
+            <div className="inline-actions">
+              <button className="btn" type="button" onClick={() => setDraft(null)}>取消</button>
+              <button className="btn primary" type="button" onClick={confirmDraft}>确认</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
 
 function ProfileGroupEditor({ title, kind, rows, setRows, busy, onQueryChats }) {
   const [chatQueries, setChatQueries] = useState({});
-  const addRow = () => setRows([...rows, kind === "feishu"
-    ? { id: ensureId("feishu", {}), label: "", app_id: "", app_secret: "", id_type: "chat_id", chats: [] }
-    : { id: ensureId("wechat", {}), label: "", token: "", base_url: "https://ilinkai.weixin.qq.com", cdn_base_url: "https://novac2c.cdn.weixin.qq.com/c2c", target_user_id: "", allowed_user_ids: "", poll_timeout_ms: "35000", account_id: "default", route_tag: "" }]);
-  const updateRow = (index, patch) => setRows(rows.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)));
-  const deleteRow = (index) => setRows(rows.filter((_, rowIndex) => rowIndex !== index));
-  return (
-    <div className="editor-card field-wide">
-      <div className="editor-header">
-        <div>
-          <h3>{title}</h3>
-          <p>{kind === "feishu" ? "每组 App ID / Secret 独立缓存可见群组。" : "每组微信 Token 独立保存目标用户和账号标识。"}</p>
-        </div>
-        <button className="small-btn primary" type="button" onClick={addRow}>+</button>
-      </div>
-      <div className="row-list">
-        {rows.length ? rows.map((row, index) => (
-          <div className={kind === "feishu" ? "profile-row feishu" : "profile-row"} key={`${kind}-${row.id || index}`}>
-            <label><span>备注</span><input value={row.label || ""} onChange={(event) => updateRow(index, { label: event.target.value })} /></label>
-            {kind === "feishu" ? (
-              <>
-                <label><span>App ID</span><input value={row.app_id || ""} onChange={(event) => updateRow(index, { app_id: event.target.value })} /></label>
-                <label><span>App Secret</span><input type="password" value={row.app_secret || ""} onChange={(event) => updateRow(index, { app_secret: event.target.value })} /></label>
-                <label><span>搜索群名</span><input placeholder="新群没出现时输入群名" value={chatQueries[row.id] || ""} onChange={(event) => setChatQueries((current) => ({ ...current, [row.id]: event.target.value }))} /></label>
-                <button className="btn slim" type="button" disabled={busy} onClick={() => onQueryChats(row.id, chatQueries[row.id] || "")}>查询群组</button>
-                <span className="row-meta">{Array.isArray(row.chats) ? row.chats.length : 0} 个群</span>
-              </>
-            ) : (
-              <>
-                <label><span>Token</span><input type="password" value={row.token || ""} onChange={(event) => updateRow(index, { token: event.target.value })} /></label>
-                <label><span>目标用户 ID</span><input value={row.target_user_id || ""} onChange={(event) => updateRow(index, { target_user_id: event.target.value })} /></label>
-                <label><span>账号标识</span><input value={row.account_id || ""} onChange={(event) => updateRow(index, { account_id: event.target.value })} /></label>
-              </>
-            )}
-            <button className="small-btn" type="button" onClick={() => deleteRow(index)}>-</button>
-          </div>
-        )) : <div className="empty-row">暂无配置组，点击 + 添加。</div>}
-      </div>
-    </div>
-  );
-}
-
-function ListenRuleEditor({ rows, setRows, authorRows, threadRows, pushTargets, feishuProfiles, wechatProfiles, onEnsureRouteTarget }) {
   const [draft, setDraft] = useState(null);
-  const addRow = () => setRows([...rows, { id: ensureId("rule", {}), label: "", mode: "thread_author", author_id: authorRows[0]?.id || "", tid: threadRows[0]?.id || "", target_ids: pushTargets[0]?.id ? [pushTargets[0].id] : [] }]);
+  const emptyRow = () => kind === "feishu"
+    ? { id: ensureId("feishu", {}), label: "", app_id: "", app_secret: "", id_type: "chat_id", chats: [] }
+    : { id: ensureId("wechat", {}), label: "", token: "", base_url: "https://ilinkai.weixin.qq.com", cdn_base_url: "https://novac2c.cdn.weixin.qq.com/c2c", target_user_id: "", allowed_user_ids: "", poll_timeout_ms: "35000", account_id: "default", route_tag: "" };
+  const openAdd = () => setDraft({ index: -1, row: emptyRow() });
+  const openEdit = (index) => setDraft({ index, row: { ...rows[index] } });
   const updateRow = (index, patch) => setRows(rows.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)));
-  const deleteRow = (index) => setRows(rows.filter((_, rowIndex) => rowIndex !== index));
-  const selectedTargets = (row) => (Array.isArray(row.target_ids) ? row.target_ids : []).filter(Boolean);
-  const removeTarget = (rowIndex, targetIndex) => {
-    const row = rows[rowIndex];
-    updateRow(rowIndex, { target_ids: selectedTargets(row).filter((_, index) => index !== targetIndex) });
+  const updateDraft = (patch) => setDraft((current) => ({ ...current, row: { ...current.row, ...patch } }));
+  const deleteRow = (index) => {
+    if (!confirmRemove(profileLabel(rows[index] || {}, kind))) return;
+    setRows(rows.filter((_, rowIndex) => rowIndex !== index));
   };
-  const openTargetDraft = (rowIndex) => {
-    const channel = feishuProfiles.length || !wechatProfiles.length ? "feishu" : "wechat";
-    const profile = channel === "wechat" ? wechatProfiles[0] : feishuProfiles[0];
-    const chats = channel === "feishu" && profile && Array.isArray(profile.chats) ? profile.chats : [];
-    setDraft({ rowIndex, channel, profile_id: profile?.id || "", receive_id: chats[0]?.chat_id || "" });
-  };
-  const draftProfile = draft?.channel === "wechat"
-    ? wechatProfiles.find((profile) => profile.id === draft.profile_id) || wechatProfiles[0]
-    : feishuProfiles.find((profile) => profile.id === draft?.profile_id) || feishuProfiles[0];
-  const draftChats = draft?.channel === "feishu" && draftProfile && Array.isArray(draftProfile.chats) ? draftProfile.chats : [];
   const confirmDraft = () => {
     if (!draft) return;
-    const targetId = onEnsureRouteTarget(draft);
-    if (!targetId) return;
-    const row = rows[draft.rowIndex];
-    const nextIds = selectedTargets(row);
-    if (!nextIds.includes(targetId)) nextIds.push(targetId);
-    updateRow(draft.rowIndex, { target_ids: nextIds });
+    const row = { ...draft.row, id: ensureId(kind, draft.row) };
+    if (draft.index >= 0) updateRow(draft.index, row);
+    else setRows([...rows, row]);
     setDraft(null);
   };
   return (
     <div className="editor-card field-wide">
       <div className="editor-header">
         <div>
-          <h3>监听规则</h3>
-          <p>规则决定监听什么内容，并直接选择飞书群或微信账号。</p>
+          <h3>{title}</h3>
+          <p>{kind === "feishu" ? "每组 App ID / Secret 独立缓存可见群组；点击编辑维护凭证。" : "每组微信 Token 独立保存目标用户和账号标识；点击编辑维护配置。"}</p>
         </div>
-        <button className="small-btn primary" type="button" onClick={addRow}>+</button>
+        <IconButton icon={Plus} label={`添加${title}`} kind="primary" onClick={openAdd} />
       </div>
       <div className="row-list">
         {rows.length ? rows.map((row, index) => (
-          <div className="rule-row" key={row.id || index}>
-            <label><span>备注</span><input value={row.label || ""} onChange={(event) => updateRow(index, { label: event.target.value })} /></label>
-            <label><span>监听方式</span><select value={row.mode || "thread_author"} onChange={(event) => updateRow(index, { mode: event.target.value })}><option value="thread_author">固定帖子筛选用户</option><option value="author">用户主页监听</option></select></label>
-            <label><span>用户</span><select value={row.author_id || ""} onChange={(event) => updateRow(index, { author_id: event.target.value })}>{authorRows.map((item) => <option key={item.id} value={item.id}>{item.label ? `${item.label} (${item.id})` : item.id}</option>)}</select></label>
-            <label><span>帖子</span><select disabled={row.mode === "author"} value={row.tid || ""} onChange={(event) => updateRow(index, { tid: event.target.value })}>{threadRows.map((item) => <option key={item.id} value={item.id}>{item.label ? `${item.label} (${item.id})` : item.id}</option>)}</select></label>
-            <div className="inline-targets">
-              <div className="inline-target-header">
-                <span>发送目标</span>
-                <button className="small-btn primary" type="button" onClick={() => openTargetDraft(index)}>+</button>
-              </div>
-              {selectedTargets(row).length ? selectedTargets(row).map((targetId, targetIndex) => {
-                const target = pushTargets.find((item) => item.id === targetId);
-                return (
-                  <div className="inline-target-row" key={`${row.id}-${targetId}-${targetIndex}`}>
-                    <span>{target ? targetLabel(target) : targetId}</span>
-                    <button className="small-btn" type="button" onClick={() => removeTarget(index, targetIndex)}>-</button>
-                  </div>
-                );
-              }) : <span className="empty-inline">点击 + 添加飞书群或微信账号。</span>}
+          <div className={`list-row profile-list-row ${kind === "feishu" ? "with-query" : "compact-actions"}`} key={`${kind}-${row.id || index}`}>
+            <div>
+              <strong>{profileLabel(row, kind)}</strong>
+              <span>{kind === "feishu" ? `${row.app_id || "未填写 App ID"} · ${Array.isArray(row.chats) ? row.chats.length : 0} 个群` : `${row.target_user_id || "未绑定目标用户"} · ${row.account_id || "default"}`}</span>
             </div>
-            <button className="small-btn" type="button" onClick={() => deleteRow(index)}>-</button>
+            {kind === "feishu" ? (
+              <>
+                <label><span>搜索群名</span><input placeholder="新群没出现时输入群名" value={chatQueries[row.id] || ""} onChange={(event) => setChatQueries((current) => ({ ...current, [row.id]: event.target.value }))} /></label>
+                <button className="btn slim" type="button" disabled={busy} onClick={() => onQueryChats(row.id, chatQueries[row.id] || "")}>
+                  <Search size={15} />
+                  查询
+                </button>
+              </>
+            ) : null}
+            <IconButton icon={Edit3} label="编辑" kind="ghost" onClick={() => openEdit(index)} />
+            <IconButton icon={Trash2} label="删除" kind="danger" onClick={() => deleteRow(index)} />
           </div>
-        )) : <div className="empty-row">暂无监听规则。点击 + 添加监听内容和发送目标。</div>}
+        )) : <div className="empty-row">暂无配置组，点击 + 添加。</div>}
       </div>
       {draft ? (
         <div className="modal-backdrop">
           <div className="modal-card">
             <div className="editor-header">
               <div>
-                <h3>新增规则发送目标</h3>
+                <h3>{draft.index >= 0 ? "编辑配置组" : "新增配置组"}</h3>
+                <p>{kind === "feishu" ? "飞书凭证用于查询群组、收命令和发送消息。" : "微信配置用于扫码/Token 登录和主动推送。"}</p>
+              </div>
+              <IconButton icon={X} label="关闭" onClick={() => setDraft(null)} />
+            </div>
+            <div className="grid compact-form">
+              <label className="field"><span>备注</span><input value={draft.row.label || ""} onChange={(event) => updateDraft({ label: event.target.value })} /></label>
+              {kind === "feishu" ? (
+                <>
+                  <label className="field"><span>App ID</span><input value={draft.row.app_id || ""} onChange={(event) => updateDraft({ app_id: event.target.value })} /></label>
+                  <label className="field"><span>App Secret</span><input type="password" value={draft.row.app_secret || ""} onChange={(event) => updateDraft({ app_secret: event.target.value })} /></label>
+                  <label className="field"><span>ID 类型</span><select value={draft.row.id_type || "chat_id"} onChange={(event) => updateDraft({ id_type: event.target.value })}><option value="chat_id">chat_id</option><option value="open_id">open_id</option><option value="user_id">user_id</option><option value="union_id">union_id</option></select></label>
+                </>
+              ) : (
+                <>
+                  <label className="field"><span>Token</span><input type="password" value={draft.row.token || ""} onChange={(event) => updateDraft({ token: event.target.value })} /></label>
+                  <label className="field"><span>目标用户 ID</span><input value={draft.row.target_user_id || ""} onChange={(event) => updateDraft({ target_user_id: event.target.value })} /></label>
+                  <label className="field"><span>账号标识</span><input value={draft.row.account_id || ""} onChange={(event) => updateDraft({ account_id: event.target.value })} /></label>
+                  <label className="field"><span>Base URL</span><input value={draft.row.base_url || ""} onChange={(event) => updateDraft({ base_url: event.target.value })} /></label>
+                  <label className="field"><span>CDN Base URL</span><input value={draft.row.cdn_base_url || ""} onChange={(event) => updateDraft({ cdn_base_url: event.target.value })} /></label>
+                  <label className="field"><span>允许用户 ID</span><input value={draft.row.allowed_user_ids || ""} onChange={(event) => updateDraft({ allowed_user_ids: event.target.value })} /></label>
+                </>
+              )}
+            </div>
+            <div className="inline-actions">
+              <button className="btn" type="button" onClick={() => setDraft(null)}>取消</button>
+              <button className="btn primary" type="button" onClick={confirmDraft}>确认</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ListenRuleEditor({ rows, setRows, authorRows, threadRows, pushTargets, feishuProfiles, wechatProfiles, onEnsureRouteTarget }) {
+  const [ruleDraft, setRuleDraft] = useState(null);
+  const [targetDraft, setTargetDraft] = useState(null);
+  const emptyRule = () => ({
+    id: ensureId("rule", {}),
+    label: "",
+    mode: "thread_author",
+    author_id: authorRows[0]?.id || "",
+    tid: threadRows[0]?.id || "",
+    target_ids: pushTargets[0]?.id ? [pushTargets[0].id] : [],
+  });
+  const openAdd = () => setRuleDraft({ index: -1, row: emptyRule(), error: "" });
+  const openEdit = (index) => setRuleDraft({ index, row: { ...rows[index], target_ids: selectedTargets(rows[index]) }, error: "" });
+  const updateRow = (index, patch) => setRows(rows.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)));
+  const updateRuleDraft = (patch) => setRuleDraft((current) => ({ ...current, row: { ...current.row, ...patch }, error: "" }));
+  const deleteRow = (index) => {
+    if (!confirmRemove(rows[index]?.label || ruleSource(rows[index] || {}) || "这个监听规则")) return;
+    setRows(rows.filter((_, rowIndex) => rowIndex !== index));
+  };
+  const selectedTargets = (row) => (Array.isArray(row.target_ids) ? row.target_ids : []).filter(Boolean);
+  const targetName = (targetId) => {
+    const target = pushTargets.find((item) => item.id === targetId);
+    return target ? targetLabel(target) : targetId;
+  };
+  const ruleSource = (row) => row.mode === "author"
+    ? `用户主页 ${row.author_id || "-"}`
+    : `帖子 ${row.tid || "-"} / 用户 ${row.author_id || "-"}`;
+  const openTargetDraft = () => {
+    const channel = feishuProfiles.length || !wechatProfiles.length ? "feishu" : "wechat";
+    const profile = channel === "wechat" ? wechatProfiles[0] : feishuProfiles[0];
+    const chats = channel === "feishu" && profile && Array.isArray(profile.chats) ? profile.chats : [];
+    setTargetDraft({ channel, profile_id: profile?.id || "", receive_id: chats[0]?.chat_id || "" });
+  };
+  const targetDraftProfile = targetDraft?.channel === "wechat"
+    ? wechatProfiles.find((profile) => profile.id === targetDraft.profile_id) || wechatProfiles[0]
+    : feishuProfiles.find((profile) => profile.id === targetDraft?.profile_id) || feishuProfiles[0];
+  const targetDraftChats = targetDraft?.channel === "feishu" && targetDraftProfile && Array.isArray(targetDraftProfile.chats) ? targetDraftProfile.chats : [];
+  const confirmTargetDraft = () => {
+    if (!targetDraft || !ruleDraft) return;
+    const targetId = onEnsureRouteTarget(targetDraft);
+    if (!targetId) return;
+    const nextIds = selectedTargets(ruleDraft.row);
+    if (!nextIds.includes(targetId)) nextIds.push(targetId);
+    updateRuleDraft({ target_ids: nextIds });
+    setTargetDraft(null);
+  };
+  const removeDraftTarget = (targetIndex) => {
+    if (!ruleDraft) return;
+    if (!confirmRemove(targetName(selectedTargets(ruleDraft.row)[targetIndex]) || "这个发送目标")) return;
+    updateRuleDraft({ target_ids: selectedTargets(ruleDraft.row).filter((_, index) => index !== targetIndex) });
+  };
+  const confirmRuleDraft = () => {
+    if (!ruleDraft) return;
+    const row = { ...ruleDraft.row };
+    row.author_id = String(row.author_id || "").trim();
+    row.tid = row.mode === "author" ? "" : String(row.tid || "").trim();
+    row.target_ids = selectedTargets(row);
+    if (!row.author_id || (row.mode !== "author" && !row.tid)) {
+      setRuleDraft((current) => ({ ...current, error: "请填写用户和帖子。" }));
+      return;
+    }
+    if (!row.target_ids.length) {
+      setRuleDraft((current) => ({ ...current, error: "请至少添加一个发送目标。" }));
+      return;
+    }
+    row.id = row.id || (row.mode === "author" ? `author:${row.author_id}` : `thread_author:${row.tid}:${row.author_id}`);
+    if (ruleDraft.index >= 0) updateRow(ruleDraft.index, row);
+    else setRows([...rows, row]);
+    setRuleDraft(null);
+  };
+  return (
+    <div className="editor-card field-wide">
+      <div className="editor-header">
+        <div>
+          <h3>监听规则</h3>
+          <p>列表只展示摘要；点击 + 或编辑后在弹窗里选择监听方式和发送目标。</p>
+        </div>
+        <IconButton icon={Plus} label="新增监听规则" kind="primary" onClick={openAdd} />
+      </div>
+      <div className="row-list">
+        {rows.length ? rows.map((row, index) => (
+          <div className="list-row rule-list-row" key={row.id || index}>
+            <div>
+              <strong>{row.label || ruleSource(row)}</strong>
+              <span>{row.mode === "author" ? "用户主页监听" : "固定帖子筛选用户"} · {ruleSource(row)} · {selectedTargets(row).length} 个发送目标</span>
+            </div>
+            <IconButton icon={Edit3} label="编辑" kind="ghost" onClick={() => openEdit(index)} />
+            <IconButton icon={Trash2} label="删除" kind="danger" onClick={() => deleteRow(index)} />
+          </div>
+        )) : <div className="empty-row">暂无监听规则。点击 + 添加监听内容和发送目标。</div>}
+      </div>
+      {ruleDraft ? (
+        <div className="modal-backdrop">
+          <div className="modal-card">
+            <div className="editor-header">
+              <div>
+                <h3>{ruleDraft.index >= 0 ? "编辑监听规则" : "新增监听规则"}</h3>
+                <p>监听固定帖子筛选用户时，启动首轮会先用用户回复补抓，再进入帖子尾部扫描。</p>
+              </div>
+              <IconButton icon={X} label="关闭" onClick={() => setRuleDraft(null)} />
+            </div>
+            <div className="grid compact-form">
+              <label className="field">
+                <span>监听方式</span>
+                <select value={ruleDraft.row.mode || "thread_author"} onChange={(event) => updateRuleDraft({ mode: event.target.value })}>
+                  <option value="thread_author">固定帖子筛选用户</option>
+                  <option value="author">用户主页监听</option>
+                </select>
+              </label>
+              <label className="field"><span>备注</span><input value={ruleDraft.row.label || ""} onChange={(event) => updateRuleDraft({ label: event.target.value })} /></label>
+              <label className="field"><span>用户</span><select value={ruleDraft.row.author_id || ""} onChange={(event) => updateRuleDraft({ author_id: event.target.value })}>{authorRows.map((item) => <option key={item.id} value={item.id}>{item.label ? `${item.label} (${item.id})` : item.id}</option>)}</select></label>
+              <label className="field"><span>帖子</span><select disabled={ruleDraft.row.mode === "author"} value={ruleDraft.row.tid || ""} onChange={(event) => updateRuleDraft({ tid: event.target.value })}>{threadRows.map((item) => <option key={item.id} value={item.id}>{item.label ? `${item.label} (${item.id})` : item.id}</option>)}</select></label>
+            </div>
+            <div className="modal-subsection">
+              <div className="editor-header compact">
+                <div>
+                  <h3>发送目标</h3>
+                  <p>可以添加多个飞书群或微信账号。</p>
+                </div>
+                <IconButton icon={Plus} label="添加发送目标" kind="primary" onClick={openTargetDraft} />
+              </div>
+              <div className="schedule-target-list">
+                {selectedTargets(ruleDraft.row).length ? selectedTargets(ruleDraft.row).map((targetId, index) => (
+                  <div className="schedule-target-row" key={`${targetId}-${index}`}>
+                    <span>{targetName(targetId)}</span>
+                    <IconButton icon={Trash2} label="删除发送目标" kind="danger" onClick={() => removeDraftTarget(index)} />
+                  </div>
+                )) : <span className="empty-inline">暂无发送目标，点击 + 添加。</span>}
+              </div>
+            </div>
+            {ruleDraft.error ? <div className="notice error compact">{ruleDraft.error}</div> : null}
+            <div className="inline-actions">
+              <button className="btn" type="button" onClick={() => setRuleDraft(null)}>取消</button>
+              <button className="btn primary" type="button" onClick={confirmRuleDraft}>确认</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {targetDraft ? (
+        <div className="modal-backdrop nested">
+          <div className="modal-card small">
+            <div className="editor-header">
+              <div>
+                <h3>新增发送目标</h3>
                 <p>飞书选择配置组和群；微信只选择配置组。</p>
               </div>
-              <button className="small-btn" type="button" onClick={() => setDraft(null)}>×</button>
+              <IconButton icon={X} label="关闭" onClick={() => setTargetDraft(null)} />
             </div>
             <div className="grid compact-form">
               <label className="field">
                 <span>通道</span>
-                <select value={draft.channel} onChange={(event) => {
+                <select value={targetDraft.channel} onChange={(event) => {
                   const channel = event.target.value;
                   const profile = channel === "wechat" ? wechatProfiles[0] : feishuProfiles[0];
                   const chats = channel === "feishu" && profile && Array.isArray(profile.chats) ? profile.chats : [];
-                  setDraft((current) => ({ ...current, channel, profile_id: profile?.id || "", receive_id: chats[0]?.chat_id || "" }));
+                  setTargetDraft((current) => ({ ...current, channel, profile_id: profile?.id || "", receive_id: chats[0]?.chat_id || "" }));
                 }}>
                   <option value="feishu">飞书</option>
                   <option value="wechat">微信</option>
                 </select>
               </label>
-              {draft.channel === "feishu" ? (
+              {targetDraft.channel === "feishu" ? (
                 <>
                   <label className="field">
                     <span>飞书配置</span>
-                    <select value={draft.profile_id} onChange={(event) => {
+                    <select value={targetDraft.profile_id} onChange={(event) => {
                       const profile = feishuProfiles.find((item) => item.id === event.target.value);
                       const chats = profile && Array.isArray(profile.chats) ? profile.chats : [];
-                      setDraft((current) => ({ ...current, profile_id: event.target.value, receive_id: chats[0]?.chat_id || "" }));
+                      setTargetDraft((current) => ({ ...current, profile_id: event.target.value, receive_id: chats[0]?.chat_id || "" }));
                     }}>
                       {feishuProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profileLabel(profile, "feishu")}</option>)}
                     </select>
                   </label>
                   <label className="field">
                     <span>飞书群 / chat_id</span>
-                    <input list="rule-feishu-chats" value={draft.receive_id || ""} onChange={(event) => setDraft((current) => ({ ...current, receive_id: event.target.value }))} placeholder="选择或粘贴 chat_id" />
+                    <input list="rule-feishu-chats" value={targetDraft.receive_id || ""} onChange={(event) => setTargetDraft((current) => ({ ...current, receive_id: event.target.value }))} placeholder="选择或粘贴 chat_id" />
                     <datalist id="rule-feishu-chats">
-                      {draftChats.map((chat) => <option key={chat.chat_id} value={chat.chat_id}>{chatLabel(chat)}</option>)}
+                      {targetDraftChats.map((chat) => <option key={chat.chat_id} value={chat.chat_id}>{chatLabel(chat)}</option>)}
                     </datalist>
                   </label>
                 </>
               ) : (
                 <label className="field">
                   <span>微信配置</span>
-                  <select value={draft.profile_id} onChange={(event) => setDraft((current) => ({ ...current, profile_id: event.target.value }))}>
+                  <select value={targetDraft.profile_id} onChange={(event) => setTargetDraft((current) => ({ ...current, profile_id: event.target.value }))}>
                     {wechatProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profileLabel(profile, "wechat")}</option>)}
                   </select>
                 </label>
               )}
             </div>
             <div className="inline-actions">
-              <button className="btn" type="button" onClick={() => setDraft(null)}>取消</button>
-              <button className="btn primary" type="button" onClick={confirmDraft}>确认</button>
+              <button className="btn" type="button" onClick={() => setTargetDraft(null)}>取消</button>
+              <button className="btn primary" type="button" onClick={confirmTargetDraft}>确认</button>
             </div>
           </div>
         </div>
@@ -587,7 +1088,10 @@ function ThreadAuthorEditor({ config, setConfig }) {
         idType: "chat_id",
       },
     ]);
-  const deleteRow = (index) => updateRows(rows.filter((_, rowIndex) => rowIndex !== index));
+  const deleteRow = (index) => {
+    if (!confirmRemove(rows[index]?.label || `${rows[index]?.tid || ""}:${rows[index]?.authorId || ""}` || "这个条目")) return;
+    updateRows(rows.filter((_, rowIndex) => rowIndex !== index));
+  };
   return (
     <div className="editor-card field-wide">
       <div className="editor-header">
@@ -595,9 +1099,7 @@ function ThreadAuthorEditor({ config, setConfig }) {
           <h3>帖内作者监听</h3>
           <p>拉取固定帖子新回复后按作者过滤；可为每个组合指定飞书群或独立机器人。</p>
         </div>
-        <button className="small-btn primary" type="button" onClick={addRow}>
-          +
-        </button>
+        <IconButton icon={Plus} label="添加帖内作者监听" kind="primary" onClick={addRow} />
       </div>
       <div className="row-list">
         {rows.length ? (
@@ -637,9 +1139,7 @@ function ThreadAuthorEditor({ config, setConfig }) {
                   ))}
                 </select>
               </label>
-              <button className="small-btn" type="button" onClick={() => deleteRow(index)}>
-                -
-              </button>
+              <IconButton icon={Trash2} label="删除" kind="danger" onClick={() => deleteRow(index)} />
             </div>
           ))
         ) : (
@@ -704,6 +1204,8 @@ function AiScheduleTargets({ config, setConfig, pushTargets, feishuProfiles, wec
     setConfig((current) => ({ ...current, ai_schedule_target_ids: targetIds.length ? targetIds.join(",") : "__none__" }));
   };
   const removeAt = (index) => {
+    const target = pushTargets.find((item) => item.id === selectedIds[index]);
+    if (!confirmRemove(target ? targetLabel(target) : selectedIds[index] || "这个发送目标")) return;
     saveSelected(selectedIds.filter((_, itemIndex) => itemIndex !== index));
   };
   const openAdd = () => {
@@ -729,8 +1231,8 @@ function AiScheduleTargets({ config, setConfig, pushTargets, feishuProfiles, wec
           <p>定时分析只跑一次，结果发送到下面这些目标。</p>
         </div>
         <div className="button-row compact">
-          <button className="small-btn primary" type="button" onClick={openAdd}>+</button>
-          <button className="small-btn" type="button" onClick={() => saveSelected(selectedIds.slice(0, -1))}>-</button>
+          <IconButton icon={Plus} label="添加定时发送目标" kind="primary" onClick={openAdd} />
+          <IconButton icon={Trash2} label="删除最后一个发送目标" kind="danger" onClick={() => selectedIds.length && removeAt(selectedIds.length - 1)} />
         </div>
       </div>
       <div className="schedule-target-list">
@@ -739,7 +1241,7 @@ function AiScheduleTargets({ config, setConfig, pushTargets, feishuProfiles, wec
           return (
             <div className="schedule-target-row" key={`${targetId}-${index}`}>
               <span>{target ? targetLabel(target) : targetId}</span>
-              <button className="small-btn" type="button" onClick={() => removeAt(index)}>-</button>
+              <IconButton icon={Trash2} label="删除发送目标" kind="danger" onClick={() => removeAt(index)} />
             </div>
           );
         }) : <span className="empty-inline">暂无定时发送目标，点击 + 添加。</span>}
@@ -752,7 +1254,7 @@ function AiScheduleTargets({ config, setConfig, pushTargets, feishuProfiles, wec
                 <h3>新增定时发送目标</h3>
                 <p>飞书选择配置组和群；微信只选择配置组。</p>
               </div>
-              <button className="small-btn" type="button" onClick={() => setDraft(null)}>×</button>
+              <IconButton icon={X} label="关闭" onClick={() => setDraft(null)} />
             </div>
             <div className="grid compact-form">
               <label className="field">
@@ -818,14 +1320,21 @@ function App() {
   const [messageKind, setMessageKind] = useState("info");
   const [busy, setBusy] = useState(false);
   const [advancedJson, setAdvancedJson] = useState("");
+  const [selectedChannel, setSelectedChannel] = useState("feishu");
+  const [savedSnapshot, setSavedSnapshot] = useState("");
+  const [closeRequest, setCloseRequest] = useState(null);
+  const logOffsetRef = useRef(0);
+  const bootstrappedRef = useRef(false);
 
-  const channel = config.bot_channel || "feishu";
+  const channel = selectedChannel === "wechat" ? "wechat" : "feishu";
   const feishuProfiles = useMemo(() => parseProfiles(config, "feishu_bot_profiles"), [config]);
   const wechatProfiles = useMemo(() => parseProfiles(config, "wechat_bot_profiles"), [config]);
   const pushTargets = useMemo(() => parsePushTargets(config, feishuProfiles, wechatProfiles), [config, feishuProfiles, wechatProfiles]);
   const listenRules = useMemo(() => parseListenRules(config), [config]);
   const authorRows = useMemo(() => parseTargetList(config.watch_author_ids, config.default_author_id), [config.watch_author_ids, config.default_author_id]);
   const threadRows = useMemo(() => parseTargetList(config.preset_thread_ids, config.default_tid), [config.preset_thread_ids, config.default_tid]);
+  const configSnapshot = useMemo(() => JSON.stringify(config), [config]);
+  const isDirty = Boolean(savedSnapshot && configSnapshot !== savedSnapshot);
   const setStructured = (patch) => {
     setConfig((current) => {
       const currentFeishu = parseProfiles(current, "feishu_bot_profiles");
@@ -927,44 +1436,105 @@ function App() {
   const runningText = status.running ? `运行中 PID ${status.pids?.join(", ")}` : "未启动";
 
   const refresh = async () => {
-    if (!api()) return;
-    const boot = await api().bootstrap();
-    const merged = normalizeConfig(boot.config, boot.defaults);
-    setConfig(merged);
-    setDefaults(boot.defaults);
-    setOptions(boot.options || {});
-    setStatus(boot.status);
-    setLogs(boot.logs?.text || "");
-    setLogOffset(boot.logs?.offset || 0);
-    setAdvancedJson(JSON.stringify(merged, null, 2));
+    if (!hasApiMethod("bootstrap") || isClosing()) return;
+    try {
+      const boot = await api().bootstrap();
+      if (isClosing()) return;
+      const merged = normalizeConfig(boot.config, boot.defaults);
+      setConfig(merged);
+      setSelectedChannel(merged.bot_channel === "wechat" ? "wechat" : "feishu");
+      setDefaults(boot.defaults);
+      setOptions(boot.options || {});
+      setStatus(boot.status);
+      setLogs(boot.logs?.text || "");
+      const nextOffset = boot.logs?.offset || 0;
+      logOffsetRef.current = nextOffset;
+      setLogOffset(nextOffset);
+      setAdvancedJson(JSON.stringify(merged, null, 2));
+      setSavedSnapshot(JSON.stringify(merged));
+      bootstrappedRef.current = true;
+    } catch (error) {
+      if (!isClosing()) {
+        setMessage(String(error?.message || error));
+        setMessageKind("error");
+      }
+    }
   };
 
   useEffect(() => {
-    refresh();
-    window.addEventListener("pywebviewready", refresh);
-    const timer = window.setInterval(async () => {
-      if (!api()) return;
-      if (!Object.keys(defaults).length) {
+    let stopped = false;
+    let polling = false;
+    let bootstrapPolling = false;
+    const markClosing = () => {
+      stopped = true;
+      closingFlag = true;
+    };
+    const waitForBootstrap = async () => {
+      if (stopped || isClosing() || bootstrapPolling || bootstrappedRef.current) return;
+      if (!hasApiMethod("bootstrap")) return;
+      bootstrapPolling = true;
+      try {
         await refresh();
+      } finally {
+        bootstrapPolling = false;
+      }
+    };
+    waitForBootstrap();
+    window.addEventListener("pywebviewready", refresh);
+    window.addEventListener("beforeunload", markClosing);
+    window.addEventListener("pagehide", markClosing);
+    const timer = window.setInterval(async () => {
+      if (stopped || isClosing() || polling) return;
+      if (!bootstrappedRef.current) {
+        await waitForBootstrap();
         return;
       }
-      const stat = await api().status();
-      if (stat?.status) setStatus(stat.status);
-      const next = await api().read_logs(logOffset);
-      if (next?.text) {
-        setLogs((current) => `${current}${next.text}`.slice(-60000));
-        setLogOffset(next.offset || 0);
-      } else if (next?.offset !== undefined) {
-        setLogOffset(next.offset);
+      if (!hasApiMethod("status") || !hasApiMethod("read_logs")) return;
+      polling = true;
+      try {
+        const stat = await api().status();
+        if (stopped || isClosing()) return;
+        if (stat?.status) setStatus(stat.status);
+        const next = await api().read_logs(logOffsetRef.current);
+        if (stopped || isClosing()) return;
+        if (next?.text) {
+          setLogs((current) => `${current}${next.text}`.slice(-60000));
+          const nextOffset = next.offset || 0;
+          logOffsetRef.current = nextOffset;
+          setLogOffset(nextOffset);
+        } else if (next?.offset !== undefined) {
+          logOffsetRef.current = next.offset;
+          setLogOffset(next.offset);
+        }
+      } catch (error) {
+        if (!stopped && !isClosing()) {
+          setMessage(String(error?.message || error));
+          setMessageKind("error");
+        }
+      } finally {
+        polling = false;
       }
-    }, 1200);
+    }, 3000);
     return () => {
+      stopped = true;
       window.removeEventListener("pywebviewready", refresh);
+      window.removeEventListener("beforeunload", markClosing);
+      window.removeEventListener("pagehide", markClosing);
       window.clearInterval(timer);
     };
-  }, [logOffset, defaults]);
+  }, []);
+
+  const openCloseDialog = () => {
+    setCloseRequest({
+      dirty: isDirty,
+      running: Boolean(status.running),
+      behavior: String(config.web_close_behavior || "ask"),
+      remember: false,
+    });
+  };
 
   const run = async (label, fn) => {
+    if (isClosing()) return;
     if (!api()) {
       setMessage("pywebview API 未就绪");
       setMessageKind("error");
@@ -975,15 +1545,19 @@ function App() {
     setMessageKind("info");
     try {
       const result = await fn();
+      if (isClosing()) return;
       if (!result?.ok) {
         setMessage((result?.errors || [result?.error || `${label}失败`]).join("\n"));
         setMessageKind("error");
       } else {
-        setMessage(`${label}完成`);
-        setMessageKind("success");
+        setMessage(result.warning ? `${label}完成\n${result.warning}` : `${label}完成`);
+        setMessageKind(result.warning ? "info" : "success");
         if (result.config) {
-          setConfig(normalizeConfig(result.config, defaults));
-          setAdvancedJson(JSON.stringify(normalizeConfig(result.config, defaults), null, 2));
+          const normalized = normalizeConfig(result.config, defaults);
+          setConfig(normalized);
+          setSelectedChannel(normalized.bot_channel === "wechat" ? "wechat" : "feishu");
+          setAdvancedJson(JSON.stringify(normalized, null, 2));
+          if (label === "保存配置" || label === "启动监听") setSavedSnapshot(JSON.stringify(normalized));
         }
         if (result.status) setStatus(result.status);
       }
@@ -998,7 +1572,9 @@ function App() {
   const applyJson = () => {
     try {
       const parsed = JSON.parse(advancedJson);
-      setConfig(normalizeConfig(parsed, defaults));
+      const normalized = normalizeConfig(parsed, defaults);
+      setConfig(normalized);
+      setSelectedChannel(normalized.bot_channel === "wechat" ? "wechat" : "feishu");
       setMessage("已应用高级 JSON，保存后生效");
       setMessageKind("success");
     } catch (error) {
@@ -1016,14 +1592,41 @@ function App() {
     []
   );
   const queryChats = (profileId, searchQuery = "") => run("查询飞书群组", () => api().query_feishu_chats(config, profileId, searchQuery));
+  const resolveCloseStep = () => {
+    if (!closeRequest) return null;
+    if (closeRequest.dirty) return "dirty";
+    if (closeRequest.running) return "running";
+    if (closeRequest.behavior === "minimize" || closeRequest.behavior === "exit") return "final";
+    return "background";
+  };
+  const continueClose = (patch = {}) => setCloseRequest((current) => (current ? { ...current, ...patch } : current));
+  const finishClose = async (action, remember = false) => {
+    const request = closeRequest || {};
+    setCloseRequest(null);
+    if (remember) {
+      setConfig((current) => ({ ...current, web_close_behavior: action }));
+    }
+    if (api()?.close_confirmed) {
+      await api().close_confirmed({ action, stop: Boolean(request.running || request.stopOnExit), remember_behavior: remember });
+    }
+  };
+  useEffect(() => {
+    if (!closeRequest) return;
+    if (closeRequest.dirty || closeRequest.running) return;
+    if (closeRequest.behavior === "minimize" || closeRequest.behavior === "exit") {
+      finishClose(closeRequest.behavior, false);
+    }
+  }, [closeRequest]);
   return (
     <main>
       <aside>
         <div className="brand">
-          <div className="logo">N</div>
+          <div className="logo">
+            <img src="./app_icon.png" alt="" />
+          </div>
           <div>
             <strong>NGA Wolf Watcher</strong>
-            <span>Preview UI</span>
+            <span>Web UI</span>
           </div>
         </div>
         <div className={`status ${status.running ? "online" : ""}`}>
@@ -1034,6 +1637,7 @@ function App() {
           <a href="#quick">快速开始</a>
           <a href="#channel">消息通道</a>
           <a href="#ai">AI 分析</a>
+          <a href="#quiet">免打扰</a>
           <a href="#runtime">运行参数</a>
           <a href="#advanced">高级配置</a>
           <a href="#logs">日志</a>
@@ -1041,10 +1645,13 @@ function App() {
       </aside>
 
       <section className="content">
+        <button id="nga-close-request-trigger" className="visually-hidden" type="button" onClick={openCloseDialog}>
+          request close
+        </button>
         <header>
           <div>
             <h1>监听配置</h1>
-            <p>旧版 GUI 仍可使用；这里是更简洁的 pywebview 预览版。</p>
+            <p>配置消息通道、NGA Cookie、监听规则和 AI 分析。</p>
           </div>
           <div className="actions">
             <ActionButton icon={Save} kind="primary" disabled={busy} onClick={() => run("保存配置", () => api().save_config(config))}>
@@ -1060,20 +1667,23 @@ function App() {
         </header>
 
         <Notice message={message} kind={messageKind} />
+        <SetupOverview
+          channel={channel}
+          authorCount={authorRows.length}
+          threadCount={threadRows.length}
+          ruleCount={listenRules.length}
+          profileCount={channel === "wechat" ? wechatProfiles.length : feishuProfiles.length}
+        />
 
         <Section icon={ShieldCheck} title="快速开始" description="首次使用按顺序完成：通道配置、NGA Cookie、用户/帖子、监听规则。" defaultOpen>
           <div id="quick" className="grid">
-            <ChannelPicker config={config} setConfig={setConfig} />
+            <ChannelPicker config={config} setConfig={setConfig} channel={channel} onChannelChange={setSelectedChannel} />
             {channel === "wechat" ? (
               <ProfileGroupEditor title="微信机器人配置组" kind="wechat" rows={wechatProfiles} setRows={(rows) => setStructured({ wechatProfiles: rows })} busy={busy} onQueryChats={queryChats} />
             ) : (
               <ProfileGroupEditor title="飞书机器人配置组" kind="feishu" rows={feishuProfiles} setRows={(rows) => setStructured({ feishuProfiles: rows })} busy={busy} onQueryChats={queryChats} />
             )}
-            <Field config={config} setConfig={setConfig} spec={["default_author_id", "默认用户 ID", "text"]} />
-            <Field config={config} setConfig={setConfig} spec={["default_tid", "默认帖子 ID", "text"]} />
             <Field config={config} setConfig={setConfig} spec={["nga_cookie", "NGA Cookie", "textarea"]} />
-            <Field config={config} setConfig={setConfig} spec={["thread_watch_tail_count", "帖内扫描条数", "number"]} />
-            <Field config={config} setConfig={setConfig} spec={["thread_watch_interval", "帖内扫描间隔秒", "number"]} />
             <TargetListEditor config={config} setConfig={setConfig} configKey="watch_author_ids" fallbackKey="default_author_id" title="用户 ID 列表" idLabel="用户 UID" />
             <TargetListEditor config={config} setConfig={setConfig} configKey="preset_thread_ids" fallbackKey="default_tid" title="帖子预设" idLabel="帖子 ID" />
             <ListenRuleEditor rows={listenRules} setRows={(rows) => setStructured({ listenRules: rows })} authorRows={authorRows} threadRows={threadRows} pushTargets={pushTargets} feishuProfiles={feishuProfiles} wechatProfiles={wechatProfiles} onEnsureRouteTarget={ensureRouteTarget} />
@@ -1092,7 +1702,7 @@ function App() {
           defaultOpen={false}
         >
           <div id="channel" className="grid">
-            <ChannelPicker config={config} setConfig={setConfig} />
+            <ChannelPicker config={config} setConfig={setConfig} channel={channel} onChannelChange={setSelectedChannel} />
             {channel === "wechat" ? (
               <ProfileGroupEditor title="微信机器人配置组" kind="wechat" rows={wechatProfiles} setRows={(rows) => setStructured({ wechatProfiles: rows })} busy={busy} onQueryChats={queryChats} />
             ) : (
@@ -1119,9 +1729,21 @@ function App() {
           </div>
         </Section>
 
-        <Section icon={Settings} title="运行参数" description="轮询、重试、免打扰等低频配置收在这里。" defaultOpen={false}>
+        <Section icon={ShieldCheck} title="免打扰" description="设置一段连续免打扰时间，以及期间新回复的处理方式。" defaultOpen={false}>
+          <QuietHoursControls config={config} setConfig={setConfig} />
+        </Section>
+
+        <Section icon={Settings} title="运行参数" description="轮询、重试、帖内扫描等低频配置收在这里。" defaultOpen={false}>
           <div id="runtime" className="grid">
             {fieldGroups.runtime.map((spec) => (
+              <Field key={spec[0]} config={config} setConfig={setConfig} spec={spec} />
+            ))}
+          </div>
+        </Section>
+
+        <Section icon={Settings} title="关闭行为" description="控制点击窗口关闭按钮时退出程序还是最小化到后台图标。" defaultOpen={false}>
+          <div className="grid">
+            {fieldGroups.close.map((spec) => (
               <Field key={spec[0]} config={config} setConfig={setConfig} spec={spec} />
             ))}
           </div>
@@ -1147,6 +1769,14 @@ function App() {
         <Section icon={TerminalSquare} title="日志" description={status.logPath || ""} defaultOpen>
           <pre id="logs" className="logs">{logs || "暂无日志"}</pre>
         </Section>
+        <CloseConfirmModal
+          step={resolveCloseStep()}
+          request={closeRequest}
+          setRequest={setCloseRequest}
+          onCancel={() => setCloseRequest(null)}
+          onContinue={continueClose}
+          onFinish={finishClose}
+        />
       </section>
     </main>
   );

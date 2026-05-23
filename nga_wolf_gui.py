@@ -120,7 +120,7 @@ DEFAULT_CONFIG = {
     "ai_ignore_codex_user_config": True,
     "ai_schedule_enabled": False,
     "ai_schedule_interval_minutes": "5",
-    "ai_schedule_prompt": "",
+    "ai_schedule_prompt": "根据最新的 NGA 回复历史、我目前的持仓信息和观察列表，并实时查询公开 A 股行情信息，分析盘面变化、机会与风险，给出接下来需要重点观察的方向和操作建议。",
     "ai_schedule_target_ids": "",
     "ai_schedule_window_mode": "a_share",
     "ai_schedule_windows": "weekday:09:30-11:30,13:00-15:00",
@@ -128,6 +128,7 @@ DEFAULT_CONFIG = {
     "ai_send_errors_to_feishu": False,
     "ai_max_feishu_chars": "3500",
     "ai_upload_long_result": False,
+    "web_close_behavior": "ask",
 }
 
 
@@ -271,7 +272,16 @@ def write_json(path: Path, value: dict[str, object]) -> None:
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(value, f, ensure_ascii=False, indent=2)
         f.write("\n")
-    tmp.replace(path)
+    last_exc: PermissionError | None = None
+    for attempt in range(1, 8):
+        try:
+            tmp.replace(path)
+            return
+        except PermissionError as exc:
+            last_exc = exc
+            time.sleep(0.08 * attempt)
+    if last_exc is not None:
+        raise last_exc
 
 
 def save_config(config: dict[str, object]) -> None:

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import webbrowser
@@ -16,6 +18,51 @@ import wechat_bot
 
 
 APP_TITLE = "NGA Wolf Watcher Preview"
+_ACTIVE_WINDOW: Any | None = None
+_CLOSE_CONFIRMED = False
+
+
+def _set_active_window(window: Any | None) -> None:
+    global _ACTIVE_WINDOW, _CLOSE_CONFIRMED
+    _ACTIVE_WINDOW = window
+    _CLOSE_CONFIRMED = False
+
+
+def _request_frontend_close_dialog() -> bool | None:
+    if _CLOSE_CONFIRMED:
+        return None
+    window = _ACTIVE_WINDOW
+    if window is None:
+        return None
+
+    def show_dialog() -> None:
+        time.sleep(0.05)
+        try:
+            window.evaluate_js(
+                "(function(){var el=document.getElementById('nga-close-request-trigger');"
+                "if(el){el.click();}})()"
+            )
+        except Exception:
+            pass
+
+    threading.Thread(target=show_dialog, daemon=True).start()
+    return False
+
+
+class WebViewShutdownNoiseFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name != "pywebview":
+            return True
+        message = record.getMessage()
+        exc_text = ""
+        if record.exc_info and record.exc_info[1]:
+            exc_text = str(record.exc_info[1])
+        combined = f"{message}\n{exc_text}"
+        if "ObjectDisposedException" in combined and "WebView2" in combined:
+            return False
+        if "无法访问已释放的对象" in combined and "WebView2" in combined:
+            return False
+        return True
 
 
 def resource_dir() -> Path:
@@ -58,6 +105,27 @@ def read_json_config(path: Path) -> dict[str, Any]:
 class PreviewApi:
     def __init__(self) -> None:
         self.process: subprocess.Popen[str] | None = None
+        self.closing = False
+
+    def shutdown(self) -> dict[str, Any]:
+        self.closing = True
+        return {"ok": True}
+
+    def mark_closing(self) -> None:
+        self.closing = True
+
+    def attach_window(self, window: Any) -> None:
+        return
+
+    def handle_window_closing(self) -> bool | None:
+        self.closing = True
+        return None
+
+    def ensure_tray(self) -> bool:
+        return False
+
+    def stop_tray(self) -> None:
+        return
 
     def _merged_config(self, value: dict[str, Any] | None = None) -> dict[str, Any]:
         config = legacy.load_config()
@@ -179,7 +247,16 @@ class PreviewApi:
             if str(item.get("id") or "") == str(profile.get("id") or ""):
                 item["chats"] = cleaned
         merged["feishu_bot_profiles"] = json.dumps(profiles, ensure_ascii=False, indent=2)
-        legacy.save_config(merged)
+        try:
+            legacy.save_config(merged)
+        except PermissionError as exc:
+            return {
+                "ok": True,
+                "config": merged,
+                "chats": cleaned,
+                "status": self._status(),
+                "warning": f"群组已查询成功，但配置文件暂时被占用，未能立即保存：{exc}",
+            }
         return {"ok": True, "config": merged, "chats": cleaned, "status": self._status()}
 
     def send_test_target(self, config: dict[str, Any] | None = None, target_id: str = "") -> dict[str, Any]:
@@ -303,7 +380,38 @@ class PreviewApi:
         stopped = self._stop_processes(include_scan=True)
         return {"ok": True, "stopped": stopped, "status": self._status()}
 
+    def close_confirmed(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        global _CLOSE_CONFIRMED
+        data = payload if isinstance(payload, dict) else {}
+        action = str(data.get("action") or "exit").strip().lower()
+        if bool(data.get("remember_behavior")) and action in {"minimize", "exit", "ask"}:
+            config = self._merged_config()
+            config["web_close_behavior"] = action
+            try:
+                legacy.save_config(config)
+            except Exception:
+                pass
+        if bool(data.get("stop")):
+            self._stop_processes(include_scan=True)
+        window = _ACTIVE_WINDOW
+        if action == "minimize" and window is not None:
+            try:
+                window.minimize()
+            except Exception:
+                pass
+            return {"ok": True, "action": "minimize", "warning": "系统托盘不可用，已改为最小化窗口。", "status": self._status()}
+        _CLOSE_CONFIRMED = True
+        self.closing = True
+        if window is not None:
+            try:
+                window.destroy()
+            except Exception:
+                pass
+        return {"ok": True, "action": "exit", "status": self._status()}
+
     def read_logs(self, offset: int = 0) -> dict[str, Any]:
+        if self.closing:
+            return {"ok": True, "offset": int(offset or 0), "text": ""}
         path = legacy.log_path()
         if not path.exists():
             return {"ok": True, "offset": 0, "text": ""}
@@ -315,6 +423,8 @@ class PreviewApi:
         return {"ok": True, "offset": len(data), "text": chunk.decode("utf-8", errors="replace")}
 
     def status(self) -> dict[str, Any]:
+        if self.closing:
+            return {"ok": True, "status": {"running": False, "pids": []}}
         return {"ok": True, "status": self._status()}
 
     def open_data_dir(self) -> dict[str, Any]:
@@ -336,11 +446,16 @@ def run_preview() -> None:
         raise SystemExit("pywebview is not installed. Run: python -m pip install pywebview") from exc
 
     api = PreviewApi()
+    logging.getLogger("pywebview").addFilter(WebViewShutdownNoiseFilter())
     index_path = webui_index_path()
     if index_path.exists():
         window = webview.create_window(APP_TITLE, index_path.as_uri(), js_api=api, width=1180, height=780, min_size=(980, 680))
     else:
         window = webview.create_window(APP_TITLE, html=fallback_html(), js_api=api, width=900, height=560, min_size=(720, 480))
+    _set_active_window(window)
+    window.events.closing += _request_frontend_close_dialog
+    window.events.closed += api.mark_closing
+    window.events.closed += lambda: _set_active_window(None)
     webview.start(debug=bool(os.getenv("NGA_WEBGUI_DEBUG")))
 
 
