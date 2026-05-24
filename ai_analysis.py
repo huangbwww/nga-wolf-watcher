@@ -202,7 +202,7 @@ class AIConfig:
     permission_mode: str = "default"
     model: str = ""
     reasoning_effort: str = ""
-    ignore_codex_user_config: bool = True
+    ignore_codex_user_config: bool = False
 
     @classmethod
     def from_namespace(cls, args: argparse.Namespace) -> "AIConfig":
@@ -261,7 +261,7 @@ class AIConfig:
                 provider,
             ),
             ignore_codex_user_config=bool_value(
-                getattr(args, "ai_ignore_codex_user_config", env_bool("AI_IGNORE_CODEX_USER_CONFIG", True))
+                getattr(args, "ai_ignore_codex_user_config", env_bool("AI_IGNORE_CODEX_USER_CONFIG", False))
             ),
         )
 
@@ -335,7 +335,7 @@ def add_cli_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--ai-ignore-codex-user-config",
         action=argparse.BooleanOptionalAction,
-        default=env_bool("AI_IGNORE_CODEX_USER_CONFIG", True),
+        default=env_bool("AI_IGNORE_CODEX_USER_CONFIG", False),
     )
 
 
@@ -770,6 +770,13 @@ def quote_arg(value: str) -> str:
     return shlex.quote(value)
 
 
+def error_tail(value: str, limit: int = 1600) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return "..." + text[-limit:]
+
+
 def normalize_permission_mode(raw: str, provider: str = "codex") -> str:
     value = str(raw or "").strip()
     lower = value.lower().replace("_", "-")
@@ -911,7 +918,7 @@ class BaseRunner:
                     result.error = ""
                     break
                 if completed.returncode != 0:
-                    last_error = f"{self.provider} exited with code {completed.returncode}: {completed.stderr.strip()[:800]}"
+                    last_error = f"{self.provider} exited with code {completed.returncode}: {error_tail(completed.stderr)}"
                 else:
                     last_error = f"{self.provider} produced empty output"
                 if attempt < len(commands) and self.should_try_next_command(completed, result):
@@ -989,9 +996,15 @@ def resolve_executable(command: list[str], provider: str) -> list[str]:
 class CodexRunner(BaseRunner):
     provider = "codex"
 
-    def _model_args(self, task: AITask) -> list[str]:
+    def _model_args(self, task: AITask, *, allow_model: bool = True) -> list[str]:
+        if not allow_model:
+            return []
         model = normalize_model(str(task.metadata.get("model") or self.config.model or ""))
         return ["--model", model] if model else []
+
+    def _has_model_arg(self, task: AITask) -> bool:
+        model = normalize_model(str(task.metadata.get("model") or self.config.model or ""))
+        return bool(model)
 
     def _reasoning_args(self, task: AITask) -> list[str]:
         effort = normalize_reasoning_effort(
@@ -1016,7 +1029,15 @@ class CodexRunner(BaseRunner):
             args.extend(["--image", str(image_path)])
         return args
 
-    def build_command(self, task: AITask, prompt_file: Path, short_prompt: str, *, ignore_rules: bool = True) -> list[str]:
+    def build_command(
+        self,
+        task: AITask,
+        prompt_file: Path,
+        short_prompt: str,
+        *,
+        ignore_rules: bool = False,
+        allow_model: bool = True,
+    ) -> list[str]:
         base = split_command_line(self.config.codex_command)
         command = [
             *base,
@@ -1027,9 +1048,7 @@ class CodexRunner(BaseRunner):
         ]
         if ignore_rules:
             command.insert(len(base) + 1, "--ignore-rules")
-        if self.config.ignore_codex_user_config:
-            command.append("--ignore-user-config")
-        command.extend(self._model_args(task))
+        command.extend(self._model_args(task, allow_model=allow_model))
         command.extend(self._reasoning_args(task))
         command.extend(self._mode_args(task))
         command.extend(self._image_args(task))
@@ -1040,7 +1059,15 @@ class CodexRunner(BaseRunner):
         ])
         return command
 
-    def build_resume_command(self, task: AITask, prompt_file: Path, short_prompt: str, *, ignore_rules: bool = True) -> list[str]:
+    def build_resume_command(
+        self,
+        task: AITask,
+        prompt_file: Path,
+        short_prompt: str,
+        *,
+        ignore_rules: bool = False,
+        allow_model: bool = True,
+    ) -> list[str]:
         base = split_command_line(self.config.codex_command)
         command = [
             *base,
@@ -1051,9 +1078,7 @@ class CodexRunner(BaseRunner):
         ]
         if ignore_rules:
             command.insert(len(base) + 3, "--ignore-rules")
-        if self.config.ignore_codex_user_config:
-            command.append("--ignore-user-config")
-        command.extend(self._model_args(task))
+        command.extend(self._model_args(task, allow_model=allow_model))
         command.extend(self._reasoning_args(task))
         command.extend(self._mode_args(task))
         command.extend(self._image_args(task))
@@ -1065,12 +1090,19 @@ class CodexRunner(BaseRunner):
         return command
 
     def build_commands(self, task: AITask, prompt_file: Path, short_prompt: str) -> list[list[str]]:
-        return [
-            self.build_resume_command(task, prompt_file, short_prompt, ignore_rules=True),
-            self.build_resume_command(task, prompt_file, short_prompt, ignore_rules=False),
-            self.build_command(task, prompt_file, short_prompt, ignore_rules=True),
-            self.build_command(task, prompt_file, short_prompt, ignore_rules=False),
+        commands = [
+            self.build_resume_command(task, prompt_file, short_prompt, ignore_rules=False, allow_model=True),
         ]
+        if self._has_model_arg(task):
+            commands.extend([
+                self.build_resume_command(task, prompt_file, short_prompt, ignore_rules=False, allow_model=False),
+            ])
+        commands.append(self.build_command(task, prompt_file, short_prompt, ignore_rules=False, allow_model=True))
+        if self._has_model_arg(task):
+            commands.extend([
+                self.build_command(task, prompt_file, short_prompt, ignore_rules=False, allow_model=False),
+            ])
+        return commands
 
     def should_try_next_command(self, completed: subprocess.CompletedProcess[str], result: AIResult) -> bool:
         output = f"{completed.stdout}\n{completed.stderr}".lower()
@@ -1086,6 +1118,11 @@ class CodexRunner(BaseRunner):
                 "unexpected argument",
                 "unknown argument",
                 "--ignore-rules",
+                "requires a newer version of codex",
+                "invalid_request_error",
+                "invalid model",
+                "unknown model",
+                "model_not_found",
             )
         )
 

@@ -334,13 +334,20 @@ class PreviewApi:
         return config
 
     def _known_pids(self, include_scan: bool = False) -> set[int]:
-        pids = legacy.find_watcher_process_ids() if include_scan else set()
+        scanned_pids = legacy.find_watcher_process_ids() if include_scan else set()
+        pids = set(scanned_pids)
+        live_process_pid = 0
         if self.process and self.process.poll() is None:
-            pids.add(self.process.pid)
+            live_process_pid = int(self.process.pid)
+            pids.add(live_process_pid)
+        elif self.process and self.process.poll() is not None:
+            self.process = None
         try:
             raw = legacy.watcher_pid_path().read_text(encoding="utf-8").strip()
             if raw:
-                pids.add(int(raw))
+                pid = int(raw)
+                if pid in scanned_pids or pid == live_process_pid or (not include_scan and legacy.process_exists(pid)):
+                    pids.add(pid)
         except (OSError, ValueError):
             pass
         pids.discard(os.getpid())

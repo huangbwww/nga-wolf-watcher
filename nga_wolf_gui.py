@@ -134,7 +134,7 @@ DEFAULT_CONFIG = {
     "ai_custom_command": "",
     "ai_model": "",
     "ai_reasoning_effort": "default",
-    "ai_ignore_codex_user_config": True,
+    "ai_ignore_codex_user_config": False,
     "ai_schedule_enabled": False,
     "ai_schedule_interval_minutes": "5",
     "ai_schedule_prompt": "根据最新的 NGA 回复历史、我目前的持仓信息和观察列表，并实时查询公开 A 股行情信息，分析盘面变化、机会与风险，给出接下来需要重点观察的方向和操作建议。",
@@ -620,7 +620,7 @@ def build_args(
         ai_custom_command=str(config.get("ai_custom_command") or "").strip(),
         ai_model=str(config.get("ai_model") or "").strip(),
         ai_reasoning_effort=str(config.get("ai_reasoning_effort") or "").strip(),
-        ai_ignore_codex_user_config=bool(config.get("ai_ignore_codex_user_config", True)),
+        ai_ignore_codex_user_config=bool(config.get("ai_ignore_codex_user_config", False)),
         ai_schedule_enabled=bool(config.get("ai_schedule_enabled", False)),
         ai_schedule_interval_minutes=int_value(config, "ai_schedule_interval_minutes", 5),
         ai_schedule_prompt=str(config.get("ai_schedule_prompt") or "").strip(),
@@ -724,7 +724,7 @@ def validate_config(
                 errors.append(f"帖内作者规则 {watch.key} 使用单独飞书机器人时必须同时填写 app_id、app_secret 和 receive_id")
     for key, label in [
         ("interval", "轮询间隔"),
-        ("jitter", "随机抖动"),
+        ("jitter", "用户回复随机抖动"),
         ("retries", "重试次数"),
         ("retry_initial_delay", "重试初始等待"),
         ("retry_delay", "重试延迟"),
@@ -778,6 +778,30 @@ def command_for_mode(*args: str) -> list[str]:
     if getattr(sys, "frozen", False):
         return [sys.executable, *args]
     return [sys.executable, "-u", str(Path(__file__).resolve()), *args]
+
+
+def process_exists(pid: int) -> bool:
+    if pid <= 0 or pid == os.getpid():
+        return False
+    if sys.platform == "win32":
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
 
 def find_watcher_process_ids() -> set[int]:
@@ -955,7 +979,7 @@ class App:
         self.ai_schedule_var = BooleanVar(value=bool(self.config.get("ai_schedule_enabled", False)))
         self.ai_send_errors_var = BooleanVar(value=bool(self.config.get("ai_send_errors_to_feishu", False)))
         self.ai_upload_long_result_var = BooleanVar(value=bool(self.config.get("ai_upload_long_result", False)))
-        self.ai_ignore_codex_user_config_var = BooleanVar(value=bool(self.config.get("ai_ignore_codex_user_config", True)))
+        self.ai_ignore_codex_user_config_var = BooleanVar(value=bool(self.config.get("ai_ignore_codex_user_config", False)))
         raw_window_mode = str(self.config.get("ai_schedule_window_mode") or "a_share")
         self.ai_schedule_window_mode_var = StringVar(value="自定义" if raw_window_mode == "custom" else "A股开市时间")
         self.status_var = StringVar(value="未启动")
@@ -1256,7 +1280,7 @@ class App:
         frame.grid_columnconfigure(1, weight=1)
         fields = [
             ("轮询间隔（秒）", "interval"),
-            ("随机抖动（秒）", "jitter"),
+            ("用户回复随机抖动（秒）", "jitter"),
             ("重试次数", "retries"),
             ("重试初始等待（秒）", "retry_initial_delay"),
             ("重试递增步长（秒）", "retry_delay"),
@@ -4015,13 +4039,20 @@ class App:
         self.action_feedback_var.set(text)
 
     def known_watcher_pids(self, *, include_scan: bool = False) -> set[int]:
-        pids = find_watcher_process_ids() if include_scan else set()
+        scanned_pids = find_watcher_process_ids() if include_scan else set()
+        pids = set(scanned_pids)
+        live_process_pid = 0
         if self.process and self.process.poll() is None:
-            pids.add(self.process.pid)
+            live_process_pid = int(self.process.pid)
+            pids.add(live_process_pid)
+        elif self.process and self.process.poll() is not None:
+            self.process = None
         try:
             raw = watcher_pid_path().read_text(encoding="utf-8").strip()
             if raw:
-                pids.add(int(raw))
+                pid = int(raw)
+                if pid in scanned_pids or pid == live_process_pid or (not include_scan and process_exists(pid)):
+                    pids.add(pid)
         except (OSError, ValueError):
             pass
         pids.discard(os.getpid())

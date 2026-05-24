@@ -5088,12 +5088,16 @@ def with_retries(label: str, attempts: int, initial_delay: float, step_delay: fl
 
 
 def regular_watch_sleep_seconds(args: argparse.Namespace) -> float:
-    jitter = random.uniform(-args.jitter, args.jitter) if args.jitter > 0 else 0
-    base_interval = max(1.0, float(args.interval))
+    sleep_candidates: list[float] = []
+    if watch_author_targets_for_watch(args):
+        jitter = random.uniform(-args.jitter, args.jitter) if args.jitter > 0 else 0
+        sleep_candidates.append(max(1.0, float(args.interval) + jitter))
     if thread_author_watches_for_watch(args):
-        thread_interval = max(1.0, float(getattr(args, "thread_watch_interval", DEFAULT_THREAD_WATCH_INTERVAL) or DEFAULT_THREAD_WATCH_INTERVAL))
-        base_interval = min(base_interval, thread_interval)
-    return max(1.0, base_interval + jitter)
+        sleep_candidates.append(max(1.0, float(getattr(args, "thread_watch_interval", DEFAULT_THREAD_WATCH_INTERVAL) or DEFAULT_THREAD_WATCH_INTERVAL)))
+    if not sleep_candidates:
+        jitter = random.uniform(-args.jitter, args.jitter) if args.jitter > 0 else 0
+        sleep_candidates.append(max(1.0, float(args.interval) + jitter))
+    return min(sleep_candidates)
 
 
 def watch_due(state: dict[str, Any], key: str, interval: float, *, force: bool = False) -> bool:
@@ -5461,6 +5465,8 @@ def run_once(args: argparse.Namespace) -> int:
         author_targets = []
     if not thread_due:
         thread_watches = []
+    if not author_targets and not thread_watches:
+        return 0
     has_author_init_state = isinstance(state.get("watch_author_initialized_ids"), list)
     initialized_author_ids = set(state_list(state.get("watch_author_initialized_ids")))
     initialized_thread_author_keys = set(state_list(state.get("thread_author_initialized_keys")))

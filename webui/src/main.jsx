@@ -72,7 +72,7 @@ const fieldGroups = {
     ["thread_watch_tail_count", "帖内扫描条数", "number"],
     ["thread_watch_interval", "帖内扫描间隔秒", "number"],
     ["interval", "轮询间隔秒", "number"],
-    ["jitter", "随机抖动秒", "number"],
+    ["jitter", "用户回复随机抖动秒", "number"],
     ["retries", "重试次数", "number"],
     ["retry_initial_delay", "重试初始等待秒", "number"],
     ["retry_delay", "重试递增秒", "number"],
@@ -684,7 +684,7 @@ function validationTargetForError(error) {
   const text = String(error || "");
   const runtimeMap = [
     ["轮询间隔", "interval"],
-    ["随机抖动", "jitter"],
+    ["用户回复随机抖动", "jitter"],
     ["重试次数", "retries"],
     ["重试初始等待", "retry_initial_delay"],
     ["重试延迟", "retry_delay"],
@@ -1709,12 +1709,24 @@ function App() {
     };
   }, []);
 
-  const openCloseDialog = (options = {}) => {
+  const openCloseDialog = async (options = {}) => {
     const forceExit = Boolean(options.forceExit);
     const behavior = forceExit ? "exit" : String(config.web_close_behavior || "ask");
+    let running = Boolean(status.running);
+    if (api()?.status) {
+      try {
+        const latest = await api().status();
+        if (latest?.status) {
+          setStatus(latest.status);
+          running = Boolean(latest.status.running);
+        }
+      } catch {
+        running = Boolean(status.running);
+      }
+    }
     setCloseRequest({
       dirty: isDirty,
-      running: Boolean(status.running),
+      running,
       behavior,
       action: behavior === "minimize" ? "minimize" : "exit",
       step: behavior === "minimize" ? "final" : behavior === "exit" ? "dirty" : "background",
