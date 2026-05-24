@@ -4784,9 +4784,14 @@ def start_ws(args: argparse.Namespace) -> None:
         except Exception as exc:
             return card_response(None, f"参数错误: {exc}", "error")
 
+    def ignore_feishu_event(event: Any) -> None:
+        return None
+
     handler = (
         lark.EventDispatcherHandler.builder("", "")
         .register_p2_im_message_receive_v1(on_message)
+        .register_p2_im_message_reaction_created_v1(ignore_feishu_event)
+        .register_p2_im_message_reaction_deleted_v1(ignore_feishu_event)
         .register_p2_card_action_trigger(on_card_action)
         .build()
     )

@@ -1016,16 +1016,17 @@ class CodexRunner(BaseRunner):
             args.extend(["--image", str(image_path)])
         return args
 
-    def build_command(self, task: AITask, prompt_file: Path, short_prompt: str) -> list[str]:
+    def build_command(self, task: AITask, prompt_file: Path, short_prompt: str, *, ignore_rules: bool = True) -> list[str]:
         base = split_command_line(self.config.codex_command)
         command = [
             *base,
             "exec",
-            "--ignore-rules",
             "--cd",
             str(task.work_dir),
             "--skip-git-repo-check",
         ]
+        if ignore_rules:
+            command.insert(len(base) + 1, "--ignore-rules")
         if self.config.ignore_codex_user_config:
             command.append("--ignore-user-config")
         command.extend(self._model_args(task))
@@ -1039,16 +1040,17 @@ class CodexRunner(BaseRunner):
         ])
         return command
 
-    def build_resume_command(self, task: AITask, prompt_file: Path, short_prompt: str) -> list[str]:
+    def build_resume_command(self, task: AITask, prompt_file: Path, short_prompt: str, *, ignore_rules: bool = True) -> list[str]:
         base = split_command_line(self.config.codex_command)
         command = [
             *base,
             "exec",
             "resume",
             "--last",
-            "--ignore-rules",
             "--skip-git-repo-check",
         ]
+        if ignore_rules:
+            command.insert(len(base) + 3, "--ignore-rules")
         if self.config.ignore_codex_user_config:
             command.append("--ignore-user-config")
         command.extend(self._model_args(task))
@@ -1063,7 +1065,12 @@ class CodexRunner(BaseRunner):
         return command
 
     def build_commands(self, task: AITask, prompt_file: Path, short_prompt: str) -> list[list[str]]:
-        return [self.build_resume_command(task, prompt_file, short_prompt), self.build_command(task, prompt_file, short_prompt)]
+        return [
+            self.build_resume_command(task, prompt_file, short_prompt, ignore_rules=True),
+            self.build_resume_command(task, prompt_file, short_prompt, ignore_rules=False),
+            self.build_command(task, prompt_file, short_prompt, ignore_rules=True),
+            self.build_command(task, prompt_file, short_prompt, ignore_rules=False),
+        ]
 
     def should_try_next_command(self, completed: subprocess.CompletedProcess[str], result: AIResult) -> bool:
         output = f"{completed.stdout}\n{completed.stderr}".lower()
@@ -1076,6 +1083,9 @@ class CodexRunner(BaseRunner):
                 "could not find",
                 "not a valid session",
                 "resume",
+                "unexpected argument",
+                "unknown argument",
+                "--ignore-rules",
             )
         )
 
