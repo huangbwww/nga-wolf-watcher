@@ -167,7 +167,7 @@ code{background:#f3f4f6;padding:2px 6px;border-radius:6px}
 <main>
   <h1>NGA Wolf Watcher Preview</h1>
   <p>The React preview UI has not been built yet.</p>
-  <p>Run <code>npm.cmd ci</code> and <code>npm.cmd run build</code> in <code>webui</code>, then reopen this preview.</p>
+  <p>Run <code>npm.cmd install</code> once if dependencies are missing, then run <code>npm.cmd run build</code> in <code>webui</code> and reopen this preview.</p>
 </main>"""
 
 
@@ -179,13 +179,18 @@ def build_webui_if_needed(index_path: Path) -> None:
     package_json = webui_dir / "package.json"
     if not package_json.exists() or not package_lock.exists():
         return
+    node_modules = webui_dir / "node_modules"
     npm = shutil.which("npm.cmd" if sys.platform == "win32" else "npm")
     if not npm:
         return
     env = os.environ.copy()
     env.setdefault("CI", "1")
     try:
-        subprocess.run([npm, "ci"], cwd=webui_dir, check=True, env=env)
+        if not node_modules.exists():
+            if str(env.get("NGA_WEBGUI_AUTO_INSTALL") or "").strip().lower() not in {"1", "true", "yes", "on"}:
+                logging.info("webui/dist is missing and webui/node_modules is not installed; skip automatic npm install")
+                return
+            subprocess.run([npm, "ci"], cwd=webui_dir, check=True, env=env)
         subprocess.run([npm, "run", "build"], cwd=webui_dir, check=True, env=env)
     except Exception:
         logging.exception("Failed to build web UI")
