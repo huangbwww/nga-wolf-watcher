@@ -123,6 +123,31 @@ def _stop_tray_icon() -> None:
             pass
 
 
+def _pid_has_watcher_config(pid: int) -> bool:
+    if pid <= 0 or pid == os.getpid():
+        return False
+    if sys.platform != "win32":
+        return legacy.process_exists(pid)
+    script = (
+        "$p = Get-CimInstance Win32_Process -Filter \"ProcessId = "
+        + str(int(pid))
+        + "\" -ErrorAction SilentlyContinue; "
+        "$cmd = if ($p) { [string]$p.CommandLine } else { '' }; "
+        "if ($cmd -like '*--watcher-config*') { '1' }"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        return False
+    return result.stdout.strip() == "1"
+
+
 class WebViewShutdownNoiseFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if record.name != "pywebview":
@@ -346,7 +371,7 @@ class PreviewApi:
             raw = legacy.watcher_pid_path().read_text(encoding="utf-8").strip()
             if raw:
                 pid = int(raw)
-                if pid in scanned_pids or pid == live_process_pid or (not include_scan and legacy.process_exists(pid)):
+                if pid in scanned_pids or pid == live_process_pid or (not include_scan and _pid_has_watcher_config(pid)):
                     pids.add(pid)
         except (OSError, ValueError):
             pass

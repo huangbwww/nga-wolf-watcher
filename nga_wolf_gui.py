@@ -811,7 +811,7 @@ def find_watcher_process_ids() -> set[int]:
 $own = $PID
 Get-CimInstance Win32_Process | Where-Object {
     $_.ProcessId -ne $own -and
-    ($_.Name -ieq 'python.exe' -or $_.Name -ieq 'pythonw.exe' -or $_.Name -ieq 'NGA-Wolf-Watcher.exe') -and
+    ($_.Name -ieq 'python.exe' -or $_.Name -ieq 'pythonw.exe' -or $_.Name -ieq 'NGA-Wolf-Watcher.exe' -or $_.Name -ieq 'NGA-Wolf-Watcher-Web.exe') -and
     $_.CommandLine -like '*--watcher-config*'
 } | ForEach-Object { $_.ProcessId }
 """

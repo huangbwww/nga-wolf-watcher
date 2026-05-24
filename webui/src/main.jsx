@@ -602,6 +602,7 @@ function CloseConfirmModal({ step, request, setRequest, onCancel, onContinue, on
             <button className="btn" type="button" onClick={() => onContinue({ step: "dirty", action: "exit" })}>退出程序</button>
             <button className="btn primary" type="button" onClick={() => onFinish("minimize", Boolean(request.remember))}>隐藏到托盘</button>
           </div>
+          <p className="field-hint">如果检测到监听仍在运行，会在退出前再次提醒你停止。</p>
         </div>
       </div>
     );
@@ -627,13 +628,14 @@ function CloseConfirmModal({ step, request, setRequest, onCancel, onContinue, on
     );
   }
   if (step === "running") {
+    const pids = Array.isArray(request.pids) && request.pids.length ? ` PID ${request.pids.join(", ")}` : "";
     return (
       <div className="modal-backdrop">
         <div className="modal-card small">
           <div className="editor-header">
             <div>
               <h3>监听仍在运行</h3>
-              <p>退出程序前需要停止监听进程。隐藏到托盘会保持监听继续运行。</p>
+              <p>检测到监听进程仍在运行{pids}。退出程序前需要先停止监听；隐藏到托盘会保持监听继续运行。</p>
             </div>
             <IconButton icon={X} label="取消关闭" onClick={onCancel} />
           </div>
@@ -1713,20 +1715,11 @@ function App() {
     const forceExit = Boolean(options.forceExit);
     const behavior = forceExit ? "exit" : String(config.web_close_behavior || "ask");
     let running = Boolean(status.running);
-    if (api()?.status) {
-      try {
-        const latest = await api().status();
-        if (latest?.status) {
-          setStatus(latest.status);
-          running = Boolean(latest.status.running);
-        }
-      } catch {
-        running = Boolean(status.running);
-      }
-    }
+    let latestPids = Array.isArray(status.pids) ? status.pids : [];
     setCloseRequest({
       dirty: isDirty,
       running,
+      pids: latestPids,
       behavior,
       action: behavior === "minimize" ? "minimize" : "exit",
       step: behavior === "minimize" ? "final" : behavior === "exit" ? "dirty" : "background",
@@ -1877,14 +1870,17 @@ function App() {
   };
   const resolveCloseStep = () => {
     if (!closeRequest) return null;
-    if (closeRequest.step === "dirty") return closeRequest.dirty ? "dirty" : "running";
+    if (closeRequest.step === "dirty") {
+      if (closeRequest.dirty) return "dirty";
+      return closeRequest.running ? "running" : "final";
+    }
     if (closeRequest.step === "running") return closeRequest.running ? "running" : "final";
     return closeRequest.step || "background";
   };
   const continueClose = (patch = {}) => setCloseRequest((current) => {
     if (!current) return current;
     const next = { ...current, ...patch };
-    if (next.step === "dirty" && !next.dirty) next.step = "running";
+    if (next.step === "dirty" && !next.dirty) next.step = next.running ? "running" : "final";
     if (next.step === "running" && !next.running) next.step = "final";
     return next;
   });
@@ -1908,7 +1904,12 @@ function App() {
       if (result.status) setStatus(result.status);
       setMessage("保存配置完成");
       setMessageKind("success");
-      continueClose({ dirty: false, step: "running" });
+      continueClose({
+        dirty: false,
+        step: "running",
+        running: Boolean(closeRequest?.running),
+        pids: Array.isArray(closeRequest?.pids) ? closeRequest.pids : [],
+      });
     } catch (error) {
       setMessage(String(error?.message || error));
       setMessageKind("error");
@@ -1933,7 +1934,7 @@ function App() {
       });
     }
     if (api()?.close_confirmed) {
-      await api().close_confirmed({ action: finalAction, stop: finalAction === "exit" && Boolean(request.running || request.stopOnExit), remember_behavior: shouldRemember });
+      await api().close_confirmed({ action: finalAction, stop: finalAction === "exit", remember_behavior: shouldRemember });
     }
   };
   useEffect(() => {
@@ -1952,7 +1953,6 @@ function App() {
           </div>
           <div>
             <strong>NGA Wolf Watcher</strong>
-            <span>Web UI</span>
           </div>
         </div>
         <div className={`status ${status.running ? "online" : ""}`}>
