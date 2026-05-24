@@ -9,13 +9,13 @@
 - 持续监听：点击 `启动监听` 后，程序会按监听规则检查用户主页回复，或在指定帖子里筛选目标作者的新回复，并推送到选定的飞书群/微信账号。
 - 手动查询：在飞书群或微信里可以使用命令；飞书还支持卡片按钮，查询用户回复、查询帖子回复，或把结果打包成 `.txt` 文件。
 - 免打扰时段：可以设置一个连续的每周免打扰区间，例如周五 18:00 到周一 08:00，期间的新回复可以选择忽略，或在免打扰结束后汇总推送。
-- 可选本地 AI Agent 增强：默认关闭。开启后可保存狼大发言、调用本机 Codex / Claude Code / custom 命令、在飞书群响应 `/ai` 命令，并支持盘中定时分析。
+- 可选本地 AI Agent 增强：默认关闭。开启后可保存狼大发言、调用本机 Codex / Claude Code / CodeWhale / custom 命令、在飞书群响应 `/ai` 命令，并支持盘中定时分析。
 
 ### AI 分析功能说明
 
 AI 功能默认关闭。默认配置下，程序不要求安装 Codex、Claude、Node、API key 或任何额外 AI 依赖。AI 关闭时，NGA 监听、飞书推送、WebSocket 命令、卡片交互、免打扰、GUI 启动和打包行为保持原有兼容行为；如果不想用 AI，直接保持关闭即可。
 
-这部分功能有一定使用门槛：它不是内置大模型服务，而是把飞书群里的消息、NGA 新回复和本地保存的上下文转交给你电脑上的本地 AI Agent 命令执行。你需要先在本机安装并登录 Codex CLI、Claude Code CLI，或自己提供 custom command。简单安装方式：
+这部分功能有一定使用门槛：它不是内置大模型服务，而是把飞书群里的消息、NGA 新回复和本地保存的上下文转交给你电脑上的本地 AI Agent 命令执行。你需要先在本机安装并登录 Codex CLI、Claude Code CLI、CodeWhale，或自己提供 custom command。简单安装方式：
 
 ```powershell
 # Codex CLI，需要本机有 Node/npm
@@ -25,6 +25,10 @@ codex
 # Claude Code CLI，Windows 也可参考官方 winget/安装脚本方式
 npm install -g @anthropic-ai/claude-code
 claude
+
+# CodeWhale / DeepSeek TUI，需要本机有 Node/npm
+npm install -g codewhale
+codewhale auth set --provider deepseek
 ```
 
 不同人用 AI 分析股票会有完全不同的流程。这里提供的只是一个本地试验入口：程序拉取到狼大发言后，会把回复写入 AI 工作目录里的 `events/wolf_history.jsonl` 和 `events/latest_event.json`；同时预留 `context/positions.json`、`context/watchlist.md`、`context/notes.md` 等位置记录你的持仓、重点关注和补充笔记。我的用法是把自己的持仓截图或持仓信息直接发给 AI，让它自己整理记录；后续操作、交易习惯、接下来想看的方向，也直接在飞书群里和它聊。AI 可以结合狼大的历史发言、当前盘面、你的持仓和你的即时想法给出分析或讨论建议。
@@ -375,6 +379,15 @@ $env:AI_CLAUDE_COMMAND = 'claude'
 python .\nga_feishu_watch.py --ws
 ```
 
+启用 CodeWhale：
+
+```powershell
+$env:AI_ENABLED = 'true'
+$env:AI_PROVIDER = 'codewhale'
+$env:AI_CODEWHALE_COMMAND = 'codewhale'
+python .\nga_feishu_watch.py --ws
+```
+
 使用 custom command：
 
 ```powershell
@@ -392,8 +405,10 @@ custom command 支持占位符：`{work_dir}`、`{prompt_file}`、`{output_file}
 - 飞书 `/setting` 卡片里的模型/思考强度是运行时覆盖，点“恢复默认模型/强度”会回到 GUI/启动默认值。
 - Codex 下拉模型：`gpt-5.5`、`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.3-codex`、`gpt-5.3-codex-spark`、`gpt-5.2`；思考强度：`low`、`medium`、`high`、`xhigh`。
 - Claude 下拉模型：`default`、`sonnet[1m]`、`opus[1m]`、`haiku`；思考强度：`low`、`medium`、`high`、`xhigh`、`max`。
+- CodeWhale 下拉模型：`deepseek-v4-flash`、`deepseek-v4-pro`，也可选 `auto` 让 CodeWhale 自动路由；思考强度：`auto`、`off`、`low`、`medium`、`high`、`max`。
 - Codex 会把模型传给 `codex exec --model <model>`，把思考强度通过 Codex 配置覆盖传入。
 - Claude Code 会把模型传给 `claude --model <model>`，把思考强度传给 `--effort <level>`。
+- CodeWhale 会通过 `codewhale exec --output-format stream-json --auto` 后台执行。第一轮会从 stream-json 事件捕获 CodeWhale 真实保存的 session id，后续轮次用 `--resume <id>` 续同一条会话；模型传给 `--model <model>`，思考强度通过临时运行配置文件传入 `reasoning_effort`。
 - custom command 只保存并暴露 `{model}`、`{reasoning_effort}`，是否生效取决于你的命令模板是否使用这些占位符。
 
 新帖自动分析：
@@ -475,14 +490,17 @@ AI_PROMPT_FILE=
 AI_TIMEOUT=300
 AI_CODEX_COMMAND=codex
 AI_CLAUDE_COMMAND=claude
+AI_CODEWHALE_COMMAND=codewhale
 AI_CUSTOM_COMMAND=
 AI_MODEL=
 AI_CODEX_MODEL=
 AI_CLAUDE_MODEL=
+AI_CODEWHALE_MODEL=
 AI_CUSTOM_MODEL=
 AI_REASONING_EFFORT=
 AI_CODEX_REASONING_EFFORT=
 AI_CLAUDE_EFFORT=
+AI_CODEWHALE_REASONING_EFFORT=
 AI_CUSTOM_REASONING_EFFORT=
 AI_IGNORE_CODEX_USER_CONFIG=false
 AI_SCHEDULE_ENABLED=false
@@ -527,10 +545,10 @@ Prompt 使用方式：
 - 飞书普通消息会原样转发给本地 agent。通用定位和偏好放在 `context/memory.md` / `AGENTS.md`，agent 需要时自己读，不会每次都把同一段 chat prompt 注入进去。
 - 飞书图片消息、富文本图片和文件附件会先下载到 `attachments/`，再把本地绝对路径交给 agent；Codex provider 会额外使用 `--image <path>` 传图。回复一条文件消息并让 agent 读取时，程序也会尝试读取被回复消息里的附件。
 - 同一个 AI 工作目录下，飞书和微信发来的 AI 消息会进入同一个本地队列串行执行，避免多条消息并发抢同一条本地 agent 会话。
-- `/mode` 参考 cc-connect 的权限模式。直接发送 `/mode` 会返回可点击选择卡片；Codex 支持 `default`、`auto-edit`、`full-auto`、`yolo`；Claude 支持 `default`、`acceptEdits`、`plan`、`auto`、`bypassPermissions`、`dontAsk`。`/mode yolo` 或点击卡片按钮会持久化到 AI state，只影响后续 AI 任务，不改启动参数。
+- `/mode` 参考 cc-connect 的权限模式。直接发送 `/mode` 会返回可点击选择卡片；Codex 支持 `default`、`auto-edit`、`full-auto`、`yolo`；Claude 支持 `default`、`acceptEdits`、`plan`、`auto`、`bypassPermissions`、`dontAsk`；CodeWhale 支持 `default`、`auto`、`yolo`。`/mode yolo` 或点击卡片按钮会持久化到 AI state，只影响后续 AI 任务，不改启动参数。
 - AI 处理飞书消息时，会临时给原消息加一个表情作为“正在回复”状态，完成或报错后移除。默认表情可用 `AI_REPLY_STATUS_EMOJI` 调整；如果飞书应用没有消息表情权限，只会记录日志，不影响 AI 回复。
 - 定时分析只发送配置里的定时 Prompt；为空时使用和自动分析一致的简短默认 Prompt。
-- Codex 会优先使用 `codex exec resume --last` 复用 AI 工作目录下最近一条会话；如果还没有历史会话，则自动新建。Claude Code 使用稳定的 `--session-id`，custom command 可用 `{session_id}` 自行接入常驻会话。
+- Codex 会优先使用 `codex exec resume --last` 复用 AI 工作目录下最近一条会话；如果还没有历史会话，则自动新建。CodeWhale 使用 stream-json 捕获并保存真实 session id，后续用 `--resume <id>` 续聊。Claude Code 使用稳定的 `--session-id`，custom command 可用 `{session_id}` 自行接入常驻会话。
 
 安全说明：
 
@@ -541,7 +559,7 @@ Prompt 使用方式：
 
 故障排查：
 
-- 找不到 `codex` 或 `claude`：先在本机安装对应工具，或把 `AI_CODEX_COMMAND` / `AI_CLAUDE_COMMAND` 设置为完整命令。
+- 找不到 `codex`、`claude` 或 `codewhale`：先在本机安装对应工具，或把 `AI_CODEX_COMMAND` / `AI_CLAUDE_COMMAND` / `AI_CODEWHALE_COMMAND` 设置为完整命令。
 - 任务超时：调大 `AI_TIMEOUT`，或减少 prompt / context 内容。
 - 输出为空：查看 `logs/ai_agent.log`；如果 output file 缺失，程序会用 stdout 兜底。
 - 飞书消息过长：默认直接截断成文本。需要长结果文件时再设置 `AI_UPLOAD_LONG_RESULT=true`。

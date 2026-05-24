@@ -9,13 +9,13 @@ Watch specified NGA replies, push new replies to Feishu or WeChat, and use group
 - Continuous monitoring: after you click `启动监听` / `Start Watcher`, the app checks author reply pages or filters target authors inside fixed threads, then pushes newly found replies to selected Feishu chats or WeChat accounts.
 - Manual actions: in Feishu or WeChat you can use commands; Feishu also supports card buttons to fetch recent user replies, fetch thread replies, or pack results into `.txt` files.
 - Do-not-disturb hours: automatic monitoring can be muted for a continuous weekly range, such as Friday 18:00 to Monday 08:00. Muted replies can either be ignored or summarized after the quiet period ends.
-- Optional local AI Agent enhancement: disabled by default. When enabled, it can save wolf posts, call local Codex / Claude Code / custom commands, reply to `/ai` commands in Feishu, and run scheduled intraday reviews.
+- Optional local AI Agent enhancement: disabled by default. When enabled, it can save wolf posts, call local Codex / Claude Code / CodeWhale / custom commands, reply to `/ai` commands in Feishu, and run scheduled intraday reviews.
 
 ### AI Analysis Notes
 
 AI is disabled by default. With the default config, the app does not require Codex, Claude, Node.js, API keys, or any extra AI dependency. When AI is disabled, NGA monitoring, Feishu pushes, WebSocket commands, card actions, do-not-disturb, GUI startup, and packaging keep their existing behavior.
 
-This feature has a higher setup bar than the normal watcher. It is not a built-in hosted model; it forwards Feishu messages, newly captured NGA replies, and local context to an AI agent command running on your own machine. Install and sign in to Codex CLI, Claude Code CLI, or provide a custom command before enabling it. Simple installation examples:
+This feature has a higher setup bar than the normal watcher. It is not a built-in hosted model; it forwards Feishu messages, newly captured NGA replies, and local context to an AI agent command running on your own machine. Install and sign in to Codex CLI, Claude Code CLI, CodeWhale, or provide a custom command before enabling it. Simple installation examples:
 
 ```powershell
 # Codex CLI, requires Node/npm
@@ -25,6 +25,10 @@ codex
 # Claude Code CLI; Windows users can also check Anthropic's winget/install-script options
 npm install -g @anthropic-ai/claude-code
 claude
+
+# CodeWhale / DeepSeek TUI, requires Node/npm
+npm install -g codewhale
+codewhale auth set --provider deepseek
 ```
 
 AI-assisted market analysis is personal and workflow-dependent. This project only provides a local experiment surface: newly fetched wolf posts are saved under `events/wolf_history.jsonl` and `events/latest_event.json`; `context/positions.json`, `context/watchlist.md`, and `context/notes.md` are reserved for your positions, watchlist, and notes. One practical workflow is to send position screenshots or position notes to the AI, let it organize them locally, then keep discussing later actions, trading habits, current market conditions, and possible directions in the Feishu group. The AI can then combine wolf-post history, the market, your positions, and your own latest thoughts into analysis or suggestions.
@@ -373,6 +377,15 @@ $env:AI_CLAUDE_COMMAND = 'claude'
 python .\nga_feishu_watch.py --ws
 ```
 
+Enable CodeWhale:
+
+```powershell
+$env:AI_ENABLED = 'true'
+$env:AI_PROVIDER = 'codewhale'
+$env:AI_CODEWHALE_COMMAND = 'codewhale'
+python .\nga_feishu_watch.py --ws
+```
+
 Use a custom command:
 
 ```powershell
@@ -390,8 +403,10 @@ Model and reasoning effort:
 - The Feishu `/setting` card can override model/reasoning at runtime. Click `恢复默认模型/强度` to return to the GUI/startup defaults.
 - Codex model dropdown: `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.2`; reasoning effort: `low`, `medium`, `high`, `xhigh`.
 - Claude model dropdown: `default`, `sonnet[1m]`, `opus[1m]`, `haiku`; effort: `low`, `medium`, `high`, `xhigh`, `max`.
+- CodeWhale model dropdown: `deepseek-v4-flash`, `deepseek-v4-pro`, or `auto` for CodeWhale's router; reasoning effort: `auto`, `off`, `low`, `medium`, `high`, `max`.
 - Codex receives the model through `codex exec --model <model>` and receives reasoning effort through a Codex config override.
 - Claude Code receives the model through `claude --model <model>` and reasoning effort through `--effort <level>`.
+- CodeWhale runs in the background through `codewhale exec --output-format stream-json --auto`. The first turn captures CodeWhale's real saved session id from stream-json events, and later turns resume it with `--resume <id>`. The model is passed through `--model <model>`, and reasoning effort is passed through a temporary runtime config file.
 - Custom commands only receive `{model}` and `{reasoning_effort}` placeholders; they take effect only if your command template uses them.
 
 Auto-analyze new wolf posts:
@@ -473,14 +488,17 @@ AI_PROMPT_FILE=
 AI_TIMEOUT=300
 AI_CODEX_COMMAND=codex
 AI_CLAUDE_COMMAND=claude
+AI_CODEWHALE_COMMAND=codewhale
 AI_CUSTOM_COMMAND=
 AI_MODEL=
 AI_CODEX_MODEL=
 AI_CLAUDE_MODEL=
+AI_CODEWHALE_MODEL=
 AI_CUSTOM_MODEL=
 AI_REASONING_EFFORT=
 AI_CODEX_REASONING_EFFORT=
 AI_CLAUDE_EFFORT=
+AI_CODEWHALE_REASONING_EFFORT=
 AI_CUSTOM_REASONING_EFFORT=
 AI_IGNORE_CODEX_USER_CONFIG=false
 AI_SCHEDULE_ENABLED=false
@@ -525,10 +543,10 @@ Prompt behavior:
 - Plain Feishu messages are forwarded as-is to the local agent. General role and preferences live in `context/memory.md` / `AGENTS.md`, so the agent can read them when useful without injecting the same chat prompt every time.
 - Feishu image messages, rich-text images, and file attachments are downloaded into `attachments/`, then local absolute paths are passed to the agent. The Codex provider also sends each image with `--image <path>`. If you reply to a file message and ask the agent to read it, the watcher also tries to resolve the replied message's attachment.
 - AI messages from Feishu and WeChat that use the same AI work directory are processed through one local serial queue, so multiple messages do not concurrently resume the same local agent session.
-- `/mode` follows cc-connect-style permission modes. Sending `/mode` returns a clickable selection card. Codex supports `default`, `auto-edit`, `full-auto`, and `yolo`; Claude supports `default`, `acceptEdits`, `plan`, `auto`, `bypassPermissions`, and `dontAsk`. `/mode yolo` or a card button click is persisted in AI state and only affects later AI tasks; it does not rewrite startup arguments.
+- `/mode` follows cc-connect-style permission modes. Sending `/mode` returns a clickable selection card. Codex supports `default`, `auto-edit`, `full-auto`, and `yolo`; Claude supports `default`, `acceptEdits`, `plan`, `auto`, `bypassPermissions`, and `dontAsk`; CodeWhale supports `default`, `auto`, and `yolo`. `/mode yolo` or a card button click is persisted in AI state and only affects later AI tasks; it does not rewrite startup arguments.
 - While AI is processing a Feishu message, the bot temporarily adds a reaction to the source message as a "replying" status and removes it after completion or failure. Override the default with `AI_REPLY_STATUS_EMOJI`; if the Feishu app lacks reaction permission, this only logs a warning and does not block AI replies.
 - Scheduled analysis sends only the configured scheduled prompt; when empty, it uses the same concise default prompt as auto analysis.
-- Codex first tries `codex exec resume --last` to reuse the latest session under the AI work directory, then creates a new session only when none exists. Claude Code uses a stable `--session-id`, and custom commands can use `{session_id}`.
+- Codex first tries `codex exec resume --last` to reuse the latest session under the AI work directory, then creates a new session only when none exists. CodeWhale captures and stores the real session id from stream-json, then resumes with `--resume <id>`. Claude Code uses a stable `--session-id`, and custom commands can use `{session_id}`.
 
 Security notes:
 
@@ -539,7 +557,7 @@ Security notes:
 
 Troubleshooting:
 
-- `codex` or `claude` not found: install the tool locally or set `AI_CODEX_COMMAND` / `AI_CLAUDE_COMMAND` to the full command.
+- `codex`, `claude`, or `codewhale` not found: install the tool locally or set `AI_CODEX_COMMAND` / `AI_CLAUDE_COMMAND` / `AI_CODEWHALE_COMMAND` to the full command.
 - Timeout: increase `AI_TIMEOUT` or reduce the prompt/context size.
 - Empty output: check `logs/ai_agent.log`; stdout is used as a fallback if the output file is missing.
 - Feishu message too long: the default is truncated text. Set `AI_UPLOAD_LONG_RESULT=true` if you want long results uploaded as files.

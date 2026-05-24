@@ -131,6 +131,7 @@ DEFAULT_CONFIG = {
     "ai_timeout": "300",
     "ai_codex_command": "codex",
     "ai_claude_command": "claude",
+    "ai_codewhale_command": "codewhale",
     "ai_custom_command": "",
     "ai_model": "",
     "ai_reasoning_effort": "default",
@@ -617,6 +618,7 @@ def build_args(
         ai_timeout=int_value(config, "ai_timeout", 300),
         ai_codex_command=str(config.get("ai_codex_command") or "codex").strip(),
         ai_claude_command=str(config.get("ai_claude_command") or "claude").strip(),
+        ai_codewhale_command=str(config.get("ai_codewhale_command") or "codewhale").strip(),
         ai_custom_command=str(config.get("ai_custom_command") or "").strip(),
         ai_model=str(config.get("ai_model") or "").strip(),
         ai_reasoning_effort=str(config.get("ai_reasoning_effort") or "").strip(),
@@ -762,8 +764,8 @@ def validate_config(
         if str(config.get("quiet_policy") or "") not in {"ignore", "defer"}:
             errors.append("免打扰处理方式无效")
     provider = str(config.get("ai_provider") or "codex")
-    if provider not in {"codex", "claude", "custom"}:
-        errors.append("AI Provider 必须是 codex、claude 或 custom")
+    if provider not in {"codex", "claude", "codewhale", "custom"}:
+        errors.append("AI Provider 必须是 codex、claude、codewhale 或 custom")
     effort = str(config.get("ai_reasoning_effort") or "").strip().lower()
     if provider != "custom" and effort and not ai_analysis.is_valid_reasoning_effort(effort, provider):
         values = "、".join(["default", *ai_analysis.reasoning_effort_options(provider)])
@@ -937,6 +939,7 @@ class App:
                 "ai_timeout",
                 "ai_codex_command",
                 "ai_claude_command",
+                "ai_codewhale_command",
                 "ai_custom_command",
                 "ai_model",
                 "ai_reasoning_effort",
@@ -1892,7 +1895,7 @@ class App:
         ctk.CTkOptionMenu(
             frame,
             variable=self.vars["ai_provider"],
-            values=["codex", "claude", "custom"],
+            values=["codex", "claude", "codewhale", "custom"],
             height=34,
             fg_color="#f8fafc",
             button_color="#e2e8f0",
@@ -1949,6 +1952,7 @@ class App:
             ("AI 超时(秒)", "ai_timeout"),
             ("Codex 命令", "ai_codex_command"),
             ("Claude 命令", "ai_claude_command"),
+            ("CodeWhale 命令", "ai_codewhale_command"),
             ("Custom 命令模板", "ai_custom_command"),
             ("定时间隔(分钟)", "ai_schedule_interval_minutes"),
             ("定时 Prompt", "ai_schedule_prompt"),
@@ -2032,7 +2036,7 @@ class App:
 
     def update_ai_model_controls(self) -> None:
         provider = str(self.vars.get("ai_provider").get() if "ai_provider" in self.vars else "codex").strip().lower()
-        if provider in {"codex", "claude"}:
+        if provider in {"codex", "claude", "codewhale"}:
             model_values = ["default", "auto", *ai_analysis.model_options(provider)]
             reasoning_values = ["default", *ai_analysis.reasoning_effort_options(provider)]
             if self.ai_model_menu is not None:

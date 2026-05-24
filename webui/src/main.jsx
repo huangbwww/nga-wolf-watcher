@@ -59,7 +59,7 @@ const fieldGroups = {
   ],
   ai: [
     ["ai_enabled", "启用 AI", "checkbox"],
-    ["ai_provider", "Provider", "select", ["codex", "claude", "custom"]],
+    ["ai_provider", "Provider", "select", ["codex", "claude", "codewhale", "custom"]],
     ["ai_auto_analyze_new_post", "新帖自动分析", "checkbox"],
     ["ai_work_dir", "AI 工作目录", "text"],
     ["ai_auto_analysis_prompt", "自动分析提示词", "textarea"],

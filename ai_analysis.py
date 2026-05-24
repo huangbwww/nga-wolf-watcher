@@ -42,6 +42,8 @@ CODEX_MODEL_OPTIONS = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "g
 CLAUDE_MODEL_OPTIONS = ["sonnet[1m]", "opus[1m]", "haiku"]
 CODEX_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 CLAUDE_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+CODEWHALE_MODEL_OPTIONS = ["deepseek-v4-flash", "deepseek-v4-pro"]
+CODEWHALE_REASONING_EFFORTS = {"auto", "off", "low", "medium", "high", "max"}
 
 DEFAULT_AUTO_ANALYSIS_PROMPT = "根据最新的 NGA 回复历史、我目前的持仓信息和观察列表，并实时查询公开 A 股行情信息，分析盘面变化、机会与风险，给出接下来需要重点观察的方向和操作建议。"
 DEFAULT_STOCK_ANALYSIS_PROMPT = DEFAULT_AUTO_ANALYSIS_PROMPT
@@ -105,6 +107,8 @@ def provider_model_env(provider: str) -> str:
         return os.getenv("AI_CODEX_MODEL", "")
     if provider == "claude":
         return os.getenv("AI_CLAUDE_MODEL", "")
+    if provider == "codewhale":
+        return os.getenv("AI_CODEWHALE_MODEL", "")
     return os.getenv("AI_CUSTOM_MODEL", "")
 
 
@@ -116,6 +120,8 @@ def provider_reasoning_env(provider: str) -> str:
         return os.getenv("AI_CODEX_REASONING_EFFORT", "")
     if provider == "claude":
         return os.getenv("AI_CLAUDE_EFFORT", "")
+    if provider == "codewhale":
+        return os.getenv("AI_CODEWHALE_REASONING_EFFORT", "")
     return os.getenv("AI_CUSTOM_REASONING_EFFORT", "")
 
 
@@ -131,6 +137,8 @@ def model_options(provider: str = "codex") -> list[str]:
         return list(CLAUDE_MODEL_OPTIONS)
     if provider == "codex":
         return list(CODEX_MODEL_OPTIONS)
+    if provider == "codewhale":
+        return list(CODEWHALE_MODEL_OPTIONS)
     return []
 
 
@@ -152,6 +160,8 @@ def reasoning_effort_options(provider: str = "codex") -> list[str]:
         return sorted(CLAUDE_REASONING_EFFORTS, key=["low", "medium", "high", "xhigh", "max"].index)
     if provider == "codex":
         return sorted(CODEX_REASONING_EFFORTS, key=["low", "medium", "high", "xhigh"].index)
+    if provider == "codewhale":
+        return sorted(CODEWHALE_REASONING_EFFORTS, key=["auto", "off", "low", "medium", "high", "max"].index)
     return []
 
 
@@ -161,7 +171,9 @@ def reasoning_effort_label(provider: str, value: str) -> str:
 
 def normalize_reasoning_effort(raw: str, provider: str = "codex") -> str:
     text = str(raw or "").strip().lower()
-    if text in {"", "default", "auto", "unset"}:
+    if text in {"", "default", "unset"}:
+        return ""
+    if text == "auto" and provider != "codewhale":
         return ""
     options = reasoning_effort_options(provider)
     if options and text not in options:
@@ -189,6 +201,7 @@ class AIConfig:
     timeout: int = DEFAULT_TIMEOUT
     codex_command: str = "codex"
     claude_command: str = "claude"
+    codewhale_command: str = "codewhale"
     custom_command: str = ""
     schedule_enabled: bool = False
     schedule_interval_minutes: int = 5
@@ -207,7 +220,7 @@ class AIConfig:
     @classmethod
     def from_namespace(cls, args: argparse.Namespace) -> "AIConfig":
         provider = str(getattr(args, "ai_provider", os.getenv("AI_PROVIDER", DEFAULT_PROVIDER)) or DEFAULT_PROVIDER).lower()
-        if provider not in {"codex", "claude", "custom"}:
+        if provider not in {"codex", "claude", "codewhale", "custom"}:
             provider = DEFAULT_PROVIDER
         raw_model = getattr(args, "ai_model", None)
         if raw_model is None or not str(raw_model).strip():
@@ -232,6 +245,7 @@ class AIConfig:
             timeout=safe_int(getattr(args, "ai_timeout", os.getenv("AI_TIMEOUT", DEFAULT_TIMEOUT)), DEFAULT_TIMEOUT, 1),
             codex_command=str(getattr(args, "ai_codex_command", os.getenv("AI_CODEX_COMMAND", "codex")) or "codex"),
             claude_command=str(getattr(args, "ai_claude_command", os.getenv("AI_CLAUDE_COMMAND", "claude")) or "claude"),
+            codewhale_command=str(getattr(args, "ai_codewhale_command", os.getenv("AI_CODEWHALE_COMMAND", "codewhale")) or "codewhale"),
             custom_command=str(getattr(args, "ai_custom_command", os.getenv("AI_CUSTOM_COMMAND", "")) or ""),
             schedule_enabled=bool_value(getattr(args, "ai_schedule_enabled", env_bool("AI_SCHEDULE_ENABLED", False))),
             schedule_interval_minutes=safe_int(
@@ -310,7 +324,7 @@ class AIResult:
 
 def add_cli_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--ai-enabled", action="store_true", default=env_bool("AI_ENABLED", False))
-    parser.add_argument("--ai-provider", choices=["codex", "claude", "custom"], default=os.getenv("AI_PROVIDER", DEFAULT_PROVIDER))
+    parser.add_argument("--ai-provider", choices=["codex", "claude", "codewhale", "custom"], default=os.getenv("AI_PROVIDER", DEFAULT_PROVIDER))
     parser.add_argument("--ai-work-dir", default=os.getenv("AI_WORK_DIR", DEFAULT_WORK_DIR))
     parser.add_argument("--ai-auto-analyze-new-post", action="store_true", default=env_bool("AI_AUTO_ANALYZE_NEW_POST", False))
     parser.add_argument("--ai-auto-analysis-prompt", default=os.getenv("AI_AUTO_ANALYSIS_PROMPT", ""))
@@ -319,6 +333,7 @@ def add_cli_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--ai-timeout", type=int, default=int(os.getenv("AI_TIMEOUT", str(DEFAULT_TIMEOUT))))
     parser.add_argument("--ai-codex-command", default=os.getenv("AI_CODEX_COMMAND", "codex"))
     parser.add_argument("--ai-claude-command", default=os.getenv("AI_CLAUDE_COMMAND", "claude"))
+    parser.add_argument("--ai-codewhale-command", default=os.getenv("AI_CODEWHALE_COMMAND", "codewhale"))
     parser.add_argument("--ai-custom-command", default=os.getenv("AI_CUSTOM_COMMAND", ""))
     parser.add_argument("--ai-schedule-enabled", action="store_true", default=env_bool("AI_SCHEDULE_ENABLED", False))
     parser.add_argument("--ai-schedule-interval-minutes", type=int, default=int(os.getenv("AI_SCHEDULE_INTERVAL_MINUTES", "5")))
@@ -540,7 +555,7 @@ def source_index_summary(work_dir: Path) -> str:
         return ""
     lines = [
         "NGA author history files:",
-        f"- source index: {index_path}",
+        f"- source index: {index_path.resolve()}",
     ]
     for item in sorted(sources.values(), key=lambda value: str(value.get("label") or value.get("source_id") or "")):
         if not isinstance(item, dict):
@@ -565,7 +580,7 @@ def source_index_summary(work_dir: Path) -> str:
                     hints.append(watch_source_id)
             if hints:
                 watch_hint = "; watch sources: " + " | ".join(hints)
-        lines.append(f"- {label} ({author_source_id}): {history_file}; aliases: {aliases}{watch_hint}")
+        lines.append(f"- {label} ({author_source_id}): {history_file.resolve()}; aliases: {aliases}{watch_hint}")
     lines.append("If the user names a source label such as 狼大 or 海, read that author's history file first, then use the global history only for comparison.")
     return "\n".join(lines)
 
@@ -792,6 +807,12 @@ def normalize_permission_mode(raw: str, provider: str = "codex") -> str:
         if lower in {"dontask", "dont-ask", "deny"}:
             return "dontAsk"
         return "default"
+    if provider == "codewhale":
+        if lower in {"auto", "full-auto", "fullauto", "auto-edit", "autoedit", "edit", "accept-edits", "acceptedits"}:
+            return "auto"
+        if lower in {"yolo", "bypass", "dangerously-bypass", "bypasspermissions", "bypass-permissions"}:
+            return "yolo"
+        return "default"
     if lower in {"auto-edit", "autoedit", "edit", "accept-edits", "acceptedits"}:
         return "auto-edit"
     if lower in {"full-auto", "fullauto", "auto"}:
@@ -810,6 +831,12 @@ def permission_mode_options(provider: str = "codex") -> list[tuple[str, str]]:
             ("auto", "由 Claude 自动判断何时请求确认"),
             ("bypassPermissions", "跳过权限确认"),
             ("dontAsk", "未预授权工具自动拒绝"),
+        ]
+    if provider == "codewhale":
+        return [
+            ("default", "后台非交互执行，使用 CodeWhale exec 自动处理本地上下文"),
+            ("auto", "显式启用 CodeWhale agentic exec 模式"),
+            ("yolo", "显式使用 CodeWhale 自动执行模式"),
         ]
     return [
         ("default", "默认只读/按 Codex 默认策略请求确认"),
@@ -842,6 +869,9 @@ class BaseRunner:
     def stdin_prompt(self, prompt_text: str) -> str | None:
         return None
 
+    def result_text_from_stdout(self, stdout: str, task: AITask) -> str:
+        return stdout.strip()
+
     def build_env(self, task: AITask) -> dict[str, str]:
         env = dict(os.environ)
         if self.provider == "codex" and os.name == "nt":
@@ -861,7 +891,7 @@ class BaseRunner:
         started = time.time()
         started_at = utcish_now()
         result = AIResult(False, self.provider, task.task_type, task.output_file, started_at=started_at)
-        short_prompt = f"Read and follow the full task prompt in {prompt_file}."
+        short_prompt = f"Read and follow the full task prompt in {prompt_file.resolve()}."
         try:
             stdin_data = self.stdin_prompt(prompt_text)
             commands = self.build_commands(task, prompt_file, short_prompt)
@@ -910,9 +940,10 @@ class BaseRunner:
                 if task.output_file.exists():
                     result.text = task.output_file.read_text(encoding="utf-8", errors="replace").strip()
                 elif completed.stdout.strip():
-                    result.text = completed.stdout.strip()
+                    result.text = self.result_text_from_stdout(completed.stdout, task)
                     task.output_file.parent.mkdir(parents=True, exist_ok=True)
-                    task.output_file.write_text(result.text + "\n", encoding="utf-8")
+                    if result.text:
+                        task.output_file.write_text(result.text + "\n", encoding="utf-8")
                 if completed.returncode == 0 and result.text:
                     result.ok = True
                     result.error = ""
@@ -984,6 +1015,9 @@ def resolve_executable(command: list[str], provider: str) -> list[str]:
                 candidates.append(Path(appdata) / "npm" / "codex.cmd")
         elif provider == "claude" and appdata:
             candidates.append(Path(appdata) / "npm" / "claude.cmd")
+        elif provider == "codewhale" and appdata:
+            candidates.append(Path(appdata) / "npm" / "codewhale.cmd")
+            candidates.append(Path(appdata) / "npm" / "deepseek.cmd")
         for candidate in candidates:
             if candidate.exists():
                 return [str(candidate), *command[1:]]
@@ -1160,6 +1194,158 @@ class ClaudeRunner(BaseRunner):
         return command
 
 
+class CodeWhaleRunner(BaseRunner):
+    provider = "codewhale"
+
+    def _state_path(self, task: AITask) -> Path:
+        return task.work_dir / "state.json"
+
+    def _saved_session_id(self, task: AITask) -> str:
+        state = read_json(self._state_path(task), {})
+        if not isinstance(state, dict):
+            return ""
+        return str(state.get("codewhale_session_id") or "").strip()
+
+    def _save_session_id(self, task: AITask, session_id: str) -> None:
+        session_id = str(session_id or "").strip()
+        if not session_id:
+            return
+        state = read_json(self._state_path(task), {})
+        if not isinstance(state, dict):
+            state = {}
+        state["codewhale_session_id"] = session_id
+        state["codewhale_session_updated_at"] = utcish_now()
+        write_json(self._state_path(task), state)
+
+    def _model_args(self, task: AITask) -> list[str]:
+        model = normalize_model(str(task.metadata.get("model") or self.config.model or ""))
+        return ["--model", model] if model else []
+
+    def _has_model_arg(self, task: AITask) -> bool:
+        model = normalize_model(str(task.metadata.get("model") or self.config.model or ""))
+        return bool(model)
+
+    def _reasoning_config_path(self, task: AITask) -> Path:
+        existing = str(task.metadata.get("_codewhale_runtime_config_path") or "")
+        if existing:
+            return Path(existing)
+        path = Path(tempfile.gettempdir()) / f"{SOURCE_NAME}_codewhale_{safe_key(task.task_type)}_{uuid.uuid4().hex}.toml"
+        task.metadata["_codewhale_runtime_config_path"] = str(path)
+        return path
+
+    def _reasoning_config_args(self, task: AITask) -> list[str]:
+        effort = normalize_reasoning_effort(
+            str(task.metadata.get("reasoning_effort") or self.config.reasoning_effort or ""),
+            "codewhale",
+        )
+        if not effort:
+            return []
+        path = self._reasoning_config_path(task)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"reasoning_effort = {json.dumps(effort, ensure_ascii=False)}\n", encoding="utf-8")
+        return ["--config", str(path)]
+
+    def build_command(
+        self,
+        task: AITask,
+        prompt_file: Path,
+        short_prompt: str,
+        *,
+        session_id: str = "",
+        allow_model: bool = True,
+        allow_reasoning: bool = True,
+    ) -> list[str]:
+        base = split_command_line(self.config.codewhale_command)
+        command = [*base]
+        if allow_reasoning:
+            command.extend(self._reasoning_config_args(task))
+        command.extend([
+            "exec",
+            "--output-format",
+            "stream-json",
+            "--auto",
+        ])
+        if session_id:
+            command.extend(["--resume", session_id])
+        if allow_model:
+            command.extend(self._model_args(task))
+        command.append(short_prompt)
+        return command
+
+    def build_commands(self, task: AITask, prompt_file: Path, short_prompt: str) -> list[list[str]]:
+        session_id = self._saved_session_id(task)
+        commands = [
+            self.build_command(task, prompt_file, short_prompt, session_id=session_id, allow_model=True, allow_reasoning=True),
+        ]
+        if self._has_model_arg(task):
+            commands.append(self.build_command(task, prompt_file, short_prompt, session_id=session_id, allow_model=False, allow_reasoning=True))
+        if session_id:
+            commands.append(self.build_command(task, prompt_file, short_prompt, session_id="", allow_model=True, allow_reasoning=True))
+        if self._has_model_arg(task):
+            commands.append(self.build_command(task, prompt_file, short_prompt, session_id="", allow_model=False, allow_reasoning=True))
+        if self._reasoning_config_args(task):
+            commands.append(self.build_command(task, prompt_file, short_prompt, session_id=session_id, allow_model=True, allow_reasoning=False))
+        return commands
+
+    def result_text_from_stdout(self, stdout: str, task: AITask) -> str:
+        parts: list[str] = []
+        session_id = ""
+        for line in stdout.splitlines():
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                event = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            event_type = str(event.get("type") or event.get("event") or "").strip()
+            if event_type == "content":
+                parts.append(str(event.get("content") or ""))
+            elif event_type == "session_capture":
+                session_id = str(event.get("content") or "").strip() or session_id
+            elif event_type == "metadata":
+                meta = event.get("meta")
+                if isinstance(meta, dict):
+                    session_id = str(meta.get("session_id") or "").strip() or session_id
+        if session_id:
+            self._save_session_id(task, session_id)
+        return "".join(parts).strip()
+
+    def should_try_next_command(self, completed: subprocess.CompletedProcess[str], result: AIResult) -> bool:
+        output = f"{completed.stdout}\n{completed.stderr}".lower()
+        return completed.returncode != 0 and any(
+            pattern in output
+            for pattern in (
+                "no sessions",
+                "no session",
+                "not found",
+                "could not find",
+                "not a valid session",
+                "could not load session",
+                "resume",
+                "continue",
+                "unexpected argument",
+                "unknown argument",
+                "invalid model",
+                "unknown model",
+                "model_not_found",
+            )
+        )
+
+    def run(self, task: AITask, prompt_file: Path, prompt_text: str, logger: logging.Logger) -> AIResult:
+        try:
+            return super().run(task, prompt_file, prompt_text, logger)
+        finally:
+            config_path = str(task.metadata.pop("_codewhale_runtime_config_path", "") or "")
+            if config_path:
+                try:
+                    Path(config_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+
 class CustomCommandRunner(BaseRunner):
     provider = "custom"
 
@@ -1195,6 +1381,8 @@ def shared_session_id(work_dir: Path) -> str:
 def runner_for(config: AIConfig) -> BaseRunner:
     if config.provider == "claude":
         return ClaudeRunner(config)
+    if config.provider == "codewhale":
+        return CodeWhaleRunner(config)
     if config.provider == "custom":
         return CustomCommandRunner(config)
     return CodexRunner(config)
@@ -1433,8 +1621,8 @@ class AIManager:
     def local_history_context(self) -> str:
         lines = [
             "Local NGA context files:",
-            f"- latest event: {self.latest_event_path}",
-            f"- global history: {self.history_file}",
+            f"- latest event: {self.latest_event_path.resolve()}",
+            f"- global history: {self.history_file.resolve()}",
         ]
         summary = source_index_summary(self.config.work_dir)
         if summary:
