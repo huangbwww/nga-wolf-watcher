@@ -31,7 +31,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='NGA-Wolf-Watcher',
+    name='NGA-Wolf-Watcher-Classic',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
