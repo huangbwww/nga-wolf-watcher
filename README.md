@@ -276,9 +276,9 @@ python .\nga_wolf_gui.py
 Run the pywebview + React preview UI:
 
 ```powershell
-python -m pip install pywebview
+python -m pip install pywebview pystray pillow
 cd .\webui
-npm.cmd install
+npm.cmd ci
 npm.cmd run build
 cd ..
 python .\nga_wolf_webgui.py
@@ -573,10 +573,10 @@ To package the pywebview preview UI, build the frontend first, install/collect `
 
 ```powershell
 cd .\webui
-npm.cmd install
+npm.cmd ci
 npm.cmd run build
 cd ..
-python -m pip install pywebview pyinstaller
+python -m pip install pywebview pystray pillow pyinstaller
 python -m PyInstaller --noconfirm --clean .\NGA-Wolf-Watcher-Web.spec
 ```
 

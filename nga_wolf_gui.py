@@ -56,6 +56,23 @@ ROUTE_CHANNEL_LABELS = {
 }
 ROUTE_CHANNEL_VALUES = {label: value for value, label in ROUTE_CHANNEL_LABELS.items()}
 
+FEISHU_ID_TYPE_LABELS = {
+    "chat_id": "群聊 chat_id（推荐）",
+    "open_id": "单个用户 open_id",
+    "user_id": "单个用户 user_id",
+    "union_id": "单个用户 union_id",
+}
+FEISHU_ID_TYPE_VALUES = {label: value for value, label in FEISHU_ID_TYPE_LABELS.items()}
+
+
+def feishu_id_type_label(value: str) -> str:
+    return FEISHU_ID_TYPE_LABELS.get(str(value or "chat_id"), str(value or "chat_id"))
+
+
+def feishu_id_type_value(label: str) -> str:
+    text = str(label or "chat_id")
+    return FEISHU_ID_TYPE_VALUES.get(text, text if text in FEISHU_ID_TYPE_LABELS else "chat_id")
+
 
 DEFAULT_CONFIG = {
     "bot_channel": "feishu",
@@ -77,8 +94,8 @@ DEFAULT_CONFIG = {
     "default_author_id": "150058",
     "default_tid": "45974302",
     "watch_mode": "author",
-    "watch_author_ids": "",
-    "preset_thread_ids": "",
+    "watch_author_ids": "150058=狼大",
+    "preset_thread_ids": "45974302=自立自强，科学技术打头阵",
     "thread_author_watches": "",
     "push_targets": "[]",
     "listen_rules": "[]",
@@ -1902,15 +1919,6 @@ class App:
             text_color=TEXT,
         )
         self.update_ai_model_controls()
-        ctk.CTkSwitch(
-            frame,
-            text="忽略 Codex 用户配置",
-            variable=self.ai_ignore_codex_user_config_var,
-            fg_color="#cbd5e1",
-            progress_color=PRIMARY,
-            button_color="#ffffff",
-            text_color=TEXT,
-        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=16, pady=(6, 8))
         fields = [
             ("自动分析 Prompt", "ai_auto_analysis_prompt"),
             ("AI 工作目录", "ai_work_dir"),
@@ -1923,9 +1931,9 @@ class App:
             ("允许用户 ID", "ai_allowed_user_ids"),
             ("飞书最大字符", "ai_max_feishu_chars"),
         ]
-        for offset, (label, key) in enumerate(fields, start=7):
+        for offset, (label, key) in enumerate(fields, start=6):
             self.add_entry(frame, label, key, offset)
-        window_row = 7 + len(fields)
+        window_row = 6 + len(fields)
         ctk.CTkLabel(frame, text="定时窗口", anchor="w", text_color=TEXT).grid(row=window_row, column=0, sticky="w", padx=16, pady=(6, 8))
         window_frame = ctk.CTkFrame(frame, fg_color="transparent")
         window_frame.grid(row=window_row, column=1, sticky="ew", padx=(0, 16), pady=(6, 8))
@@ -2332,9 +2340,32 @@ class App:
         if not (0 <= index < len(profiles)):
             self.set_action_feedback("请先选择一个配置组。")
             return
+        removed_profile_id = str(profiles[index].get("id") or "").strip()
         profiles.pop(index)
+        removed_target_ids: set[str] = set()
+        if removed_profile_id:
+            kept_targets: list[dict[str, Any]] = []
+            for target in self.push_targets:
+                target_channel = str(target.get("channel") or "feishu")
+                if target_channel == kind and str(target.get("profile_id") or "").strip() == removed_profile_id:
+                    target_id = str(target.get("id") or "").strip()
+                    if target_id:
+                        removed_target_ids.add(target_id)
+                else:
+                    kept_targets.append(target)
+            self.push_targets = kept_targets
+        if removed_target_ids:
+            for rule in self.listen_rules:
+                if isinstance(rule.get("target_ids"), list):
+                    rule["target_ids"] = [target_id for target_id in rule["target_ids"] if str(target_id) not in removed_target_ids]
+            self.ai_schedule_selected_target_ids = [
+                target_id for target_id in self.ai_schedule_selected_target_ids if target_id not in removed_target_ids
+            ]
         self.set_selected_profile_index(kind, min(index, len(profiles) - 1))
         self.refresh_profile_list(kind)
+        self.refresh_push_target_list()
+        self.refresh_listen_rule_list()
+        self.refresh_ai_schedule_target_list()
         self.mark_dirty()
 
     def profile_dialog(self, kind: str, edit_index: int | None = None) -> None:
@@ -2357,14 +2388,26 @@ class App:
         if kind == "feishu":
             app_id_var = StringVar(value=str(current.get("app_id") or ""))
             app_secret_var = StringVar(value=str(current.get("app_secret") or ""))
-            id_type_var = StringVar(value=str(current.get("id_type") or "chat_id"))
+            id_type_var = StringVar(value=feishu_id_type_label(str(current.get("id_type") or "chat_id")))
             profile_chats = list(current.get("chats") if isinstance(current.get("chats"), list) else [])
             test_chat_var = StringVar(value=chat_label(profile_chats[0]) if profile_chats else "")
-            search_chat_var = StringVar(value="")
             for label, var, secret in [("App ID", app_id_var, False), ("App Secret", app_secret_var, True)]:
                 ctk.CTkLabel(window, text=label, anchor="w", text_color=TEXT).grid(row=row, column=0, sticky="w", padx=18, pady=6)
                 ctk.CTkEntry(window, textvariable=var, show="*" if secret else "", height=34, corner_radius=10, fg_color="#f8fafc", border_width=1, border_color=BORDER).grid(row=row, column=1, sticky="ew", padx=(0, 18), pady=6)
                 row += 1
+            ctk.CTkLabel(window, text="ID 类型", anchor="w", text_color=TEXT).grid(row=row, column=0, sticky="w", padx=18, pady=6)
+            ctk.CTkOptionMenu(
+                window,
+                variable=id_type_var,
+                values=list(FEISHU_ID_TYPE_LABELS.values()),
+                height=34,
+                fg_color="#f8fafc",
+                button_color="#e2e8f0",
+                button_hover_color="#cbd5e1",
+                dropdown_fg_color="#ffffff",
+                text_color=TEXT,
+            ).grid(row=row, column=1, sticky="ew", padx=(0, 18), pady=6)
+            row += 1
             ctk.CTkLabel(window, text="测试群", anchor="w", text_color=TEXT).grid(row=row, column=0, sticky="w", padx=18, pady=6)
             test_chat_box = ctk.CTkComboBox(
                 window,
@@ -2378,18 +2421,6 @@ class App:
             )
             test_chat_box.grid(row=row, column=1, sticky="ew", padx=(0, 18), pady=6)
             row += 1
-            ctk.CTkLabel(window, text="搜索群名", anchor="w", text_color=TEXT).grid(row=row, column=0, sticky="w", padx=18, pady=6)
-            ctk.CTkEntry(
-                window,
-                textvariable=search_chat_var,
-                placeholder_text="新群没出现时，输入群名再查询",
-                height=34,
-                corner_radius=10,
-                fg_color="#f8fafc",
-                border_width=1,
-                border_color=BORDER,
-            ).grid(row=row, column=1, sticky="ew", padx=(0, 18), pady=6)
-            row += 1
 
             def make_feishu_profile() -> dict[str, Any] | None:
                 app_id = app_id_var.get().strip()
@@ -2398,7 +2429,7 @@ class App:
                     feedback_var.set("App ID 和 App Secret 必填。")
                     return None
                 profile = dict(current)
-                profile.update({"label": label_var.get().strip(), "app_id": app_id, "app_secret": app_secret, "id_type": id_type_var.get().strip() or "chat_id"})
+                profile.update({"label": label_var.get().strip(), "app_id": app_id, "app_secret": app_secret, "id_type": feishu_id_type_value(id_type_var.get())})
                 profile["id"] = ensure_profile_id("feishu", profile)
                 profile["chats"] = list(profile_chats)
                 return profile
@@ -2427,12 +2458,11 @@ class App:
                 profile = make_feishu_profile()
                 if profile is None:
                     return
-                search_query = search_chat_var.get().strip()
-                feedback_var.set("正在搜索群组..." if search_query else "正在查询群组...")
+                feedback_var.set("正在查询群组...")
 
                 def worker() -> None:
                     try:
-                        chats = nga_feishu_watch.list_feishu_chats(profile["app_id"], profile["app_secret"], int_value(self.config, "timeout", 20), search_query)
+                        chats = nga_feishu_watch.list_feishu_chats(profile["app_id"], profile["app_secret"], int_value(self.config, "timeout", 20))
                         cleaned = nga_feishu_watch.merge_feishu_chats(chats)
 
                         def apply() -> None:
@@ -3656,7 +3686,7 @@ class App:
         receive_var = StringVar(value=current.feishu_receive_id if current else "")
         app_id_var = StringVar(value=current.feishu_app_id if current else "")
         app_secret_var = StringVar(value=current.feishu_app_secret if current else "")
-        id_type_var = StringVar(value=current.feishu_id_type if current else "chat_id")
+        id_type_var = StringVar(value=feishu_id_type_label(current.feishu_id_type if current else "chat_id"))
         channel_var = StringVar(value=route_channel_label(current.route_channel if current and current.route_channel else ("feishu" if current and current.feishu_receive_id else "")))
         feishu_profile_var = StringVar(value=self.profile_option_for_id("feishu", current.route_profile_id if current else ""))
         wechat_profile_var = StringVar(value=self.profile_option_for_id("wechat", current.route_profile_id if current else ""))
@@ -3705,7 +3735,7 @@ class App:
         ctk.CTkOptionMenu(
             window,
             variable=id_type_var,
-            values=["chat_id", "open_id", "union_id", "user_id"],
+            values=list(FEISHU_ID_TYPE_LABELS.values()),
             height=34,
             fg_color="#f8fafc",
             button_color="#e2e8f0",
@@ -3769,7 +3799,7 @@ class App:
                 feishu_app_id=app_id,
                 feishu_app_secret=app_secret,
                 feishu_receive_id=receive_id,
-                feishu_id_type=id_type_var.get().strip() or "chat_id",
+                feishu_id_type=feishu_id_type_value(id_type_var.get()),
             )
             if editing and edit_index is not None:
                 self.thread_author_watches[edit_index] = watch
@@ -3869,6 +3899,10 @@ class App:
             config["feishu_app_id"] = str(profile.get("app_id") or "").strip()
             config["feishu_app_secret"] = str(profile.get("app_secret") or "").strip()
             config["feishu_id_type"] = str(profile.get("id_type") or "chat_id").strip() or "chat_id"
+        else:
+            config["feishu_app_id"] = ""
+            config["feishu_app_secret"] = ""
+            config["feishu_id_type"] = "chat_id"
         if self.wechat_profiles:
             profile = self.wechat_profiles[0]
             config["wechat_bot_token"] = str(profile.get("token") or "").strip()
@@ -3879,16 +3913,31 @@ class App:
             config["wechat_bot_poll_timeout_ms"] = str(profile.get("poll_timeout_ms") or "35000").strip()
             config["wechat_bot_route_tag"] = str(profile.get("route_tag") or "").strip()
             config["wechat_bot_account_id"] = str(profile.get("account_id") or "default").strip() or "default"
-        author_targets = nga_feishu_watch.parse_target_list(config.get("watch_author_ids"), str(config.get("default_author_id") or "150058").strip())
-        thread_targets = nga_feishu_watch.parse_target_list(config.get("preset_thread_ids"), str(config.get("default_tid") or "45974302").strip())
+        else:
+            config["wechat_bot_token"] = ""
+            config["wechat_bot_base_url"] = "https://ilinkai.weixin.qq.com"
+            config["wechat_bot_cdn_base_url"] = "https://novac2c.cdn.weixin.qq.com/c2c"
+            config["wechat_bot_target_user_id"] = ""
+            config["wechat_bot_allowed_user_ids"] = ""
+            config["wechat_bot_poll_timeout_ms"] = "35000"
+            config["wechat_bot_route_tag"] = ""
+            config["wechat_bot_account_id"] = "default"
+        first_feishu_target = next((target for target in self.push_targets if str(target.get("channel") or "feishu") == "feishu"), None)
+        config["feishu_receive_id"] = str(first_feishu_target.get("receive_id") or "").strip() if first_feishu_target else ""
+        if first_feishu_target and str(first_feishu_target.get("id_type") or "").strip():
+            config["feishu_id_type"] = str(first_feishu_target.get("id_type") or "chat_id").strip() or "chat_id"
+        author_text = str(config.get("watch_author_ids") or "").strip()
+        thread_text = str(config.get("preset_thread_ids") or "").strip()
+        author_targets = nga_feishu_watch.parse_target_list(author_text, "")
+        thread_targets = nga_feishu_watch.parse_target_list(thread_text, "")
         if author_targets:
             config["default_author_id"] = author_targets[0].id
-            if not str(config.get("watch_author_ids") or "").strip():
-                config["watch_author_ids"] = author_targets[0].id
+        else:
+            config["default_author_id"] = ""
         if thread_targets:
             config["default_tid"] = thread_targets[0].id
-            if not str(config.get("preset_thread_ids") or "").strip():
-                config["preset_thread_ids"] = thread_targets[0].id
+        else:
+            config["default_tid"] = ""
         config["auto_mark_seen_first_start"] = self.auto_init_var.get()
         config["quiet_hours_enabled"] = self.quiet_enabled_var.get()
         config["quiet_start_day"] = str(weekday_index(self.quiet_start_day_var.get()))

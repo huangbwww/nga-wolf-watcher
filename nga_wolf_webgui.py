@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -20,6 +21,8 @@ import wechat_bot
 APP_TITLE = "NGA Wolf Watcher Preview"
 _ACTIVE_WINDOW: Any | None = None
 _CLOSE_CONFIRMED = False
+_TRAY_ICON: Any | None = None
+_TRAY_LOCK = threading.Lock()
 
 
 def _set_active_window(window: Any | None) -> None:
@@ -31,22 +34,93 @@ def _set_active_window(window: Any | None) -> None:
 def _request_frontend_close_dialog() -> bool | None:
     if _CLOSE_CONFIRMED:
         return None
+    _trigger_frontend_close("nga-close-request-trigger")
+    return False
+
+
+def _trigger_frontend_close(element_id: str) -> None:
     window = _ACTIVE_WINDOW
     if window is None:
-        return None
+        return
 
     def show_dialog() -> None:
         time.sleep(0.05)
         try:
+            window.show()
+            window.restore()
+        except Exception:
+            pass
+        try:
             window.evaluate_js(
-                "(function(){var el=document.getElementById('nga-close-request-trigger');"
+                f"(function(){{var el=document.getElementById('{element_id}');"
                 "if(el){el.click();}})()"
             )
         except Exception:
             pass
 
     threading.Thread(target=show_dialog, daemon=True).start()
-    return False
+
+
+def _load_tray_image() -> Any | None:
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    for path in (resource_dir() / "assets" / "app_icon.png", app_icon_path()):
+        if not path.exists():
+            continue
+        try:
+            return Image.open(path).convert("RGBA")
+        except Exception:
+            continue
+    return None
+
+
+def _ensure_tray_icon(api: "PreviewApi") -> bool:
+    global _TRAY_ICON
+    with _TRAY_LOCK:
+        if _TRAY_ICON is not None:
+            return True
+        try:
+            import pystray
+        except ImportError:
+            return False
+        image = _load_tray_image()
+        if image is None:
+            return False
+
+        def show_window(icon: Any = None, item: Any = None) -> None:
+            window = _ACTIVE_WINDOW
+            if window is None:
+                return
+            try:
+                window.show()
+                window.restore()
+            except Exception:
+                pass
+
+        def request_exit(icon: Any = None, item: Any = None) -> None:
+            _trigger_frontend_close("nga-tray-exit-trigger")
+
+        menu = pystray.Menu(
+            pystray.MenuItem("显示窗口", show_window, default=True),
+            pystray.MenuItem("退出程序", request_exit),
+        )
+        _TRAY_ICON = pystray.Icon("NGA Wolf Watcher", image, APP_TITLE, menu)
+        threading.Thread(target=_TRAY_ICON.run, daemon=True).start()
+        return True
+
+
+def _stop_tray_icon() -> None:
+    global _TRAY_ICON
+    with _TRAY_LOCK:
+        icon = _TRAY_ICON
+        _TRAY_ICON = None
+    if icon is not None:
+        try:
+            icon.stop()
+        except Exception:
+            pass
 
 
 class WebViewShutdownNoiseFilter(logging.Filter):
@@ -58,6 +132,8 @@ class WebViewShutdownNoiseFilter(logging.Filter):
         if record.exc_info and record.exc_info[1]:
             exc_text = str(record.exc_info[1])
         combined = f"{message}\n{exc_text}"
+        if "Failed to delete user data folder" in combined:
+            return False
         if "ObjectDisposedException" in combined and "WebView2" in combined:
             return False
         if "无法访问已释放的对象" in combined and "WebView2" in combined:
@@ -75,6 +151,10 @@ def webui_index_path() -> Path:
     return resource_dir() / "webui" / "dist" / "index.html"
 
 
+def app_icon_path() -> Path:
+    return resource_dir() / "assets" / "app_icon.ico"
+
+
 def fallback_html() -> str:
     return """<!doctype html>
 <meta charset="utf-8">
@@ -87,8 +167,28 @@ code{background:#f3f4f6;padding:2px 6px;border-radius:6px}
 <main>
   <h1>NGA Wolf Watcher Preview</h1>
   <p>The React preview UI has not been built yet.</p>
-  <p>Run <code>npm.cmd install</code> and <code>npm.cmd run build</code> in <code>webui</code>, then reopen this preview.</p>
+  <p>Run <code>npm.cmd ci</code> and <code>npm.cmd run build</code> in <code>webui</code>, then reopen this preview.</p>
 </main>"""
+
+
+def build_webui_if_needed(index_path: Path) -> None:
+    if index_path.exists() or getattr(sys, "frozen", False):
+        return
+    webui_dir = resource_dir() / "webui"
+    package_lock = webui_dir / "package-lock.json"
+    package_json = webui_dir / "package.json"
+    if not package_json.exists() or not package_lock.exists():
+        return
+    npm = shutil.which("npm.cmd" if sys.platform == "win32" else "npm")
+    if not npm:
+        return
+    env = os.environ.copy()
+    env.setdefault("CI", "1")
+    try:
+        subprocess.run([npm, "ci"], cwd=webui_dir, check=True, env=env)
+        subprocess.run([npm, "run", "build"], cwd=webui_dir, check=True, env=env)
+    except Exception:
+        logging.exception("Failed to build web UI")
 
 
 def read_json_config(path: Path) -> dict[str, Any]:
@@ -100,6 +200,101 @@ def read_json_config(path: Path) -> dict[str, Any]:
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def webui_preflight_errors(config: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    channel = str(config.get("bot_channel") or "feishu").strip().lower()
+    if channel not in {"feishu", "wechat"}:
+        channel = "feishu"
+
+    feishu_profiles = legacy.load_feishu_profiles(config)
+    wechat_profiles = legacy.load_wechat_profiles(config)
+    has_feishu = any(
+        str(profile.get("app_id") or "").strip() and str(profile.get("app_secret") or "").strip()
+        for profile in feishu_profiles
+    )
+    has_wechat = any(str(profile.get("token") or "").strip() for profile in wechat_profiles)
+    if channel == "wechat":
+        if not has_wechat:
+            errors.append("请先配置一个微信Bot配置")
+    elif not has_feishu:
+        errors.append("请先配置一个飞书配置")
+
+    if not str(config.get("nga_cookie") or "").strip():
+        errors.append("缺少 NGA Cookie")
+    if not legacy.nga_feishu_watch.parse_target_list(config.get("watch_author_ids"), ""):
+        errors.append("请先配置一条用户 ID")
+    if not legacy.nga_feishu_watch.parse_target_list(config.get("preset_thread_ids"), ""):
+        errors.append("请先配置一条帖子 ID")
+    if not legacy.nga_feishu_watch.parse_listen_rules(config.get("listen_rules")):
+        errors.append("缺少可用的监听配置")
+    return errors
+
+
+def webui_friendly_errors(config: dict[str, Any], errors: list[str], include_preflight: bool = False) -> list[str]:
+    friendly: list[str] = []
+    if include_preflight:
+        friendly.extend(webui_preflight_errors(config))
+
+    for error in errors:
+        text = str(error or "").strip()
+        if not text:
+            continue
+        if text in {"Feishu App ID", "Feishu App Secret", "Receive ID"} or "飞书机器人缺少 App ID" in text or "飞书机器人缺少 App ID 或 App Secret" in text:
+            friendly.append("请先配置一个飞书配置")
+        elif text in {"微信 Bot Token", "微信目标用户 ID"} or "微信机器人缺少 Token" in text:
+            friendly.append("请先配置一个微信Bot配置")
+        elif text == "NGA Cookie":
+            friendly.append("缺少 NGA Cookie")
+        elif text.startswith("监听用户 ID 列表 包含非数字 ID"):
+            bad_id = text.rsplit("：", 1)[-1]
+            friendly.append(f"用户 ID 只能填写数字：{bad_id}")
+        elif text.startswith("帖子预设 ID 列表 包含非数字 ID"):
+            bad_id = text.rsplit("：", 1)[-1]
+            friendly.append(f"帖子 ID 只能填写数字：{bad_id}")
+        elif "帖内作者监听模式需要至少一条" in text or "至少需要选择一个发送目标" in text:
+            friendly.append("缺少可用的监听配置")
+        elif text.startswith("监听规则") and "包含非数字 NGA ID" in text:
+            friendly.append("监听规则里的用户 ID 和帖子 ID 只能填写数字")
+        elif text.startswith("监听规则") and "选择了不存在的发送目标" in text:
+            friendly.append("监听规则选择了不存在的发送目标，请重新选择发送位置")
+        elif text.startswith("发送目标") and "缺少飞书群 chat_id" in text:
+            friendly.append("发送目标缺少飞书群，请在监听规则里选择一个群")
+        elif text.startswith("发送目标") and "未选择有效飞书机器人" in text:
+            friendly.append("请先配置一个飞书配置")
+        elif text.startswith("发送目标") and "未选择有效微信机器人" in text:
+            friendly.append("请先配置一个微信Bot配置")
+        elif "默认飞书 Receive ID" in text:
+            friendly.append("缺少可用的监听配置，请在监听规则里选择发送目标")
+        else:
+            friendly.append(text)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for error in friendly:
+        if error not in seen:
+            deduped.append(error)
+            seen.add(error)
+    return deduped
+
+
+def _first_target_id(raw: Any, fallback: str = "") -> str:
+    targets = legacy.nga_feishu_watch.parse_target_list(raw, "")
+    if targets:
+        return str(targets[0].id or "").strip()
+    return str(fallback or "").strip()
+
+
+def _cookie_value(cookie: str, name: str) -> str:
+    wanted = name.lower()
+    for part in str(cookie or "").split(";"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        if key.strip().lower() == wanted:
+            return value.strip()
+    return ""
 
 
 class PreviewApi:
@@ -122,10 +317,10 @@ class PreviewApi:
         return None
 
     def ensure_tray(self) -> bool:
-        return False
+        return _ensure_tray_icon(self)
 
     def stop_tray(self) -> None:
-        return
+        _stop_tray_icon()
 
     def _merged_config(self, value: dict[str, Any] | None = None) -> dict[str, Any]:
         config = legacy.load_config()
@@ -200,13 +395,14 @@ class PreviewApi:
     def validate(self, config: dict[str, Any]) -> dict[str, Any]:
         merged = self._merged_config(config)
         errors = legacy.validate_config(merged)
-        return {"ok": not errors, "errors": errors}
+        friendly_errors = webui_friendly_errors(merged, errors, include_preflight=True)
+        return {"ok": not friendly_errors, "errors": friendly_errors}
 
     def save_config(self, config: dict[str, Any]) -> dict[str, Any]:
         merged = self._merged_config(config)
         errors = legacy.validate_config(merged)
         if errors:
-            return {"ok": False, "errors": errors}
+            return {"ok": False, "errors": webui_friendly_errors(merged, errors)}
         legacy.save_config(merged)
         return {"ok": True, "config": merged, "status": self._status()}
 
@@ -214,7 +410,7 @@ class PreviewApi:
         merged = self._merged_config(config)
         errors = legacy.validate_config(merged)
         if errors:
-            return {"ok": False, "errors": errors}
+            return {"ok": False, "errors": webui_friendly_errors(merged, errors)}
         count = legacy.nga_feishu_watch.run_once(legacy.build_args(merged, mark_seen=True))
         merged["mark_seen_initialized"] = True
         legacy.save_config(merged)
@@ -224,12 +420,51 @@ class PreviewApi:
         merged = self._merged_config(config)
         errors = legacy.validate_config(merged)
         if errors:
-            return {"ok": False, "errors": errors}
+            return {"ok": False, "errors": webui_friendly_errors(merged, errors)}
         legacy.save_config(merged)
         legacy.nga_feishu_watch.send_test_message(legacy.build_args(merged))
         return {"ok": True, "status": self._status()}
 
-    def query_feishu_chats(self, config: dict[str, Any] | None = None, profile_id: str = "", search_query: str = "") -> dict[str, Any]:
+    def check_nga_cookie(self, config: dict[str, Any] | None = None) -> dict[str, Any]:
+        merged = self._merged_config(config)
+        cookie = str(merged.get("nga_cookie") or "").strip()
+        if not cookie:
+            return {"ok": False, "error": "缺少 NGA Cookie"}
+        lower_cookie = cookie.lower()
+        if "ngapassportuid=" not in lower_cookie or "ngapassportcid=" not in lower_cookie:
+            return {
+                "ok": False,
+                "error": "Cookie 中缺少 ngaPassportUid 或 ngaPassportCid，请复制登录后的完整 NGA Cookie",
+            }
+
+        expected_uid = _cookie_value(cookie, "ngaPassportUid")
+        tid = _first_target_id(merged.get("preset_thread_ids"), str(merged.get("default_tid") or "45974302"))
+        if not tid.isdigit():
+            return {"ok": False, "error": f"帖子 ID 只能填写数字：{tid}"}
+        try:
+            payload = legacy.nga_feishu_watch.fetch_nga_thread_page(
+                tid,
+                99999,
+                cookie,
+                legacy.int_value(merged, "timeout", 20),
+                0,
+                0,
+            )
+            data = payload.get("data", {}) if isinstance(payload, dict) else {}
+            current_user = data.get("__CU", {}) if isinstance(data, dict) else {}
+            current_uid = str(current_user.get("uid") or "").strip() if isinstance(current_user, dict) else ""
+        except Exception as exc:
+            return {"ok": False, "error": f"NGA Cookie 检测失败：{exc}"}
+        if not current_uid or current_uid == "0":
+            return {"ok": False, "error": "NGA 请求成功，但服务器没有识别到登录态，请重新复制登录后的完整 Cookie"}
+        if expected_uid and current_uid != expected_uid:
+            return {
+                "ok": False,
+                "error": f"NGA 请求成功，但识别到的 UID 是 {current_uid}，和 Cookie 里的 {expected_uid} 不一致",
+            }
+        return {"ok": True, "message": f"NGA Cookie 可用。已通过帖子 {tid} 验证登录 UID：{current_uid}。"}
+
+    def query_feishu_chats(self, config: dict[str, Any] | None = None, profile_id: str = "") -> dict[str, Any]:
         merged = self._merged_config(config)
         profiles = legacy.load_feishu_profiles(merged)
         profile = next((item for item in profiles if str(item.get("id") or "") == str(profile_id or "")), None)
@@ -241,7 +476,7 @@ class PreviewApi:
         app_secret = str(profile.get("app_secret") or "").strip()
         if not (app_id and app_secret):
             return {"ok": False, "error": "飞书 App ID 和 App Secret 必填"}
-        chats = legacy.nga_feishu_watch.list_feishu_chats(app_id, app_secret, legacy.int_value(merged, "timeout", 20), search_query)
+        chats = legacy.nga_feishu_watch.list_feishu_chats(app_id, app_secret, legacy.int_value(merged, "timeout", 20))
         cleaned = legacy.nga_feishu_watch.merge_feishu_chats(chats)
         for item in profiles:
             if str(item.get("id") or "") == str(profile.get("id") or ""):
@@ -258,6 +493,17 @@ class PreviewApi:
                 "warning": f"群组已查询成功，但配置文件暂时被占用，未能立即保存：{exc}",
             }
         return {"ok": True, "config": merged, "chats": cleaned, "status": self._status()}
+
+    def query_feishu_chats_for_profile(self, profile: dict[str, Any] | None = None) -> dict[str, Any]:
+        data = profile if isinstance(profile, dict) else {}
+        app_id = str(data.get("app_id") or "").strip()
+        app_secret = str(data.get("app_secret") or "").strip()
+        if not (app_id and app_secret):
+            return {"ok": False, "error": "请先填写飞书 App ID 和 App Secret。"}
+        merged = self._merged_config()
+        chats = legacy.nga_feishu_watch.list_feishu_chats(app_id, app_secret, legacy.int_value(merged, "timeout", 20))
+        cleaned = legacy.nga_feishu_watch.merge_feishu_chats(chats)
+        return {"ok": True, "chats": cleaned, "status": self._status()}
 
     def send_test_target(self, config: dict[str, Any] | None = None, target_id: str = "") -> dict[str, Any]:
         merged = self._merged_config(config)
@@ -341,8 +587,9 @@ class PreviewApi:
     def start(self, config: dict[str, Any]) -> dict[str, Any]:
         merged = self._merged_config(config)
         errors = legacy.validate_config(merged)
-        if errors:
-            return {"ok": False, "errors": errors}
+        friendly_errors = webui_friendly_errors(merged, errors, include_preflight=True)
+        if friendly_errors:
+            return {"ok": False, "errors": friendly_errors}
         stopped = self._stop_processes(include_scan=True)
         state_missing = not legacy.resolved_state_path(merged).exists()
         should_mark = bool(merged.get("auto_mark_seen_first_start", True)) and (
@@ -395,13 +642,19 @@ class PreviewApi:
             self._stop_processes(include_scan=True)
         window = _ACTIVE_WINDOW
         if action == "minimize" and window is not None:
+            has_tray = _ensure_tray_icon(self)
             try:
-                window.minimize()
+                if has_tray:
+                    window.hide()
+                else:
+                    window.minimize()
             except Exception:
                 pass
-            return {"ok": True, "action": "minimize", "warning": "系统托盘不可用，已改为最小化窗口。", "status": self._status()}
+            warning = None if has_tray else "系统托盘不可用，已改为最小化窗口。"
+            return {"ok": True, "action": "minimize", "warning": warning, "status": self._status()}
         _CLOSE_CONFIRMED = True
         self.closing = True
+        _stop_tray_icon()
         if window is not None:
             try:
                 window.destroy()
@@ -448,6 +701,7 @@ def run_preview() -> None:
     api = PreviewApi()
     logging.getLogger("pywebview").addFilter(WebViewShutdownNoiseFilter())
     index_path = webui_index_path()
+    build_webui_if_needed(index_path)
     if index_path.exists():
         window = webview.create_window(APP_TITLE, index_path.as_uri(), js_api=api, width=1180, height=780, min_size=(980, 680))
     else:
@@ -456,7 +710,13 @@ def run_preview() -> None:
     window.events.closing += _request_frontend_close_dialog
     window.events.closed += api.mark_closing
     window.events.closed += lambda: _set_active_window(None)
-    webview.start(debug=bool(os.getenv("NGA_WEBGUI_DEBUG")))
+    icon_path = app_icon_path()
+    webview.start(
+        debug=bool(os.getenv("NGA_WEBGUI_DEBUG")),
+        icon=str(icon_path) if icon_path.exists() else None,
+        private_mode=False,
+        storage_path=str(legacy.data_dir() / "webview_profile"),
+    )
 
 
 def main() -> None:

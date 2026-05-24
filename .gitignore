@@ -1,5 +1,6 @@
 .nga_seen.json
 .env.ps1
+.venv/
 start_local.bat
 run_local.bat
 nga_wolf_config.json
@@ -8,6 +9,7 @@ nga_wolf_gui.log
 __pycache__/
 *.pyc
 webui/node_modules/
+webui/dist/
 build/
 /dist/
 *.spec

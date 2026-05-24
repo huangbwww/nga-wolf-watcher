@@ -1198,6 +1198,26 @@ def fetch_nga_json(
         return payload
 
 
+def parse_nga_json_text(text: str) -> dict[str, Any]:
+    try:
+        value = json.loads(text, strict=False)
+    except json.JSONDecodeError:
+        stripped = text.strip()
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start >= 0 and end > start:
+            stripped = stripped[start : end + 1]
+        # NGA occasionally returns JavaScript-ish JSON inside text/javascript:
+        # single-quote escapes, \xNN escapes, or lone backslashes in post text.
+        stripped = re.sub(r"\\x([0-9A-Fa-f]{2})", lambda match: chr(int(match.group(1), 16)), stripped)
+        stripped = stripped.replace("\\'", "'")
+        stripped = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", stripped)
+        value = json.loads(stripped, strict=False)
+    if not isinstance(value, dict):
+        raise json.JSONDecodeError("NGA response root is not an object", text, 0)
+    return value
+
+
 def fetch_nga_json_uncached(url: str, cookie: str, timeout: int, label: str, referer: str = "https://bbs.nga.cn/") -> dict[str, Any]:
     req = urllib.request.Request(
         url,
@@ -1228,14 +1248,14 @@ def fetch_nga_json_uncached(url: str, cookie: str, timeout: int, label: str, ref
 
     text = raw.decode(charset, errors="replace")
     try:
-        payload = json.loads(text, strict=False)
+        payload = parse_nga_json_text(text)
     except json.JSONDecodeError as exc:
         preview = re.sub(r"\s+", " ", text[:300]).strip()
         if not preview:
             preview = "<空响应>"
         message = (
             f"NGA 在 {label} 返回的不是 JSON："
-            f"状态码={status}，内容类型={content_type}，响应预览={preview}"
+            f"状态码={status}，内容类型={content_type}，解析错误={exc.msg}，响应预览={preview}"
         )
         if status in NGA_TEMPORARY_STATUS_CODES:
             raise NgaTemporaryUnavailable(message, status_code=status) from exc
@@ -3212,35 +3232,7 @@ def merge_feishu_chats(*chat_lists: Iterable[dict[str, Any]]) -> list[dict[str, 
     return merged
 
 
-def search_feishu_chats(app_id: str, app_secret: str, timeout: int, query_text: str) -> list[dict[str, Any]]:
-    chats: list[dict[str, Any]] = []
-    page_token = ""
-    query_text = str(query_text or "").strip()
-    for _ in range(20):
-        query = {"page_size": "100", "user_id_type": "open_id"}
-        if query_text:
-            query["query"] = query_text
-        if page_token:
-            query["page_token"] = page_token
-        result = feishu_app_request(
-            app_id,
-            app_secret,
-            f"/im/v1/chats/search?{urllib.parse.urlencode(query)}",
-            timeout=timeout,
-        )
-        if result.get("code") != 0:
-            raise RuntimeError(f"飞书群组搜索失败：{result}")
-        data = result.get("data", {}) if isinstance(result.get("data"), dict) else {}
-        chats.extend(item for item in data.get("items", []) if isinstance(item, dict))
-        if not data.get("has_more"):
-            break
-        page_token = str(data.get("page_token") or "").strip()
-        if not page_token:
-            break
-    return merge_feishu_chats(chats)
-
-
-def list_feishu_chats(app_id: str, app_secret: str, timeout: int, search_query: str = "") -> list[dict[str, Any]]:
+def list_feishu_chats(app_id: str, app_secret: str, timeout: int) -> list[dict[str, Any]]:
     chats: list[dict[str, Any]] = []
     page_token = ""
     for _ in range(20):
@@ -3262,9 +3254,6 @@ def list_feishu_chats(app_id: str, app_secret: str, timeout: int, search_query: 
         page_token = str(data.get("page_token") or "").strip()
         if not page_token:
             break
-    query_text = str(search_query or "").strip()
-    if query_text:
-        return merge_feishu_chats(search_feishu_chats(app_id, app_secret, timeout, query_text), chats)
     return merge_feishu_chats(chats)
 
 
