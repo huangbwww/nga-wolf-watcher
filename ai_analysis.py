@@ -202,7 +202,7 @@ class AIConfig:
     permission_mode: str = "default"
     model: str = ""
     reasoning_effort: str = ""
-    ignore_codex_user_config: bool = True
+    ignore_codex_user_config: bool = False
 
     @classmethod
     def from_namespace(cls, args: argparse.Namespace) -> "AIConfig":
@@ -261,7 +261,7 @@ class AIConfig:
                 provider,
             ),
             ignore_codex_user_config=bool_value(
-                getattr(args, "ai_ignore_codex_user_config", env_bool("AI_IGNORE_CODEX_USER_CONFIG", True))
+                getattr(args, "ai_ignore_codex_user_config", env_bool("AI_IGNORE_CODEX_USER_CONFIG", False))
             ),
         )
 
@@ -335,7 +335,7 @@ def add_cli_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--ai-ignore-codex-user-config",
         action=argparse.BooleanOptionalAction,
-        default=env_bool("AI_IGNORE_CODEX_USER_CONFIG", True),
+        default=env_bool("AI_IGNORE_CODEX_USER_CONFIG", False),
     )
 
 
@@ -367,7 +367,7 @@ def write_json(path: Path, value: Any) -> None:
 
 def append_jsonl_unique(path: Path, event: dict[str, Any]) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
-    key = str(event.get("key") or "")
+    key = str(event.get("canonical_key") or event.get("key") or "")
     if key and path.exists():
         with path.open("r", encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -375,7 +375,8 @@ def append_jsonl_unique(path: Path, event: dict[str, Any]) -> bool:
                     existing = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if str(existing.get("key") or "") == key:
+                existing_key = str(existing.get("canonical_key") or existing.get("key") or "")
+                if existing_key == key:
                     return False
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(event, ensure_ascii=False, sort_keys=True))
@@ -399,11 +400,13 @@ def tail_jsonl(path: Path, limit: int) -> list[dict[str, Any]]:
 
 
 def event_source_type(event: dict[str, Any]) -> str:
+    if str(event.get("author_id") or "").strip():
+        return "author"
     return str(event.get("watch_source_type") or "author").strip() or "author"
 
 
 def event_source_id(event: dict[str, Any]) -> str:
-    return str(event.get("watch_source_id") or event.get("author_id") or "").strip()
+    return str(event.get("author_id") or event.get("watch_source_id") or "").strip()
 
 
 def event_source_label(event: dict[str, Any]) -> str:
@@ -424,6 +427,44 @@ def source_history_path(work_dir: Path, event: dict[str, Any]) -> Path | None:
     return work_dir / "events" / "by_source" / f"{key}.jsonl"
 
 
+def legacy_source_history_path(work_dir: Path, event: dict[str, Any]) -> Path | None:
+    watch_source_id = str(event.get("watch_source_id") or "").strip()
+    watch_source_type = str(event.get("watch_source_type") or "").strip()
+    if not watch_source_id or not watch_source_type or event_source_type(event) != "author":
+        return None
+    legacy_key = f"{safe_key(watch_source_type)}_{safe_key(watch_source_id)}"
+    current_key = event_source_key(event)
+    if not legacy_key or legacy_key == current_key:
+        return None
+    return work_dir / "events" / "by_source" / f"{legacy_key}.jsonl"
+
+
+def migrate_legacy_source_history(work_dir: Path, event: dict[str, Any], destination: Path) -> None:
+    legacy_path = legacy_source_history_path(work_dir, event)
+    if legacy_path is None or legacy_path == destination or not legacy_path.exists():
+        return
+    author_id = str(event.get("author_id") or "").strip()
+    author = str(event.get("author") or "").strip()
+    with legacy_path.open("r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                legacy_event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(legacy_event, dict):
+                continue
+            if author_id and not str(legacy_event.get("author_id") or "").strip():
+                legacy_event["author_id"] = author_id
+            if author and not str(legacy_event.get("author") or "").strip():
+                legacy_event["author"] = author
+            legacy_key = str(legacy_event.get("key") or "")
+            if legacy_key.startswith("thread_author:") and not str(legacy_event.get("canonical_key") or "").strip():
+                parts = legacy_key.split(":", 3)
+                if len(parts) == 4 and parts[3]:
+                    legacy_event["canonical_key"] = parts[3]
+            append_jsonl_unique(destination, legacy_event)
+
+
 def update_source_index(work_dir: Path, event: dict[str, Any], history_path: Path) -> None:
     key = event_source_key(event)
     source_id = event_source_id(event)
@@ -440,17 +481,47 @@ def update_source_index(work_dir: Path, event: dict[str, Any], history_path: Pat
     aliases = {source_id}
     if label:
         aliases.add(label)
+    for alias_key in ("author", "watch_source_id", "watch_source_label", "subject"):
+        alias = str(event.get(alias_key) or "").strip()
+        if alias:
+            aliases.add(alias)
+    watch_source_id = str(event.get("watch_source_id") or "").strip()
+    watch_source_type = str(event.get("watch_source_type") or "").strip()
+    watch_source_label = str(event.get("watch_source_label") or "").strip()
+    legacy_key = ""
+    if watch_source_id and watch_source_type and event_source_type(event) == "author":
+        legacy_key = f"{safe_key(watch_source_type)}_{safe_key(watch_source_id)}"
+    legacy_existing = sources.pop(legacy_key, None) if legacy_key and legacy_key != key else None
     existing = sources.get(key)
     if isinstance(existing, dict):
         for alias in existing.get("aliases") or []:
             if str(alias).strip():
                 aliases.add(str(alias).strip())
+    if isinstance(legacy_existing, dict):
+        for alias in legacy_existing.get("aliases") or []:
+            if str(alias).strip():
+                aliases.add(str(alias).strip())
+    watch_sources = []
+    if isinstance(existing, dict) and isinstance(existing.get("watch_sources"), list):
+        watch_sources.extend(item for item in existing.get("watch_sources") if isinstance(item, dict))
+    if isinstance(legacy_existing, dict) and isinstance(legacy_existing.get("watch_sources"), list):
+        watch_sources.extend(item for item in legacy_existing.get("watch_sources") if isinstance(item, dict))
+    if watch_source_id or watch_source_type or watch_source_label:
+        watch_item = {
+            "source_type": watch_source_type,
+            "source_id": watch_source_id,
+            "label": watch_source_label,
+            "subject": str(event.get("subject") or ""),
+        }
+        if watch_item not in watch_sources:
+            watch_sources.append(watch_item)
     sources[key] = {
         "key": key,
         "source_type": event_source_type(event),
         "source_id": source_id,
         "label": label,
         "aliases": sorted(aliases),
+        "watch_sources": watch_sources[-20:],
         "history_file": str(history_path.relative_to(work_dir)),
         "latest_event_at": event.get("post_time") or event.get("captured_at") or "",
         "latest_event_key": event.get("key") or "",
@@ -468,7 +539,7 @@ def source_index_summary(work_dir: Path) -> str:
     if not isinstance(sources, dict) or not sources:
         return ""
     lines = [
-        "NGA source-specific history files:",
+        "NGA author history files:",
         f"- source index: {index_path}",
     ]
     for item in sorted(sources.values(), key=lambda value: str(value.get("label") or value.get("source_id") or "")):
@@ -476,10 +547,26 @@ def source_index_summary(work_dir: Path) -> str:
             continue
         label = str(item.get("label") or item.get("source_id") or "")
         source_id = str(item.get("source_id") or "")
+        author_source_id = source_id
         history_file = work_dir / str(item.get("history_file") or "")
         aliases = ", ".join(str(alias) for alias in item.get("aliases") or [] if str(alias).strip())
-        lines.append(f"- {label} ({source_id}): {history_file}; aliases: {aliases}")
-    lines.append("If the user names a source label such as 狼大 or 海, read that source's history file first, then use the global history only for comparison.")
+        watch_sources = item.get("watch_sources") if isinstance(item.get("watch_sources"), list) else []
+        watch_hint = ""
+        if watch_sources:
+            hints = []
+            for source in watch_sources[-3:]:
+                if not isinstance(source, dict):
+                    continue
+                watch_source_id = str(source.get("source_id") or "").strip()
+                subject = str(source.get("subject") or "").strip()
+                if watch_source_id and subject:
+                    hints.append(f"{watch_source_id} {subject}")
+                elif watch_source_id:
+                    hints.append(watch_source_id)
+            if hints:
+                watch_hint = "; watch sources: " + " | ".join(hints)
+        lines.append(f"- {label} ({author_source_id}): {history_file}; aliases: {aliases}{watch_hint}")
+    lines.append("If the user names a source label such as 狼大 or 海, read that author's history file first, then use the global history only for comparison.")
     return "\n".join(lines)
 
 
@@ -576,6 +663,7 @@ def event_from_post(post: Any) -> dict[str, Any]:
         "subject": str(getattr(post, "subject", "")),
         "content": str(getattr(post, "content", "")),
         "url": str(getattr(post, "url", "")),
+        "canonical_key": str(getattr(post, "canonical_key", "") or getattr(post, "key", "")),
         "image_urls": [str(url) for url in image_urls if str(url).strip()],
         "image_paths": [],
         "post_time": str(getattr(post, "post_time", "")),
@@ -680,6 +768,13 @@ def quote_arg(value: str) -> str:
     if os.name == "nt":
         return subprocess.list2cmdline([value])
     return shlex.quote(value)
+
+
+def error_tail(value: str, limit: int = 1600) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return "..." + text[-limit:]
 
 
 def normalize_permission_mode(raw: str, provider: str = "codex") -> str:
@@ -823,7 +918,7 @@ class BaseRunner:
                     result.error = ""
                     break
                 if completed.returncode != 0:
-                    last_error = f"{self.provider} exited with code {completed.returncode}: {completed.stderr.strip()[:800]}"
+                    last_error = f"{self.provider} exited with code {completed.returncode}: {error_tail(completed.stderr)}"
                 else:
                     last_error = f"{self.provider} produced empty output"
                 if attempt < len(commands) and self.should_try_next_command(completed, result):
@@ -901,9 +996,15 @@ def resolve_executable(command: list[str], provider: str) -> list[str]:
 class CodexRunner(BaseRunner):
     provider = "codex"
 
-    def _model_args(self, task: AITask) -> list[str]:
+    def _model_args(self, task: AITask, *, allow_model: bool = True) -> list[str]:
+        if not allow_model:
+            return []
         model = normalize_model(str(task.metadata.get("model") or self.config.model or ""))
         return ["--model", model] if model else []
+
+    def _has_model_arg(self, task: AITask) -> bool:
+        model = normalize_model(str(task.metadata.get("model") or self.config.model or ""))
+        return bool(model)
 
     def _reasoning_args(self, task: AITask) -> list[str]:
         effort = normalize_reasoning_effort(
@@ -928,19 +1029,26 @@ class CodexRunner(BaseRunner):
             args.extend(["--image", str(image_path)])
         return args
 
-    def build_command(self, task: AITask, prompt_file: Path, short_prompt: str) -> list[str]:
+    def build_command(
+        self,
+        task: AITask,
+        prompt_file: Path,
+        short_prompt: str,
+        *,
+        ignore_rules: bool = False,
+        allow_model: bool = True,
+    ) -> list[str]:
         base = split_command_line(self.config.codex_command)
         command = [
             *base,
             "exec",
-            "--ignore-rules",
             "--cd",
             str(task.work_dir),
             "--skip-git-repo-check",
         ]
-        if self.config.ignore_codex_user_config:
-            command.append("--ignore-user-config")
-        command.extend(self._model_args(task))
+        if ignore_rules:
+            command.insert(len(base) + 1, "--ignore-rules")
+        command.extend(self._model_args(task, allow_model=allow_model))
         command.extend(self._reasoning_args(task))
         command.extend(self._mode_args(task))
         command.extend(self._image_args(task))
@@ -951,19 +1059,26 @@ class CodexRunner(BaseRunner):
         ])
         return command
 
-    def build_resume_command(self, task: AITask, prompt_file: Path, short_prompt: str) -> list[str]:
+    def build_resume_command(
+        self,
+        task: AITask,
+        prompt_file: Path,
+        short_prompt: str,
+        *,
+        ignore_rules: bool = False,
+        allow_model: bool = True,
+    ) -> list[str]:
         base = split_command_line(self.config.codex_command)
         command = [
             *base,
             "exec",
             "resume",
             "--last",
-            "--ignore-rules",
             "--skip-git-repo-check",
         ]
-        if self.config.ignore_codex_user_config:
-            command.append("--ignore-user-config")
-        command.extend(self._model_args(task))
+        if ignore_rules:
+            command.insert(len(base) + 3, "--ignore-rules")
+        command.extend(self._model_args(task, allow_model=allow_model))
         command.extend(self._reasoning_args(task))
         command.extend(self._mode_args(task))
         command.extend(self._image_args(task))
@@ -975,7 +1090,19 @@ class CodexRunner(BaseRunner):
         return command
 
     def build_commands(self, task: AITask, prompt_file: Path, short_prompt: str) -> list[list[str]]:
-        return [self.build_resume_command(task, prompt_file, short_prompt), self.build_command(task, prompt_file, short_prompt)]
+        commands = [
+            self.build_resume_command(task, prompt_file, short_prompt, ignore_rules=False, allow_model=True),
+        ]
+        if self._has_model_arg(task):
+            commands.extend([
+                self.build_resume_command(task, prompt_file, short_prompt, ignore_rules=False, allow_model=False),
+            ])
+        commands.append(self.build_command(task, prompt_file, short_prompt, ignore_rules=False, allow_model=True))
+        if self._has_model_arg(task):
+            commands.extend([
+                self.build_command(task, prompt_file, short_prompt, ignore_rules=False, allow_model=False),
+            ])
+        return commands
 
     def should_try_next_command(self, completed: subprocess.CompletedProcess[str], result: AIResult) -> bool:
         output = f"{completed.stdout}\n{completed.stderr}".lower()
@@ -988,6 +1115,14 @@ class CodexRunner(BaseRunner):
                 "could not find",
                 "not a valid session",
                 "resume",
+                "unexpected argument",
+                "unknown argument",
+                "--ignore-rules",
+                "requires a newer version of codex",
+                "invalid_request_error",
+                "invalid model",
+                "unknown model",
+                "model_not_found",
             )
         )
 
@@ -1279,6 +1414,7 @@ class AIManager:
         added = append_jsonl_unique(self.history_file, event)
         by_source_path = source_history_path(self.config.work_dir, event)
         if by_source_path is not None:
+            migrate_legacy_source_history(self.config.work_dir, event, by_source_path)
             append_jsonl_unique(by_source_path, event)
             update_source_index(self.config.work_dir, event, by_source_path)
         state = self.read_state()

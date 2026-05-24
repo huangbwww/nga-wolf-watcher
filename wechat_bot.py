@@ -240,14 +240,14 @@ class WeChatBotClient:
         if not self.config.token:
             raise RuntimeError("缺少 WECHAT_BOT_TOKEN。请先通过 ilink/cc-connect 同类流程扫码或绑定 token。")
 
-    def get_updates(self) -> list[WeChatMessage]:
+    def get_updates(self, timeout_ms: int | None = None) -> list[WeChatMessage]:
         self.require_token()
         buf = self.buf_path.read_text(encoding="utf-8", errors="replace").strip() if self.buf_path.exists() else ""
         resp = post_json(
             self.config,
             "ilink/bot/getupdates",
             {"get_updates_buf": buf, "base_info": {"channel_version": "nga-wolf-watcher-wechat/1.0"}},
-            timeout_ms=self.config.poll_timeout_ms,
+            timeout_ms=timeout_ms if timeout_ms and timeout_ms > 0 else self.config.poll_timeout_ms,
         )
         if int(resp.get("errcode") or 0) == -14:
             raise RuntimeError("微信 ilink 会话已过期，请重新扫码/绑定 token。")
@@ -261,6 +261,18 @@ class WeChatBotClient:
         if next_buf:
             self.buf_path.write_text(next_buf, encoding="utf-8")
         return messages
+
+    def refresh_context_tokens(self, target_user_id: str = "", *, timeout_ms: int = 5000, mark_handled: bool = False) -> int:
+        target = str(target_user_id or "").strip()
+        messages = self.get_updates(timeout_ms=timeout_ms)
+        matched = 0
+        for msg in messages:
+            if target and msg.user_id != target:
+                continue
+            matched += 1
+            if mark_handled:
+                self.mark_handled(msg)
+        return matched
 
     def parse_message(self, raw: dict[str, Any]) -> WeChatMessage | None:
         if int(raw.get("message_type") or 0) == 2:
@@ -328,6 +340,10 @@ class WeChatBotClient:
         tokens = read_json(self.tokens_path, {})
         token = str(tokens.get(user_id) or "") if isinstance(tokens, dict) else ""
         if not token:
+            self.refresh_context_tokens(user_id, timeout_ms=min(max(self.config.poll_timeout_ms, 1000), 5000))
+            tokens = read_json(self.tokens_path, {})
+            token = str(tokens.get(user_id) or "") if isinstance(tokens, dict) else ""
+        if not token:
             raise RuntimeError(f"微信用户 {user_id} 尚未建立 context_token。请先让该用户给机器人发一条消息。")
         chunks = split_chunks(text, MAX_WECHAT_CHARS)
         for index, chunk in enumerate(chunks):
@@ -366,6 +382,10 @@ class WeChatBotClient:
         self.require_token()
         tokens = read_json(self.tokens_path, {})
         token = str(tokens.get(user_id) or "") if isinstance(tokens, dict) else ""
+        if not token:
+            self.refresh_context_tokens(user_id, timeout_ms=min(max(self.config.poll_timeout_ms, 1000), 5000))
+            tokens = read_json(self.tokens_path, {})
+            token = str(tokens.get(user_id) or "") if isinstance(tokens, dict) else ""
         if not token:
             raise RuntimeError(f"微信用户 {user_id} 尚未建立 context_token。请先让该用户给机器人发一条消息。")
         file_path = Path(path)

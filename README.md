@@ -45,8 +45,8 @@ This path does not require editing code or running Python commands.
 2. Open [Feishu Open Platform](https://open.feishu.cn/page/openclaw), create a bot app, and copy the app's `App ID` and `App Secret`.
 3. Add the bot to the target Feishu group.
 4. If you want to use `/start` and other commands without mentioning the bot, grant `im:message.group_msg`.
-5. Open `NGA-Wolf-Watcher.exe`, fill `Feishu App ID` and `Feishu App Secret`, then click `查询群组` / `List chats`.
-6. Copy the target group's `chat_id` into `Receive ID`.
+5. Open `NGA-Wolf-Watcher.exe`, add a Feishu profile under `通道配置`, fill `App ID` and `App Secret`, then click `查询群组并保存` in that profile dialog.
+6. Add a push target using that Feishu profile and target chat, then add NGA users, threads, and listen rules under the NGA config page.
 7. Log in to `https://bbs.nga.cn/`, copy the browser request `Cookie`, and paste it into `NGA Cookie`.
 8. Click `保存配置`, then click `启动监听`.
 
@@ -54,13 +54,18 @@ Keep the first-start mark-seen option enabled before the first launch. It marks 
 
 The GUI saves local secrets under `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`. Runtime state is stored next to it as `.nga_seen.json` by default. Do not share these files.
 
-### Feishu / WeChat Channel Selection
+### Message Channels, Push Targets, And Listen Rules
 
-The default message channel is `feishu`, so existing Feishu setups keep working. The GUI now has a `消息通道` / message-channel selector:
+The new config model separates the routing into three layers while keeping old configs compatible:
 
-- Choose `feishu` to show and validate only Feishu app settings. Empty WeChat fields are ignored.
-- Choose `wechat` to show and validate only WeChat bot settings. Empty Feishu App ID, App Secret, and Receive ID are ignored.
-- NGA Cookie, polling, quiet hours, and AI settings are shared and send through the selected channel.
+- `Message channel profiles`: bot accounts only. A Feishu profile stores App ID / App Secret and caches the chat list inside that profile; a WeChat profile stores the ilink token, target user, and account id.
+- `Push targets`: a reusable destination made from one bot profile plus one Feishu chat or WeChat user.
+- `NGA resources`: reusable user IDs and thread IDs for monitoring and manual fetches.
+- `Listen rules`: choose the watch source, either an author reply page or a fixed thread filtered by author, then bind it to one or more push targets. One rule can push to Feishu and WeChat at the same time.
+
+Manual fetches are not limited by listen rules. Feishu and WeChat commands such as `/history_r`, `/pack_r`, `/history_t`, and `/pack_t` can fetch any configured user or thread. Short commands use the current push target's default user/thread when available.
+
+AI settings remain global. Feishu and WeChat entries share the same AI work directory and local agent queue. New-post auto analysis follows the triggering listen rule's push targets. Scheduled analysis runs once per interval, then copies the result to the selected scheduled-analysis targets.
 
 The WeChat channel uses the same kind of personal-WeChat ilink gateway as cc-connect. It is not a normal official WeChat bot and it does not automate the desktop WeChat client. On first use, the target WeChat account must send one message to the bot so the watcher can cache its `context_token`; proactive NGA pushes can only be sent after that. WeChat has no Feishu cards, so `/setting` returns a plain-text menu and copyable commands.
 
@@ -138,6 +143,34 @@ Command meanings:
 
 `/pack_r 45974302 10` is accepted as a compatibility alias for packing the default wolf thread.
 
+### Watch Modes
+
+The default watch mode is `author`, which keeps the old behavior: fetch replies from the target user's reply page. The new `thread_author` mode fetches recent posts from a fixed thread, then filters them by author id. This is useful when the NGA user-reply endpoint often returns 503, permission errors, or missing flushed posts, but the target thread is still readable.
+
+```powershell
+$env:NGA_WATCH_MODE = 'thread_author'   # author | thread_author | both
+$env:NGA_THREAD_AUTHOR_WATCHES = '45974302:150058=wolf|receive_id=oc_xxx'
+$env:NGA_THREAD_WATCH_TAIL_COUNT = '20'
+$env:NGA_THREAD_WATCH_INTERVAL = '10'
+```
+
+`NGA_THREAD_AUTHOR_WATCHES` accepts one rule per line:
+
+```text
+tid:uid=label
+tid:uid=label|receive_id=oc_xxx
+tid:uid=label|app_id=cli_xxx|app_secret=xxx|receive_id=oc_xxx|id_type=chat_id
+tid:uid1,uid2=label
+```
+
+- `tid:uid=label` uses the main Feishu bot and main Receive ID.
+- Adding `receive_id=oc_xxx` reuses the main Feishu bot but pushes that thread-author combo to another group.
+- Adding `app_id/app_secret/receive_id` gives that combo its own Feishu bot.
+- `both` enables both the old user-reply watcher and the new thread-author watcher; if the same original reply is seen through both paths, it is deduplicated before pushing.
+- If you use the new GUI's `push targets` + `listen rules`, one rule can route to multiple Feishu chats or WeChat users. The text format above is mainly kept for old configs and source users.
+
+Thread-author watch defaults to scanning the latest 20 thread replies every 10 seconds, while author-page watch still uses `NGA_INTERVAL`. AI history is merged by author uid: for example, `45974302:150058` and `150058=wolf` both write to `events/by_source/author_150058.jsonl`, with the thread title and listen-rule source kept in each event.
+
 ### Mention Alerts
 
 If you want the bot to @ you in the card when a new wolf reply or a quiet-hour summary arrives:
@@ -186,6 +219,12 @@ Optional defaults:
 ```powershell
 $env:NGA_DEFAULT_AUTHOR_ID = '150058'
 $env:NGA_DEFAULT_TID = '45974302'
+$env:NGA_WATCH_MODE = 'author'
+$env:NGA_AUTHOR_IDS = '150058=wolf,123456=other'
+$env:NGA_PRESET_TIDS = '45974302=wolf thread,888888=other thread'
+$env:NGA_THREAD_AUTHOR_WATCHES = '45974302:150058=wolf|receive_id=oc_xxx'
+$env:NGA_THREAD_WATCH_TAIL_COUNT = '20'
+$env:NGA_THREAD_WATCH_INTERVAL = '10'
 $env:NGA_INTERVAL = '30'
 $env:NGA_JITTER = '20'
 $env:NGA_RETRIES = '10'
@@ -195,6 +234,14 @@ $env:NGA_PAGE_DELAY = '2.0'
 $env:NGA_REQUEST_MIN_INTERVAL = '1.0'
 $env:NGA_CACHE_TTL = '15'
 $env:NGA_UNAVAILABLE_RETRIES = '3'
+```
+
+Source users can also configure the new routing model directly with JSON:
+
+```powershell
+$env:NGA_PUSH_TARGETS = '[{"id":"feishu_main","channel":"feishu","profile_id":"default","receive_id":"oc_xxx","default_author_id":"150058","default_tid":"45974302"}]'
+$env:NGA_LISTEN_RULES = '[{"id":"wolf_thread","mode":"thread_author","tid":"45974302","author_id":"150058","target_ids":["feishu_main"]}]'
+$env:AI_SCHEDULE_TARGET_IDS = 'feishu_main'
 ```
 
 Optional AI Agent defaults, all disabled unless you opt in:
@@ -225,6 +272,19 @@ Run the local GUI manager from source:
 ```powershell
 python .\nga_wolf_gui.py
 ```
+
+Run the pywebview + React preview UI:
+
+```powershell
+python -m pip install pywebview pystray pillow
+cd .\webui
+npm.cmd ci
+npm.cmd run build
+cd ..
+python .\nga_wolf_webgui.py
+```
+
+The preview UI does not replace the legacy GUI. It reuses the same `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`, runtime state, and watcher startup path, but presents NGA resources, message channel profiles, push targets, listen rules, AI settings, runtime options, and an advanced JSON editor in clearer collapsible panels. With the new model, Feishu and WeChat can be configured at the same time; listen rules decide where automatic pushes go.
 
 Only test message/card callbacks, without periodic NGA watch:
 
@@ -423,7 +483,7 @@ AI_REASONING_EFFORT=
 AI_CODEX_REASONING_EFFORT=
 AI_CLAUDE_EFFORT=
 AI_CUSTOM_REASONING_EFFORT=
-AI_IGNORE_CODEX_USER_CONFIG=true
+AI_IGNORE_CODEX_USER_CONFIG=false
 AI_SCHEDULE_ENABLED=false
 AI_SCHEDULE_INTERVAL_MINUTES=5
 AI_SCHEDULE_PROMPT=
@@ -465,7 +525,7 @@ Prompt behavior:
 - NGA reply images from `[img]`, HTML image tags, and common attachment links are saved into `image_urls` in `events/latest_event.json` / `wolf_history.jsonl`. The watcher also tries to download them under `attachments/nga/<post-key>/` and writes successful local files into `image_paths`. The Codex provider passes those images with `--image <path>` for auto analysis and `/ai latest`; if download fails, the original image URLs remain available in the event JSON.
 - Plain Feishu messages are forwarded as-is to the local agent. General role and preferences live in `context/memory.md` / `AGENTS.md`, so the agent can read them when useful without injecting the same chat prompt every time.
 - Feishu image messages, rich-text images, and file attachments are downloaded into `attachments/`, then local absolute paths are passed to the agent. The Codex provider also sends each image with `--image <path>`. If you reply to a file message and ask the agent to read it, the watcher also tries to resolve the replied message's attachment.
-- AI messages for the same AI work directory and Feishu chat are processed serially, so multiple Feishu messages do not concurrently resume the same local agent session.
+- AI messages from Feishu and WeChat that use the same AI work directory are processed through one local serial queue, so multiple messages do not concurrently resume the same local agent session.
 - `/mode` follows cc-connect-style permission modes. Sending `/mode` returns a clickable selection card. Codex supports `default`, `auto-edit`, `full-auto`, and `yolo`; Claude supports `default`, `acceptEdits`, `plan`, `auto`, `bypassPermissions`, and `dontAsk`. `/mode yolo` or a card button click is persisted in AI state and only affects later AI tasks; it does not rewrite startup arguments.
 - While AI is processing a Feishu message, the bot temporarily adds a reaction to the source message as a "replying" status and removes it after completion or failure. Override the default with `AI_REPLY_STATUS_EMOJI`; if the Feishu app lacks reaction permission, this only logs a warning and does not block AI replies.
 - Scheduled analysis sends only the configured scheduled prompt; when empty, it uses the same concise default prompt as auto analysis.
@@ -502,6 +562,23 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name NGA-Wolf-W
 ```
 
 The output is `dist\NGA-Wolf-Watcher.exe`.
+
+The repository also includes the equivalent `NGA-Wolf-Watcher.spec`:
+
+```powershell
+python -m PyInstaller --noconfirm --clean .\NGA-Wolf-Watcher.spec
+```
+
+To package the pywebview preview UI, build the frontend first, install/collect `pywebview`, and include `webui\dist`:
+
+```powershell
+cd .\webui
+npm.cmd ci
+npm.cmd run build
+cd ..
+python -m pip install pywebview pystray pillow pyinstaller
+python -m PyInstaller --noconfirm --clean .\NGA-Wolf-Watcher-Web.spec
+```
 
 ## Legacy Custom Bot Webhook
 
