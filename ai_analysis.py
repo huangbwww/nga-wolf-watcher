@@ -1008,13 +1008,26 @@ def resolve_executable(command: list[str], provider: str) -> list[str]:
         candidates: list[Path] = []
         appdata = os.getenv("APPDATA")
         localappdata = os.getenv("LOCALAPPDATA")
+        userprofile = os.getenv("USERPROFILE")
+        executable_names = [executable]
+        if not executable.lower().endswith((".exe", ".cmd", ".bat", ".ps1")):
+            executable_names.extend([f"{executable}.exe", f"{executable}.cmd", f"{executable}.bat"])
+
+        def add_named_candidates(directory: Path | None) -> None:
+            if directory is None:
+                return
+            for name in executable_names:
+                candidates.append(directory / name)
+
         if provider == "codex":
             if localappdata:
                 candidates.append(Path(localappdata) / "OpenAI" / "Codex" / "bin" / "codex.exe")
             if appdata:
                 candidates.append(Path(appdata) / "npm" / "codex.cmd")
-        elif provider == "claude" and appdata:
-            candidates.append(Path(appdata) / "npm" / "claude.cmd")
+        elif provider == "claude":
+            add_named_candidates(Path(userprofile) / ".local" / "bin" if userprofile else None)
+            add_named_candidates(Path(localappdata) / "Microsoft" / "WinGet" / "Links" if localappdata else None)
+            add_named_candidates(Path(appdata) / "npm" if appdata else None)
         elif provider == "codewhale" and appdata:
             candidates.append(Path(appdata) / "npm" / "codewhale.cmd")
             candidates.append(Path(appdata) / "npm" / "deepseek.cmd")
