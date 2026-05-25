@@ -483,7 +483,7 @@ class PreviewApi:
         try:
             payload = legacy.nga_feishu_watch.fetch_nga_thread_page(
                 tid,
-                99999,
+                1,
                 cookie,
                 legacy.int_value(merged, "timeout", 20),
                 0,

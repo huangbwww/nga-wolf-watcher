@@ -19,6 +19,7 @@ Environment variables:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -71,7 +72,7 @@ DEFAULT_NGA_UNAVAILABLE_BACKOFF_BASE = 60.0
 DEFAULT_NGA_UNAVAILABLE_BACKOFF_MAX = 600.0
 DEFAULT_FEISHU_CARD_IMAGE_LIMIT = 6
 FEISHU_IMAGE_MAX_BYTES = 10 * 1024 * 1024
-NGA_TEMPORARY_STATUS_CODES = {429, 500, 502, 503, 504}
+NGA_TEMPORARY_STATUS_CODES = {302, 429, 500, 502, 503, 504}
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -86,6 +87,43 @@ _NGA_REQUEST_LOCK = threading.Lock()
 _NGA_LAST_REQUEST_AT = 0.0
 _NGA_JSON_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _WECHAT_CLIENTS: dict[tuple[str, str], wechat_bot.WeChatBotClient] = {}
+_LARK_WS_LOOP_LOCK = threading.Lock()
+
+
+class _ThreadLocalLarkLoop:
+    """Compatibility shim for lark-oapi's module-level websocket event loop."""
+
+    def __init__(self, fallback_loop: Any) -> None:
+        self._fallback_loop = fallback_loop
+        self._local = threading.local()
+
+    def set_thread_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._local.loop = loop
+
+    def _loop(self) -> asyncio.AbstractEventLoop:
+        loop = getattr(self._local, "loop", None)
+        if loop is not None:
+            return loop
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        self.set_thread_loop(loop)
+        return loop
+
+    def run_until_complete(self, future: Any) -> Any:
+        return self._loop().run_until_complete(future)
+
+    def create_task(self, coro: Any) -> asyncio.Task[Any]:
+        return self._loop().create_task(coro)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._loop(), name)
 
 
 class NgaTemporaryUnavailable(RuntimeError):
@@ -1268,6 +1306,10 @@ def fetch_nga_json_uncached(url: str, cookie: str, timeout: int, label: str, ref
     if payload.get("error"):
         err = payload["error"]
         message = err.get("0") if isinstance(err, dict) else str(err)
+        if "没有符合条件的结果" in message:
+            return {"data": {}}
+        if "服务器忙" in message or "server busy" in message.lower():
+            raise NgaTemporaryUnavailable(f"NGA 在 {label} 返回错误：{message}", status_code=2048)
         raise RuntimeError(f"NGA 在 {label} 返回错误：{message}")
     return payload
 
@@ -1504,6 +1546,26 @@ def extract_thread_posts(payload: dict[str, Any]) -> tuple[list[NgaPost], int]:
         if post:
             posts.append(post)
     return posts, page
+
+
+def thread_page_count(payload: dict[str, Any]) -> int:
+    data = payload.get("data", {}) if isinstance(payload, dict) else {}
+    if not isinstance(data, dict):
+        return 1
+    try:
+        rows = int(data.get("__ROWS") or 0)
+    except (TypeError, ValueError):
+        rows = 0
+    try:
+        page_size = int(data.get("__R__ROWS_PAGE") or data.get("__R__ROWS") or 20)
+    except (TypeError, ValueError):
+        page_size = 20
+    if rows > 0 and page_size > 0:
+        return max(1, (rows + page_size - 1) // page_size)
+    try:
+        return max(1, int(data.get("__PAGE", 1) or 1))
+    except (TypeError, ValueError):
+        return 1
 
 
 def feishu_sign(secret: str, timestamp: str) -> str:
@@ -4579,6 +4641,17 @@ def uses_structured_routes(args: argparse.Namespace) -> bool:
     return bool(parse_push_targets(getattr(args, "push_targets", "")) or parse_listen_rules(getattr(args, "listen_rules", "")))
 
 
+def prepare_lark_ws_thread_loop(lark_ws_client: Any) -> None:
+    with _LARK_WS_LOOP_LOCK:
+        loop_proxy = lark_ws_client.loop
+        if not isinstance(loop_proxy, _ThreadLocalLarkLoop):
+            loop_proxy = _ThreadLocalLarkLoop(loop_proxy)
+            lark_ws_client.loop = loop_proxy
+    thread_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(thread_loop)
+    loop_proxy.set_thread_loop(thread_loop)
+
+
 def command_channel_args(args: argparse.Namespace) -> list[argparse.Namespace]:
     channels: list[argparse.Namespace] = []
     seen: set[tuple[str, str]] = set()
@@ -4645,9 +4718,12 @@ def start_multi_channel(args: argparse.Namespace) -> None:
 def start_ws(args: argparse.Namespace) -> None:
     try:
         import lark_oapi as lark
+        import lark_oapi.ws.client as lark_ws_client
         from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
     except ImportError as exc:
         raise SystemExit("缺少 lark-oapi。请执行：python -m pip install lark-oapi") from exc
+
+    prepare_lark_ws_thread_loop(lark_ws_client)
 
     app_id, app_secret, receive_id, _receive_id_type = feishu_credentials(args)
     if not app_id or not app_secret:
@@ -5032,15 +5108,22 @@ def collect_thread_tail(
     allow_partial: bool = False,
 ) -> list[NgaPost]:
     first_payload = with_retries(
-        f"NGA 帖子 {tid} 最新页",
+        f"NGA 帖子 {tid} 页数",
         attempts,
         retry_initial_delay,
         retry_delay,
-        lambda: fetch_nga_thread_page(tid, 99999, cookie, timeout, request_min_interval, cache_ttl),
+        lambda: fetch_nga_thread_page(tid, 1, cookie, timeout, request_min_interval, cache_ttl),
     )
-    first_posts, last_page = extract_thread_posts(first_payload)
-    if not last_page:
-        last_page = 1
+    last_page = thread_page_count(first_payload)
+    if last_page > 1:
+        first_payload = with_retries(
+            f"NGA 帖子 {tid} 最新页",
+            attempts,
+            retry_initial_delay,
+            retry_delay,
+            lambda: fetch_nga_thread_page(tid, last_page, cookie, timeout, request_min_interval, cache_ttl),
+        )
+    first_posts, _ = extract_thread_posts(first_payload)
 
     posts_by_page: list[NgaPost] = list(first_posts)
     page = last_page - 1
@@ -5075,7 +5158,7 @@ def with_retries(label: str, attempts: int, initial_delay: float, step_delay: fl
             return fn()
         except Exception as exc:
             last_exc = exc
-            effective_attempts = min(attempts, unavailable_limit) if is_nga_temporary_unavailable(exc) else attempts
+            effective_attempts = min(attempts, unavailable_limit) if is_nga_service_unavailable(exc) else attempts
             if attempt >= effective_attempts:
                 break
             sleep_for = initial_delay + step_delay * (attempt - 1)
@@ -5221,7 +5304,14 @@ def collect_thread_author_startup_catchup_posts(args: argparse.Namespace, watche
         by_author.setdefault(watch.author_id, []).append(watch)
     author_ids = list(by_author)
     for author_index, author_id in enumerate(author_ids):
-        author_posts = collect_posts_for_author_with_retries(args, author_id)
+        try:
+            author_posts = collect_posts_for_author_with_retries(args, author_id)
+        except Exception as exc:
+            print(f"NGA startup catchup skipped user {author_id}; thread-author scan will continue: {exc}", file=sys.stderr)
+            for watch in by_author[author_id]:
+                counts.append((f"{thread_author_display_name(watch)} startup catchup", 0))
+            sleep_between_watch_targets(args, author_index, len(author_ids))
+            continue
         watches_for_author = by_author[author_id]
         for watch in watches_for_author:
             matched = [add_thread_author_source(post, watch) for post in author_posts if post_tid(post) == watch.tid]
@@ -5543,11 +5633,9 @@ def run_once(args: argparse.Namespace) -> int:
                     print(f"启动补抓帖内作者用户回复完成：{sum(count for _, count in catchup_counts)} 条。")
             except Exception as exc:
                 if is_nga_service_unavailable(exc):
-                    raise NgaTemporaryUnavailable(
-                        "NGA 503 while startup-catching thread-author targets; circuit-breaking current watch round.",
-                        status_code=503,
-                    ) from exc
-                print(f"启动补抓帖内作者用户回复失败，继续执行帖内扫描: {exc}", file=sys.stderr)
+                    print("NGA 503 while startup-catching thread-author targets; continuing with thread-author scan.", file=sys.stderr)
+                else:
+                    print(f"启动补抓帖内作者用户回复失败，继续执行帖内扫描: {exc}", file=sys.stderr)
             setattr(args, "_thread_author_startup_catchup_done", True)
         try:
             thread_posts, thread_counts = collect_thread_author_watch_posts(args, thread_watches)

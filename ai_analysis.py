@@ -1202,12 +1202,25 @@ class CodexRunner(BaseRunner):
 class ClaudeRunner(BaseRunner):
     provider = "claude"
 
-    def build_command(self, task: AITask, prompt_file: Path, short_prompt: str) -> list[str]:
+    def build_command(
+        self,
+        task: AITask,
+        prompt_file: Path,
+        short_prompt: str,
+        *,
+        conversation_mode: str = "continue",
+    ) -> list[str]:
         values = command_values(task, prompt_file)
         if "{" in self.config.claude_command:
             return format_command_template(self.config.claude_command, values)
         mode = normalize_permission_mode(task.metadata.get("permission_mode") or self.config.permission_mode, "claude")
-        command = [*split_command_line(self.config.claude_command), "-p", "--session-id", str(values["session_id"])]
+        command = [*split_command_line(self.config.claude_command), "-p"]
+        if conversation_mode == "continue":
+            command.append("--continue")
+        elif conversation_mode == "continue_fork":
+            command.extend(["--continue", "--fork-session"])
+        elif conversation_mode == "session_id":
+            command.extend(["--session-id", str(values["session_id"])])
         model = normalize_model(str(task.metadata.get("model") or self.config.model or ""))
         if model:
             command.extend(["--model", model])
@@ -1219,6 +1232,15 @@ class ClaudeRunner(BaseRunner):
         command.append(short_prompt)
         return command
 
+    def build_commands(self, task: AITask, prompt_file: Path, short_prompt: str) -> list[list[str]]:
+        if "{" in self.config.claude_command:
+            return [self.build_command(task, prompt_file, short_prompt)]
+        return [
+            self.build_command(task, prompt_file, short_prompt, conversation_mode="continue"),
+            self.build_command(task, prompt_file, short_prompt, conversation_mode="continue_fork"),
+            self.build_command(task, prompt_file, short_prompt, conversation_mode="new"),
+        ]
+
     def _session_id(self, task: AITask) -> str:
         return str(task.metadata.get("session_id") or shared_session_id(task.work_dir))
 
@@ -1228,7 +1250,7 @@ class ClaudeRunner(BaseRunner):
 
     def run(self, task: AITask, prompt_file: Path, prompt_text: str, logger: logging.Logger) -> AIResult:
         session_id = self._session_id(task)
-        lock = runner_session_lock(f"claude:{session_id}")
+        lock = runner_session_lock(f"claude:{task.work_dir.resolve()}")
         with lock:
             result = super().run(task, prompt_file, prompt_text, logger)
             for delay in (2, 5, 10):
