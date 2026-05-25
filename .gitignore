@@ -10,6 +10,7 @@ __pycache__/
 *.pyc
 webui/node_modules/
 webui/dist/
+webui/vite.*.log
 build/
 /dist/
 *.spec
