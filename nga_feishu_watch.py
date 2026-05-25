@@ -71,6 +71,7 @@ DEFAULT_NGA_TARGET_MIN_DELAY = 2.0
 DEFAULT_NGA_TARGET_MAX_DELAY = 6.0
 DEFAULT_NGA_UNAVAILABLE_BACKOFF_BASE = 60.0
 DEFAULT_NGA_UNAVAILABLE_BACKOFF_MAX = 600.0
+DEFAULT_DAILY_PACK_MAX_PAGES = 200
 DEFAULT_FEISHU_CARD_IMAGE_LIMIT = 6
 FEISHU_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 NGA_TEMPORARY_STATUS_CODES = {302, 429, 500, 502, 503, 504}
@@ -299,14 +300,16 @@ class BotCommand:
     target_type: str = ""
     target_id: str = ""
     count: int = DEFAULT_REPLY_COUNT
+    days: int = 0
 
     def __str__(self) -> str:
         action_labels = {"start": "开始菜单", "history": "查询", "pack": "打包"}
         target_labels = {"reply": "用户回复", "thread": "帖子回复", "": "无目标"}
+        range_text = f"{self.days} 天" if self.days else f"{self.count} 条"
         return (
             f"{action_labels.get(self.action, self.action)} "
             f"{target_labels.get(self.target_type, self.target_type)} "
-            f"{self.target_id or '-'} {self.count} 条"
+            f"{self.target_id or '-'} {range_text}"
         ).strip()
 
 
@@ -1736,6 +1739,48 @@ def parse_post_time(value: str) -> time.struct_time | None:
     return None
 
 
+def post_timestamp(post: NgaPost) -> float | None:
+    parsed = parse_post_time(post.post_time)
+    if parsed is None:
+        return None
+    return time.mktime(parsed)
+
+
+def natural_day_start(days: int, now: time.struct_time | None = None) -> float:
+    days = max(1, int(days))
+    local_now = now or time.localtime()
+    today_start = time.mktime(
+        (
+            local_now.tm_year,
+            local_now.tm_mon,
+            local_now.tm_mday,
+            0,
+            0,
+            0,
+            local_now.tm_wday,
+            local_now.tm_yday,
+            local_now.tm_isdst,
+        )
+    )
+    return today_start - (days - 1) * 86400
+
+
+def posts_in_natural_days(posts: list[NgaPost], days: int) -> list[NgaPost]:
+    start_at = natural_day_start(days)
+    result: list[NgaPost] = []
+    for post in posts:
+        timestamp = post_timestamp(post)
+        if timestamp is not None and timestamp >= start_at:
+            result.append(post)
+    return result
+
+
+def page_reaches_before_natural_days(posts: list[NgaPost], days: int) -> bool:
+    start_at = natural_day_start(days)
+    timestamps = [timestamp for post in posts if (timestamp := post_timestamp(post)) is not None]
+    return bool(timestamps) and min(timestamps) < start_at
+
+
 def post_in_quiet_range(args: argparse.Namespace, post: NgaPost) -> bool:
     post_time = parse_post_time(post.post_time)
     if post_time is None:
@@ -1744,9 +1789,7 @@ def post_in_quiet_range(args: argparse.Namespace, post: NgaPost) -> bool:
 
 
 def post_sort_key(post: NgaPost) -> tuple[float, str]:
-    parsed = parse_post_time(post.post_time)
-    timestamp = time.mktime(parsed) if parsed is not None else 0.0
-    return timestamp, post.key
+    return post_timestamp(post) or 0.0, post.key
 
 
 def post_identity_key(post: NgaPost) -> str:
@@ -2115,7 +2158,7 @@ def feishu_posts_card(
     if not elements:
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "No replies found."}})
     return {
-        "config": {"wide_screen_mode": True},
+        "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {
             "template": "blue",
             "title": {"tag": "plain_text", "content": title[:60]},
@@ -2158,7 +2201,7 @@ def feishu_ai_markdown_card(title: str, markdown: str, part: int = 1, total: int
     suffix = f" ({part}/{total})" if total > 1 else ""
     content = (str(markdown or "").strip() or "(empty)").replace("<", "&lt;")
     return {
-        "config": {"wide_screen_mode": True},
+        "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {
             "template": "red" if is_error else "blue",
             "title": {"tag": "plain_text", "content": (title + suffix)[:60]},
@@ -2210,7 +2253,7 @@ def feishu_deferred_summary_card(
             }
         )
     return {
-        "config": {"wide_screen_mode": True},
+        "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {
             "template": "blue",
             "title": {"tag": "plain_text", "content": "免打扰期间新回复汇总"},
@@ -3776,6 +3819,15 @@ def clamp_count(value: str | None, default: int = 20, maximum: int = 200) -> int
     return max(1, min(count, maximum))
 
 
+def parse_pack_count_or_days(value: str | None, default: int, maximum: int = 500, max_days: int = 31) -> tuple[int, int]:
+    text = str(value or "").strip().lower()
+    if text:
+        match = re.fullmatch(r"(\d{1,3})d", text)
+        if match:
+            return default, max(1, min(int(match.group(1)), max_days))
+    return clamp_count(text or None, default, maximum), 0
+
+
 def default_command_count(command_name: str) -> int:
     return DEFAULT_THREAD_COUNT if command_name.endswith("_t") else DEFAULT_REPLY_COUNT
 
@@ -3808,7 +3860,7 @@ def parse_bot_command(
             count=clamp_count(legacy.group(1), DEFAULT_REPLY_COUNT, 50),
         )
 
-    match = re.search(r"(?:^|\s)/(history_r|pack_r|history_t|pack_t)(?:\s+([A-Za-z]?\d+))?(?:\s+(\d{1,4}))?(?:\s|$)", compact)
+    match = re.search(r"(?:^|\s)/(history_r|pack_r|history_t|pack_t)(?:\s+([A-Za-z]?\d+))?(?:\s+(\d{1,4}d?))?(?:\s|$)", compact)
     if not match:
         return None
 
@@ -3818,14 +3870,18 @@ def parse_bot_command(
         target = resolve_target_alias(raw_target or "", thread_targets, "t") or effective_tid
     else:
         target = resolve_target_alias(raw_target or "", author_targets, "u") or effective_author_id
-    count = clamp_count(raw_count, default_command_count(name), 500 if name.startswith("pack_") else 100)
+    days = 0
+    if name.startswith("pack_"):
+        count, days = parse_pack_count_or_days(raw_count, default_command_count(name), 500)
+    else:
+        count = clamp_count(raw_count, default_command_count(name), 100)
 
     # Compatibility for the older "/pack_r <default tid> <count>" spelling.
     if name == "pack_r" and target == default_tid:
         target_type = "thread"
 
     action = "pack" if name.startswith("pack_") else "history"
-    return BotCommand(action=action, target_type=target_type, target_id=target, count=count)
+    return BotCommand(action=action, target_type=target_type, target_id=target, count=count, days=days)
 
 
 def bot_command_from_form(
@@ -3848,12 +3904,16 @@ def bot_command_from_form(
         target = resolve_target_alias(raw_target, thread_targets, "t") or (thread_targets[0].id if thread_targets else default_tid)
     else:
         target = resolve_target_alias(raw_target, author_targets, "u") or (author_targets[0].id if author_targets else default_author_id)
-    count = clamp_count(raw_count or None, default_command_count(raw_name), 500 if raw_name.startswith("pack_") else 100)
+    days = 0
+    if raw_name.startswith("pack_"):
+        count, days = parse_pack_count_or_days(raw_count or None, default_command_count(raw_name), 500)
+    else:
+        count = clamp_count(raw_count or None, default_command_count(raw_name), 100)
     target_type = "thread" if raw_name.endswith("_t") else "reply"
     action = "pack" if raw_name.startswith("pack_") else "history"
     if raw_name == "pack_r" and target == default_tid:
         target_type = "thread"
-    return BotCommand(action=action, target_type=target_type, target_id=target, count=count)
+    return BotCommand(action=action, target_type=target_type, target_id=target, count=count, days=days)
 
 
 def form_action_name(form: dict[str, Any]) -> str:
@@ -3899,7 +3959,7 @@ def menu_back_row(action: str = "open_main_menu") -> dict[str, Any]:
 def main_menu_card(args: argparse.Namespace, manager: ai_analysis.AIManager) -> dict[str, Any]:
     return {
         "schema": "2.0",
-        "config": {"wide_screen_mode": True},
+        "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {"template": "blue", "title": {"tag": "plain_text", "content": "NGA Wolf Watcher"}},
         "body": {
             "elements": [
@@ -3945,9 +4005,9 @@ def start_card(default_author_id: str, default_tid: str) -> dict[str, Any]:
             f"默认 tid `{default_tid}` = 狼大帖",
             "",
             "`/history_r <uid|0> <count>` 查询用户回复",
-            "`/pack_r <uid|0> <count>` 打包用户回复为 txt",
+            "`/pack_r <uid|0> <count|Nd>` 打包用户回复为 txt",
             "`/history_t <tid> <count>` 查询帖子回复",
-            "`/pack_t <tid> <count>` 打包帖子回复为 txt",
+            "`/pack_t <tid> <count|Nd>` 打包帖子回复为 txt",
             "",
             "示例：",
             *[f"`{cmd}`" for cmd in commands],
@@ -3956,7 +4016,7 @@ def start_card(default_author_id: str, default_tid: str) -> dict[str, Any]:
         ]
     )
     return {
-        "config": {"wide_screen_mode": True},
+        "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {
             "template": "blue",
             "title": {"tag": "plain_text", "content": "NGA 监听"},
@@ -4001,16 +4061,16 @@ def start_form_card(default_author_id: str, default_tid: str, *, show_back: bool
                 "content": (
                     "也可以直接发命令：\n"
                     f"`/history_r {default_author_id} {DEFAULT_REPLY_COUNT}`\n"
-                    f"`/pack_r {default_author_id} {DEFAULT_REPLY_COUNT}`\n"
+                    f"`/pack_r {default_author_id} {DEFAULT_REPLY_COUNT}` 或 `/pack_r {default_author_id} 1d`\n"
                     f"`/history_t {default_tid} {DEFAULT_THREAD_COUNT}`\n"
-                    f"`/pack_t {default_tid} {DEFAULT_THREAD_COUNT}`"
+                    f"`/pack_t {default_tid} {DEFAULT_THREAD_COUNT}` 或 `/pack_t {default_tid} 1d`"
                 ),
             },
         ]
     )
     return {
         "schema": "2.0",
-        "config": {"wide_screen_mode": True},
+        "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {
             "template": "blue",
             "title": {"tag": "plain_text", "content": "拉取信息"},
@@ -4123,21 +4183,13 @@ def command_form_card(
     targets = author_targets if command.endswith("_r") else thread_targets
     targets = targets or [WatchTarget(target_id, "")]
     prefix = "u" if command.endswith("_r") else "t"
-    target_options = target_select_options(targets, prefix)
-    initial_target = target_select_initial_option(targets, prefix, target_id)
-    if initial_target and all(option.get("value") != initial_target.get("value") for option in target_options):
-        target_options.append(initial_target)
-    target_select = {
-        "tag": "select_static",
-        "name": "preset_target_id",
-        "placeholder": {"tag": "plain_text", "content": "Preset target"},
-        "options": target_options,
-    }
-    if initial_target:
-        target_select["initial_option"] = initial_target
+    target_help = " / ".join(
+        f"{prefix}{index}={target_display_name(target)}"
+        for index, target in enumerate(targets[:6], 1)
+    )
     return {
         "schema": "2.0",
-        "config": {"wide_screen_mode": True},
+        "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {
             "template": "blue",
             "title": {"tag": "plain_text", "content": labels.get(command, "NGA command")},
@@ -4149,17 +4201,20 @@ def command_form_card(
                     "tag": "form",
                     "name": "nga_command_form",
                     "elements": [
-                        target_select,
+                        {
+                            "tag": "markdown",
+                            "content": f"目标可填具体 `{target_label}`" + (f"，或预设别名：{target_help}" if target_help else ""),
+                        },
                         {
                             "tag": "input",
                             "name": "custom_target_id",
-                            "placeholder": {"tag": "plain_text", "content": f"Custom {target_label} (optional)"},
-                            "default_value": "",
+                            "placeholder": {"tag": "plain_text", "content": f"{target_label} / preset alias"},
+                            "default_value": target_id,
                         },
                         {
                             "tag": "input",
                             "name": "count",
-                            "placeholder": {"tag": "plain_text", "content": "数量"},
+                            "placeholder": {"tag": "plain_text", "content": "数量；打包可填 1d"},
                             "default_value": count,
                         },
                         {
@@ -4231,7 +4286,7 @@ def ai_settings_card(manager: ai_analysis.AIManager, mention_enabled: bool = Fal
     auto_prompt = str(state.get("auto_analysis_prompt") or effective.auto_analysis_prompt or ai_analysis.DEFAULT_AUTO_ANALYSIS_PROMPT)
     return {
         "schema": "2.0",
-        "config": {"wide_screen_mode": True},
+        "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {"template": "blue", "title": {"tag": "plain_text", "content": "设置"}},
         "body": {
             "elements": [
@@ -4355,7 +4410,7 @@ def ai_settings_card(manager: ai_analysis.AIManager, mention_enabled: bool = Fal
 def processing_card(title: str, detail: str, back_action: str = "open_main_menu") -> dict[str, Any]:
     return {
         "schema": "2.0",
-        "config": {"wide_screen_mode": True},
+        "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {"template": "blue", "title": {"tag": "plain_text", "content": title}},
         "body": {"elements": [menu_back_row(back_action), {"tag": "markdown", "content": detail}]},
     }
@@ -4367,7 +4422,7 @@ def ai_mode_card(manager: ai_analysis.AIManager, *, back_action: str = "open_mai
     options = ai_analysis.permission_mode_options(provider)
     return {
         "schema": "2.0",
-        "config": {"wide_screen_mode": True},
+        "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {
             "template": "orange" if current == "yolo" or current == "bypassPermissions" else "blue",
             "title": {"tag": "plain_text", "content": "AI 权限模式"},
@@ -4503,6 +4558,24 @@ def command_target_label(target_type: str, target_id: str, author_targets: list[
                 return f"帖子 {target_display_name(target)}"
         return f"帖子 {target_id}"
     return target_id or "未知目标"
+
+
+def command_range_title(command: BotCommand, post_count: int) -> str:
+    if not command.days:
+        return f"最新 {post_count} 条"
+    if command.days == 1:
+        return f"今日 {post_count} 条"
+    return f"近 {command.days} 个自然日 {post_count} 条"
+
+
+def command_pack_file_name(command: BotCommand, post_count: int) -> str:
+    if command.days:
+        today = time.strftime("%Y%m%d", time.localtime())
+        range_part = f"{today}" if command.days == 1 else f"{today}_{command.days}d"
+    else:
+        range_part = str(post_count)
+    safe_target = re.sub(r"[^A-Za-z0-9_-]+", "_", command.target_id or "any").strip("_") or "any"
+    return f"nga_{command.target_type}_{safe_target}_{range_part}_{int(time.time())}.txt"
 
 
 def target_from_alias(token: str, targets: list[WatchTarget], prefix: str) -> WatchTarget | None:
@@ -4859,19 +4932,25 @@ def run_bot_command(args: argparse.Namespace, command: BotCommand) -> None:
     author_targets = watch_author_targets(args)
     thread_targets = preset_thread_targets(args)
     if command.target_type == "reply":
-        posts = collect_replies_with_retries(args, command.target_id, command.count)
+        if command.action == "pack" and command.days:
+            posts = collect_replies_in_days_with_retries(args, command.target_id, command.days)
+        else:
+            posts = collect_replies_with_retries(args, command.target_id, command.count)
         label = command_target_label(command.target_type, command.target_id, author_targets, thread_targets)
     elif command.target_type == "thread":
-        posts = collect_thread_tail_with_retries(args, command.target_id, command.count)
+        if command.action == "pack" and command.days:
+            posts = collect_thread_in_days_with_retries(args, command.target_id, command.days)
+        else:
+            posts = collect_thread_tail_with_retries(args, command.target_id, command.count)
         label = command_target_label(command.target_type, command.target_id, author_targets, thread_targets)
     else:
         raise RuntimeError(f"未知命令目标：{command}")
 
-    title = f"NGA {label} 最新 {len(posts)} 条"
-    if len(posts) < command.count:
+    title = f"NGA {label} {command_range_title(command, len(posts))}"
+    if not command.days and len(posts) < command.count:
         title += f"（请求 {command.count} 条，NGA 临时限流时会先返回已获取部分）"
     if command.action == "pack":
-        file_name = f"nga_{command.target_type}_{command.target_id or 'any'}_{len(posts)}_{int(time.time())}.txt"
+        file_name = command_pack_file_name(command, len(posts))
         push_channel_file(args, file_name, posts_to_txt(posts, title))
     else:
         if not is_wechat_channel(args) and args.message_format == "card" and len(posts) > 20:
@@ -4904,6 +4983,16 @@ def run_command_background(args: argparse.Namespace, command: BotCommand, label:
                 push_channel_posts(args, [err_post], "NGA 命令处理失败")
             except Exception as nested:
                 print(f"发送错误消息失败: {nested}", file=sys.stderr)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def push_card_background(args: argparse.Namespace, card: dict[str, Any], label: str) -> None:
+    def worker() -> None:
+        try:
+            push_feishu_card(args, card)
+        except Exception as exc:
+            print(f"发送飞书卡片失败 {label}: {exc}", file=sys.stderr)
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -5182,7 +5271,8 @@ def start_ws(args: argparse.Namespace) -> None:
                 command_name = str(form.get("command") or "history_r")
                 target_id = str(form.get("target_id") or (args.default_tid if command_name.endswith("_t") else args.default_author_id))
                 count = str(form.get("count") or default_command_count(command_name))
-                return card_response(command_form_card(command_name, target_id, count, watch_author_targets(scoped_args), preset_thread_targets(scoped_args)), "已打开预填表单")
+                form_card = command_form_card(command_name, target_id, count, watch_author_targets(scoped_args), preset_thread_targets(scoped_args))
+                return card_response(form_card, "已打开预填表单")
             command = bot_command_from_form(form, args.default_author_id, args.default_tid, watch_author_targets(scoped_args), preset_thread_targets(scoped_args))
             run_command_background(scoped_args, command, "卡片操作")
             return card_response(processing_card("正在处理", f"已收到 `{command}`，结果会发送到当前群。", "open_fetch_menu"), "已收到，正在处理")
@@ -5434,6 +5524,51 @@ def collect_recent_replies(
     return collect_posts(author_id, cookie, pages, timeout, attempts, retry_initial_delay, retry_delay, page_delay, request_min_interval, cache_ttl, allow_partial)[:count]
 
 
+def collect_replies_in_natural_days(
+    author_id: str,
+    days: int,
+    cookie: str,
+    timeout: int,
+    attempts: int = 1,
+    retry_initial_delay: float = DEFAULT_RETRY_INITIAL_DELAY,
+    retry_delay: float = 0,
+    page_delay: float = DEFAULT_NGA_PAGE_DELAY,
+    request_min_interval: float = DEFAULT_NGA_REQUEST_MIN_INTERVAL,
+    cache_ttl: float = DEFAULT_NGA_CACHE_TTL,
+    allow_partial: bool = False,
+    max_pages: int = DEFAULT_DAILY_PACK_MAX_PAGES,
+) -> list[NgaPost]:
+    posts: list[NgaPost] = []
+    max_pages = max(1, int(max_pages))
+    for page in range(1, max_pages + 1):
+        try:
+            payload = with_retries(
+                f"NGA 用户回复第 {page} 页",
+                attempts,
+                retry_initial_delay,
+                retry_delay,
+                lambda page=page: fetch_nga_page(author_id, page, cookie, timeout, request_min_interval, cache_ttl),
+            )
+        except Exception as exc:
+            if allow_partial and posts and is_nga_temporary_unavailable(exc):
+                print(f"NGA 用户回复第 {page} 页临时不可用，返回已抓到的 {len(posts)} 条。", file=sys.stderr)
+                break
+            raise
+        page_posts = extract_posts(payload)
+        if page > 1 and not page_posts:
+            break
+        matched = posts_in_natural_days(page_posts, days)
+        posts.extend(matched)
+        print(f"日打包用户 {author_id} 第 {page} 页：命中 {len(matched)}/{len(page_posts)} 条，累计 {len(posts)} 条。")
+        if page_reaches_before_natural_days(page_posts, days):
+            break
+        if page < max_pages:
+            sleep_between_nga_pages(page_delay)
+    else:
+        print(f"日打包用户 {author_id} 已达到最大页数 {max_pages}，可能仍有范围内回复未打包。", file=sys.stderr)
+    return posts
+
+
 def collect_thread_tail(
     tid: str,
     count: int,
@@ -5486,6 +5621,65 @@ def collect_thread_tail(
         posts_by_page = page_posts + posts_by_page
         page -= 1
     return posts_by_page[-count:]
+
+
+def collect_thread_in_natural_days(
+    tid: str,
+    days: int,
+    cookie: str,
+    timeout: int,
+    attempts: int = 1,
+    retry_initial_delay: float = DEFAULT_RETRY_INITIAL_DELAY,
+    retry_delay: float = 0,
+    page_delay: float = DEFAULT_NGA_PAGE_DELAY,
+    request_min_interval: float = DEFAULT_NGA_REQUEST_MIN_INTERVAL,
+    cache_ttl: float = DEFAULT_NGA_CACHE_TTL,
+    allow_partial: bool = False,
+    max_pages: int = DEFAULT_DAILY_PACK_MAX_PAGES,
+) -> list[NgaPost]:
+    first_payload = with_retries(
+        f"NGA 帖子 {tid} 页数",
+        attempts,
+        retry_initial_delay,
+        retry_delay,
+        lambda: fetch_nga_thread_page(tid, 1, cookie, timeout, request_min_interval, cache_ttl),
+    )
+    last_page = thread_page_count(first_payload)
+    posts: list[NgaPost] = []
+    max_pages = max(1, int(max_pages))
+    checked_pages = 0
+    for page in range(last_page, 0, -1):
+        if checked_pages >= max_pages:
+            break
+        checked_pages += 1
+        if page == 1:
+            payload = first_payload
+        else:
+            if checked_pages > 1:
+                sleep_between_nga_pages(page_delay)
+            try:
+                payload = with_retries(
+                    f"NGA 帖子 {tid} 第 {page} 页",
+                    attempts,
+                    retry_initial_delay,
+                    retry_delay,
+                    lambda page=page: fetch_nga_thread_page(tid, page, cookie, timeout, request_min_interval, cache_ttl),
+                )
+            except Exception as exc:
+                if allow_partial and posts and is_nga_temporary_unavailable(exc):
+                    print(f"NGA 帖子 {tid} 第 {page} 页临时不可用，返回已抓到的 {len(posts)} 条。", file=sys.stderr)
+                    break
+                raise
+        page_posts, _ = extract_thread_posts(payload)
+        matched = posts_in_natural_days(page_posts, days)
+        posts = matched + posts
+        print(f"日打包帖子 {tid} 第 {page}/{last_page} 页：命中 {len(matched)}/{len(page_posts)} 条，累计 {len(posts)} 条。")
+        if page_reaches_before_natural_days(page_posts, days):
+            break
+    else:
+        if checked_pages >= max_pages:
+            print(f"日打包帖子 {tid} 已达到最大页数 {max_pages}，可能仍有范围内回复未打包。", file=sys.stderr)
+    return posts
 
 
 def with_retries(label: str, attempts: int, initial_delay: float, step_delay: float, fn: Any) -> Any:
@@ -5595,6 +5789,27 @@ def collect_replies_with_retries(args: argparse.Namespace, author_id: str, count
     )
 
 
+def collect_replies_in_days_with_retries(args: argparse.Namespace, author_id: str, days: int) -> list[NgaPost]:
+    cookie = args.cookie or os.getenv("NGA_COOKIE", "")
+    if not cookie:
+        raise SystemExit("缺少 NGA_COOKIE。请从已登录 bbs.nga.cn 的浏览器会话复制 Cookie。")
+    max_pages = int(os.getenv("NGA_DAILY_PACK_MAX_PAGES", str(DEFAULT_DAILY_PACK_MAX_PAGES)))
+    return collect_replies_in_natural_days(
+        author_id,
+        days,
+        cookie,
+        args.timeout,
+        args.retries,
+        getattr(args, "retry_initial_delay", DEFAULT_RETRY_INITIAL_DELAY),
+        args.retry_delay,
+        getattr(args, "nga_page_delay", DEFAULT_NGA_PAGE_DELAY),
+        getattr(args, "nga_request_min_interval", DEFAULT_NGA_REQUEST_MIN_INTERVAL),
+        getattr(args, "nga_cache_ttl", DEFAULT_NGA_CACHE_TTL),
+        True,
+        max_pages,
+    )
+
+
 def collect_thread_tail_with_retries(args: argparse.Namespace, tid: str, count: int) -> list[NgaPost]:
     cookie = args.cookie or os.getenv("NGA_COOKIE", "")
     if not cookie:
@@ -5611,6 +5826,27 @@ def collect_thread_tail_with_retries(args: argparse.Namespace, tid: str, count: 
         getattr(args, "nga_request_min_interval", DEFAULT_NGA_REQUEST_MIN_INTERVAL),
         getattr(args, "nga_cache_ttl", DEFAULT_NGA_CACHE_TTL),
         True,
+    )
+
+
+def collect_thread_in_days_with_retries(args: argparse.Namespace, tid: str, days: int) -> list[NgaPost]:
+    cookie = args.cookie or os.getenv("NGA_COOKIE", "")
+    if not cookie:
+        raise SystemExit("缺少 NGA_COOKIE。请从已登录 bbs.nga.cn 的浏览器会话复制 Cookie。")
+    max_pages = int(os.getenv("NGA_DAILY_PACK_MAX_PAGES", str(DEFAULT_DAILY_PACK_MAX_PAGES)))
+    return collect_thread_in_natural_days(
+        tid,
+        days,
+        cookie,
+        args.timeout,
+        args.retries,
+        getattr(args, "retry_initial_delay", DEFAULT_RETRY_INITIAL_DELAY),
+        args.retry_delay,
+        getattr(args, "nga_page_delay", DEFAULT_NGA_PAGE_DELAY),
+        getattr(args, "nga_request_min_interval", DEFAULT_NGA_REQUEST_MIN_INTERVAL),
+        getattr(args, "nga_cache_ttl", DEFAULT_NGA_CACHE_TTL),
+        True,
+        max_pages,
     )
 
 

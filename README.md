@@ -160,9 +160,9 @@ Defaults:
 Command meanings:
 
 - `/history_r <uid|0> <count>` fetch recent replies by uid and send them through the selected channel.
-- `/pack_r <uid|0> <count>` fetch recent replies by uid and pack the content. Feishu app mode sends a `.txt` file; WeChat mode also tries to send a real `.txt` file through iLink media upload, then falls back to text chunks if upload is unavailable.
+- `/pack_r <uid|0> <count|Nd>` fetch recent replies by uid and pack the content. Use `1d` for today's natural day, or `3d` for today plus the previous two natural days. Feishu app mode sends a `.txt` file; WeChat mode also tries to send a real `.txt` file through iLink media upload, then falls back to text chunks if upload is unavailable.
 - `/history_t <tid> <count>` fetch latest posts from a thread and send them through the selected channel.
-- `/pack_t <tid> <count>` fetch latest posts from a thread and pack the content.
+- `/pack_t <tid> <count|Nd>` fetch latest posts from a thread and pack the content. `Nd` uses natural days and only applies to pack commands.
 
 `/pack_r 45974302 10` is accepted as a compatibility alias for packing the default wolf thread.
 
