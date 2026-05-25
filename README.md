@@ -2,7 +2,7 @@
 
 English | [中文说明](README.zh-CN.md)
 
-Watch specified NGA replies, push new replies to Feishu or WeChat, and use group commands / Feishu cards to fetch history or pack results into `.txt` files.
+Watch specified NGA replies, push new replies to Feishu, WeChat, or email, and use group commands / Feishu cards to fetch history or pack results into `.txt` files.
 
 ## Features
 
@@ -62,9 +62,9 @@ The GUI saves local secrets under `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`.
 
 The recommended client separates configuration into clearer sections while keeping old configs compatible:
 
-- `Message channel profiles`: bot accounts only. A Feishu profile stores App ID / App Secret and caches the chat list inside that profile; a WeChat profile stores the ilink token, target user, and account id.
+- `Message channel profiles`: bot accounts only. A Feishu profile stores App ID / App Secret and caches the chat list inside that profile; a WeChat profile stores the ilink token, target user, and account id; an email profile stores SMTP settings for outbound mail. This is the sender mailbox; using a separate small mailbox as the sending bot is recommended.
 - `Targets` / `NGA resources`: reusable user IDs and thread IDs for monitoring and manual fetches.
-- `Listen rules`: choose the watch source, either an author reply page or a fixed thread filtered by author, then directly select send destinations. A Feishu destination is a Feishu profile plus one chat; a WeChat destination is a WeChat profile. One rule can push to multiple Feishu chats and WeChat accounts at the same time.
+- `Listen rules`: choose the watch source, either an author reply page or a fixed thread filtered by author, then directly select send destinations. A Feishu destination is a Feishu profile plus one chat; a WeChat destination is a WeChat profile; an email destination is an email sender profile plus recipient address. The real receiving mailbox is configured here. One rule can push to multiple destinations at the same time.
 
 Manual fetches are not limited by listen rules. Feishu and WeChat commands such as `/history_r`, `/pack_r`, `/history_t`, and `/pack_t` can fetch any configured user or thread. Short commands use the current entry's default user/thread when available.
 
@@ -94,6 +94,26 @@ WeChat does not support Feishu-style interactive cards, so the watcher provides 
 - After `/start`, reply with `1`, `2`, `3`, `4`, or `5` for common fetch, pack, and settings actions.
 - After `/setting`, reply with `1` through `8` to control AI, auto analysis, scheduled analysis, and return to the main menu.
 - Direct short aliases also work: `hr10`/`hr 10`, `pr20`/`pr 20`, `ht10`/`ht 10`, `pt50`/`pt 50`, `s`, `st`, `a1/a0`, `n1/n0`, `q1/q0`, `b`.
+
+Email SMTP channel variables:
+
+```powershell
+NGA_BOT_CHANNEL=email
+EMAIL_SMTP_HOST=smtp.gmail.com
+EMAIL_SMTP_PORT=587
+EMAIL_SMTP_SECURITY=starttls
+EMAIL_USERNAME=<sender@example.com>
+EMAIL_PASSWORD=<SMTP password or app password>
+EMAIL_FROM=<sender@example.com>
+EMAIL_FROM_NAME=NGA Wolf Watcher
+EMAIL_TO=<receiver@example.com>
+```
+
+In the GUI, prefer the mailbox type templates. 163, 126, QQ Mail, Gmail, and Outlook / Microsoft 365 fill the SMTP server, port, and encryption mode automatically. Only choose `Custom mailbox` when your provider is not listed and you need to enter those low-level SMTP settings manually. Templates configure the sender only; the recipient address is still selected in each listen rule's send destination.
+
+The sender can be any mailbox that supports standard SMTP authentication, such as Gmail, Outlook, QQ Mail, 163 Mail, or an enterprise mailbox. Using a separate small mailbox as the sending bot is recommended so your personal mailbox authorization token is not stored in the watcher config. Most personal mailboxes cannot use the normal login password for SMTP. Open the mailbox provider's web settings, enable `POP3/SMTP/IMAP` or the equivalent SMTP service, then generate an authorization code, client authorization code, or app password. 163/126/QQ Mail usually use authorization codes. Gmail usually needs a Google App Password, and App Passwords require 2-Step Verification on the Google Account.
+
+The recipient can be any email address. The email channel is outbound-only: it can receive new-reply pushes, quiet-hours summaries, packed `.txt` results, and AI analysis output, but it does not receive chat commands or log in to the recipient mailbox to read replies.
 
 ### Do-Not-Disturb Hours
 

@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import ai_analysis
+import email_channel
 import wechat_bot
 
 
@@ -249,6 +250,20 @@ class WeChatBotProfile:
     poll_timeout_ms: int = wechat_bot.DEFAULT_WECHAT_POLL_TIMEOUT_MS
     route_tag: str = ""
     account_id: str = "default"
+
+
+@dataclass(frozen=True)
+class EmailSmtpProfile:
+    id: str
+    label: str = ""
+    smtp_host: str = email_channel.DEFAULT_SMTP_HOST
+    smtp_port: int = email_channel.DEFAULT_SMTP_PORT
+    smtp_security: str = email_channel.DEFAULT_SMTP_SECURITY
+    username: str = ""
+    password: str = ""
+    from_email: str = ""
+    from_name: str = "NGA Wolf Watcher"
+    reply_to: str = ""
 
 
 @dataclass(frozen=True)
@@ -577,9 +592,39 @@ def parse_wechat_bot_profiles(raw: Any) -> list[WeChatBotProfile]:
     return profiles
 
 
+def parse_email_smtp_profiles(raw: Any) -> list[EmailSmtpProfile]:
+    profiles: list[EmailSmtpProfile] = []
+    for item in json_list_value(raw):
+        if not isinstance(item, dict):
+            continue
+        username = str(item.get("username") or item.get("email_username") or item.get("gmail_address") or "").strip()
+        from_email = str(item.get("from_email") or item.get("email_from") or username).strip()
+        password = str(item.get("password") or item.get("app_password") or item.get("email_password") or "").strip()
+        profile_id = str(item.get("id") or "").strip() or stable_profile_id("email", username, from_email, str(item.get("label") or ""))
+        try:
+            smtp_port = int(item.get("smtp_port") or item.get("port") or email_channel.DEFAULT_SMTP_PORT)
+        except (TypeError, ValueError):
+            smtp_port = email_channel.DEFAULT_SMTP_PORT
+        profiles.append(
+            EmailSmtpProfile(
+                id=profile_id,
+                label=str(item.get("label") or item.get("name") or "").strip(),
+                smtp_host=str(item.get("smtp_host") or item.get("host") or email_channel.DEFAULT_SMTP_HOST).strip() or email_channel.DEFAULT_SMTP_HOST,
+                smtp_port=smtp_port,
+                smtp_security=str(item.get("smtp_security") or item.get("security") or email_channel.DEFAULT_SMTP_SECURITY).strip().lower() or email_channel.DEFAULT_SMTP_SECURITY,
+                username=username,
+                password=password,
+                from_email=from_email,
+                from_name=str(item.get("from_name") or item.get("sender_name") or "NGA Wolf Watcher").strip(),
+                reply_to=str(item.get("reply_to") or "").strip(),
+            )
+        )
+    return profiles
+
+
 def normalize_channel(raw: Any, default: str = "feishu") -> str:
     value = str(raw or default).strip().lower()
-    return value if value in {"feishu", "wechat"} else default
+    return value if value in {"feishu", "wechat", "email"} else default
 
 
 def normalize_listen_mode(raw: Any, default: str = "thread_author") -> str:
@@ -616,7 +661,7 @@ def parse_push_targets(raw: Any) -> list[PushTarget]:
                 channel=channel,
                 profile_id=profile_id,
                 receive_id=receive_id,
-                id_type=str(item.get("id_type") or item.get("receive_id_type") or item.get("feishu_id_type") or "chat_id").strip() or "chat_id",
+                id_type=str(item.get("id_type") or item.get("receive_id_type") or item.get("feishu_id_type") or ("email" if channel == "email" else "chat_id")).strip() or ("email" if channel == "email" else "chat_id"),
                 default_author_id=str(item.get("default_author_id") or item.get("author_id") or "").strip(),
                 default_tid=str(item.get("default_tid") or item.get("tid") or "").strip(),
             )
@@ -711,6 +756,40 @@ def wechat_bot_profiles(args: argparse.Namespace) -> list[WeChatBotProfile]:
     ]
 
 
+def email_smtp_profiles(args: argparse.Namespace) -> list[EmailSmtpProfile]:
+    raw = (
+        getattr(args, "email_smtp_profiles", "")
+        or os.getenv("EMAIL_SMTP_PROFILES", "")
+        or os.getenv("GMAIL_SMTP_PROFILES", "")
+    )
+    profiles = parse_email_smtp_profiles(raw)
+    if profiles:
+        return profiles
+    username = getattr(args, "email_username", "") or os.getenv("EMAIL_USERNAME", "") or os.getenv("GMAIL_USERNAME", "")
+    password = getattr(args, "email_password", "") or os.getenv("EMAIL_PASSWORD", "") or os.getenv("GMAIL_APP_PASSWORD", "")
+    from_email = getattr(args, "email_from", "") or os.getenv("EMAIL_FROM", "") or username
+    if not (username or password or from_email):
+        return []
+    try:
+        smtp_port = int(getattr(args, "email_smtp_port", None) or os.getenv("EMAIL_SMTP_PORT", "") or email_channel.DEFAULT_SMTP_PORT)
+    except (TypeError, ValueError):
+        smtp_port = email_channel.DEFAULT_SMTP_PORT
+    return [
+        EmailSmtpProfile(
+            id="default",
+            label="default",
+            smtp_host=str(getattr(args, "email_smtp_host", "") or os.getenv("EMAIL_SMTP_HOST", email_channel.DEFAULT_SMTP_HOST)).strip() or email_channel.DEFAULT_SMTP_HOST,
+            smtp_port=smtp_port,
+            smtp_security=str(getattr(args, "email_smtp_security", "") or os.getenv("EMAIL_SMTP_SECURITY", email_channel.DEFAULT_SMTP_SECURITY)).strip().lower() or email_channel.DEFAULT_SMTP_SECURITY,
+            username=str(username).strip(),
+            password=str(password).strip(),
+            from_email=str(from_email).strip(),
+            from_name=str(getattr(args, "email_from_name", "") or os.getenv("EMAIL_FROM_NAME", "NGA Wolf Watcher")).strip(),
+            reply_to=str(getattr(args, "email_reply_to", "") or os.getenv("EMAIL_REPLY_TO", "")).strip(),
+        )
+    ]
+
+
 def configured_push_targets(args: argparse.Namespace) -> list[PushTarget]:
     raw = getattr(args, "push_targets", "") or os.getenv("NGA_PUSH_TARGETS", "")
     targets = parse_push_targets(raw)
@@ -728,6 +807,23 @@ def configured_push_targets(args: argparse.Namespace) -> list[PushTarget]:
                     channel="wechat",
                     profile_id=profile.id if profile else "",
                     receive_id=receive_id or (profile.target_user_id if profile else ""),
+                    default_author_id=str(getattr(args, "default_author_id", "") or DEFAULT_AUTHOR_ID),
+                    default_tid=str(getattr(args, "default_tid", "") or DEFAULT_TID),
+                )
+            ]
+        return []
+    if channel == "email":
+        profile = find_email_profile(args, "")
+        receive_id = str(getattr(args, "email_to", "") or os.getenv("EMAIL_TO", "") or os.getenv("GMAIL_TO", "")).strip()
+        if profile or receive_id:
+            return [
+                PushTarget(
+                    id="default",
+                    label="Default email",
+                    channel="email",
+                    profile_id=profile.id if profile else "",
+                    receive_id=receive_id,
+                    id_type="email",
                     default_author_id=str(getattr(args, "default_author_id", "") or DEFAULT_AUTHOR_ID),
                     default_tid=str(getattr(args, "default_tid", "") or DEFAULT_TID),
                 )
@@ -818,6 +914,18 @@ def args_for_push_target(args: argparse.Namespace, target: PushTarget) -> argpar
         cloned = args_for_configured_route(args, route_channel="wechat", route_profile_id=target.profile_id)
         if target.receive_id:
             cloned.wechat_bot_target_user_id = target.receive_id
+        if target.default_author_id:
+            cloned.default_author_id = target.default_author_id
+        if target.default_tid:
+            cloned.default_tid = target.default_tid
+        return cloned
+    if target.channel == "email":
+        cloned = args_for_configured_route(
+            args,
+            route_channel="email",
+            route_profile_id=target.profile_id,
+            receive_id=target.receive_id,
+        )
         if target.default_author_id:
             cloned.default_author_id = target.default_author_id
         if target.default_tid:
@@ -926,11 +1034,15 @@ def add_thread_author_source(post: NgaPost, watch: ThreadAuthorWatch) -> NgaPost
 
 def bot_channel(args: argparse.Namespace) -> str:
     channel = str(getattr(args, "bot_channel", "") or os.getenv("NGA_BOT_CHANNEL", "feishu")).strip().lower()
-    return channel if channel in {"feishu", "wechat"} else "feishu"
+    return channel if channel in {"feishu", "wechat", "email"} else "feishu"
 
 
 def is_wechat_channel(args: argparse.Namespace) -> bool:
     return bot_channel(args) == "wechat"
+
+
+def is_email_channel(args: argparse.Namespace) -> bool:
+    return bot_channel(args) == "email"
 
 
 def wechat_client_for_args(args: argparse.Namespace) -> wechat_bot.WeChatBotClient:
@@ -965,6 +1077,17 @@ def find_wechat_profile(args: argparse.Namespace, profile_id: str) -> WeChatBotP
     return None
 
 
+def find_email_profile(args: argparse.Namespace, profile_id: str) -> EmailSmtpProfile | None:
+    target = str(profile_id or "").strip()
+    profiles = email_smtp_profiles(args)
+    if not target and profiles:
+        return profiles[0]
+    for profile in profiles:
+        if target in {profile.id, profile.label, profile.username, profile.from_email}:
+            return profile
+    return None
+
+
 def args_for_configured_route(
     args: argparse.Namespace,
     *,
@@ -990,6 +1113,22 @@ def args_for_configured_route(
             cloned.wechat_bot_poll_timeout_ms = profile.poll_timeout_ms
             cloned.wechat_bot_route_tag = profile.route_tag
             cloned.wechat_bot_account_id = profile.account_id
+        return cloned
+    if channel == "email":
+        profile = find_email_profile(args, route_profile_id)
+        cloned = copy.copy(args)
+        cloned.bot_channel = "email"
+        if profile:
+            cloned.email_smtp_host = profile.smtp_host
+            cloned.email_smtp_port = profile.smtp_port
+            cloned.email_smtp_security = profile.smtp_security
+            cloned.email_username = profile.username
+            cloned.email_password = profile.password
+            cloned.email_from = profile.from_email
+            cloned.email_from_name = profile.from_name
+            cloned.email_reply_to = profile.reply_to
+        if receive_id:
+            cloned.email_to = receive_id
         return cloned
     if channel == "feishu" or route_profile_id or receive_id or legacy_feishu_app_id or legacy_feishu_app_secret:
         profile = find_feishu_profile(args, route_profile_id)
@@ -2602,9 +2741,39 @@ def push_feishu_raw_card(args: argparse.Namespace, card: dict[str, Any]) -> None
         raise RuntimeError(f"Feishu webhook card message failed: {result}")
 
 
+def email_config_for_args(args: argparse.Namespace) -> email_channel.EmailSmtpConfig:
+    return email_channel.EmailSmtpConfig(
+        smtp_host=str(getattr(args, "email_smtp_host", "") or os.getenv("EMAIL_SMTP_HOST", email_channel.DEFAULT_SMTP_HOST)).strip() or email_channel.DEFAULT_SMTP_HOST,
+        smtp_port=int(getattr(args, "email_smtp_port", None) or os.getenv("EMAIL_SMTP_PORT", "") or email_channel.DEFAULT_SMTP_PORT),
+        smtp_security=str(getattr(args, "email_smtp_security", "") or os.getenv("EMAIL_SMTP_SECURITY", email_channel.DEFAULT_SMTP_SECURITY)).strip().lower() or email_channel.DEFAULT_SMTP_SECURITY,
+        username=str(getattr(args, "email_username", "") or os.getenv("EMAIL_USERNAME", "") or os.getenv("GMAIL_USERNAME", "")).strip(),
+        password=str(getattr(args, "email_password", "") or os.getenv("EMAIL_PASSWORD", "") or os.getenv("GMAIL_APP_PASSWORD", "")).strip(),
+        from_email=str(getattr(args, "email_from", "") or os.getenv("EMAIL_FROM", "")).strip(),
+        from_name=str(getattr(args, "email_from_name", "") or os.getenv("EMAIL_FROM_NAME", "NGA Wolf Watcher")).strip(),
+        reply_to=str(getattr(args, "email_reply_to", "") or os.getenv("EMAIL_REPLY_TO", "")).strip(),
+        timeout=int(getattr(args, "timeout", 20) or 20),
+    )
+
+
+def push_email_text(
+    args: argparse.Namespace,
+    title: str,
+    text: str,
+    *,
+    attachments: Iterable[email_channel.EmailAttachment] = (),
+) -> None:
+    recipient = str(getattr(args, "email_to", "") or os.getenv("EMAIL_TO", "") or os.getenv("GMAIL_TO", "")).strip()
+    if not recipient:
+        raise SystemExit("缺少收件邮箱。请填写 EMAIL_TO，或在发送目标里添加一个邮箱地址。")
+    email_channel.send_email(email_config_for_args(args), recipient, title or "NGA Wolf Watcher", text, attachments=attachments)
+
+
 def push_channel_raw_text(args: argparse.Namespace, text: str) -> None:
     if is_wechat_channel(args):
         wechat_client_for_args(args).send_text_to_target(text)
+        return
+    if is_email_channel(args):
+        push_email_text(args, "NGA Wolf Watcher", text)
         return
     push_feishu_raw_text(args, text)
 
@@ -2613,6 +2782,9 @@ def push_channel_text(args: argparse.Namespace, title: str, text: str) -> None:
     if is_wechat_channel(args):
         content = f"{title}\n\n{text}" if title else text
         wechat_client_for_args(args).send_text_to_target(content)
+        return
+    if is_email_channel(args):
+        push_email_text(args, title or "NGA Wolf Watcher", text)
         return
     push_feishu_text(args, title, text)
 
@@ -2655,12 +2827,23 @@ def push_channel_file(args: argparse.Namespace, file_name: str, text: str) -> No
                 ),
             )
         return
+    if is_email_channel(args):
+        push_email_text(
+            args,
+            Path(file_name).stem or "NGA Wolf Watcher attachment",
+            f"See attached file: {file_name}",
+            attachments=(email_channel.EmailAttachment(file_name=file_name, content=str(text or "").encode("utf-8"), mime_type="text/plain"),),
+        )
+        return
     push_feishu_file(args, file_name, text)
 
 
 def push_channel_posts(args: argparse.Namespace, posts: list[NgaPost], title: str, mention_user_id: str = "") -> None:
     if is_wechat_channel(args):
         push_channel_raw_text(args, wechat_posts_text(posts, title))
+        return
+    if is_email_channel(args):
+        push_email_text(args, title, posts_to_txt(posts, title))
         return
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     if not (app_id and app_secret and receive_id):
@@ -3001,6 +3184,9 @@ def push_ai_markdown(args: argparse.Namespace, title: str, markdown: str, *, is_
         prefix = f"{title}\n\n" if title else ""
         push_channel_raw_text(args, prefix + markdown)
         return
+    if is_email_channel(args):
+        push_channel_text(args, title, markdown)
+        return
     chunks = split_text_chunks(markdown, 2800)
     total = len(chunks)
     try:
@@ -3027,7 +3213,12 @@ def push_ai_result(args: argparse.Namespace, result: ai_analysis.AIResult) -> No
 
 def ai_manager_for_args(args: argparse.Namespace) -> ai_analysis.AIManager:
     config = ai_analysis.AIConfig.from_namespace(args)
-    target = getattr(args, "wechat_bot_target_user_id", "") if is_wechat_channel(args) else getattr(args, "feishu_receive_id", "")
+    if is_wechat_channel(args):
+        target = getattr(args, "wechat_bot_target_user_id", "")
+    elif is_email_channel(args):
+        target = getattr(args, "email_to", "")
+    else:
+        target = getattr(args, "feishu_receive_id", "")
     key = (str(config.work_dir.resolve()), f"{bot_channel(args)}:{target or ''}")
     manager = _AI_MANAGERS.get(key)
     if manager is not None:
@@ -4692,6 +4883,16 @@ def channel_route_key(args: argparse.Namespace) -> tuple[str, str, str, str, str
             str(getattr(args, "wechat_bot_target_user_id", "") or ""),
             str(getattr(args, "wechat_bot_route_tag", "") or ""),
         )
+    if is_email_channel(args):
+        password = str(getattr(args, "email_password", "") or "")
+        password_hash = hashlib.sha1(password.encode("utf-8")).hexdigest()[:12] if password else ""
+        return (
+            "email",
+            str(getattr(args, "email_username", "") or ""),
+            password_hash,
+            str(getattr(args, "email_to", "") or ""),
+            str(getattr(args, "email_smtp_host", "") or ""),
+        )
     return feishu_route_key(args)
 
 
@@ -5136,6 +5337,10 @@ def send_test_message(args: argparse.Namespace) -> None:
         push_channel_posts(args, [post], "NGA 监听测试")
         print("测试消息已发送。")
         return
+    if is_email_channel(args):
+        push_channel_posts(args, [post], "NGA Wolf Watcher test message")
+        print("Test message sent.")
+        return
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     if app_id and app_secret and receive_id:
         push_feishu_app_posts(
@@ -5158,6 +5363,10 @@ def push_deferred_summary_direct(args: argparse.Namespace, posts: list[NgaPost],
     if not posts:
         return
     if is_wechat_channel(args):
+        title = f"Quiet-hours summary ({len(posts)} posts)"
+        push_channel_posts(args, posts, title)
+        return
+    if is_email_channel(args):
         title = f"Quiet-hours summary ({len(posts)} posts)"
         push_channel_posts(args, posts, title)
         return
@@ -5214,6 +5423,9 @@ def push_deferred_summary(args: argparse.Namespace, posts: list[NgaPost]) -> Non
 def push_single_channel_post(args: argparse.Namespace, post: NgaPost, mention_user_id: str = "") -> None:
     if is_wechat_channel(args):
         push_channel_raw_text(args, wechat_posts_text([post], new_reply_title(post)))
+        return
+    if is_email_channel(args):
+        push_channel_posts(args, [post], new_reply_title(post))
         return
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     webhook = args.webhook or os.getenv("FEISHU_WEBHOOK", "")
@@ -6128,8 +6340,8 @@ def run_once(args: argparse.Namespace) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Watch an NGA user's replies and push new ones to Feishu or WeChat.")
-    parser.add_argument("--bot-channel", choices=["feishu", "wechat"], default=os.getenv("NGA_BOT_CHANNEL", "feishu"))
+    parser = argparse.ArgumentParser(description="Watch an NGA user's replies and push new ones to Feishu, WeChat, or email.")
+    parser.add_argument("--bot-channel", choices=["feishu", "wechat", "email"], default=os.getenv("NGA_BOT_CHANNEL", "feishu"))
     parser.add_argument("--author-id", default=os.getenv("NGA_AUTHOR_ID", DEFAULT_AUTHOR_ID))
     parser.add_argument("--author-ids", default=os.getenv("NGA_AUTHOR_IDS", ""), help="Comma or newline separated NGA user IDs to watch. Supports id=label.")
     parser.add_argument("--watch-mode", choices=["author", "thread_author", "both"], default=os.getenv("NGA_WATCH_MODE", "author"))
@@ -6197,6 +6409,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wechat-bot-state-dir", default=os.getenv("WECHAT_BOT_STATE_DIR", ""))
     parser.add_argument("--wechat-bot-profiles", default=os.getenv("WECHAT_BOT_PROFILES", ""))
     parser.add_argument("--wechat-poll", action="store_true", help="使用微信 ilink 长轮询接收消息。bot_channel=wechat 时会自动启用。")
+    parser.add_argument("--email-smtp-profiles", default=os.getenv("EMAIL_SMTP_PROFILES", "") or os.getenv("GMAIL_SMTP_PROFILES", ""))
+    parser.add_argument("--email-smtp-host", default=os.getenv("EMAIL_SMTP_HOST", email_channel.DEFAULT_SMTP_HOST))
+    parser.add_argument("--email-smtp-port", type=int, default=int(os.getenv("EMAIL_SMTP_PORT", str(email_channel.DEFAULT_SMTP_PORT))))
+    parser.add_argument("--email-smtp-security", choices=["starttls", "tls", "ssl", "smtps", "none"], default=os.getenv("EMAIL_SMTP_SECURITY", email_channel.DEFAULT_SMTP_SECURITY))
+    parser.add_argument("--email-username", default=os.getenv("EMAIL_USERNAME", "") or os.getenv("GMAIL_USERNAME", ""))
+    parser.add_argument("--email-password", default=os.getenv("EMAIL_PASSWORD", "") or os.getenv("GMAIL_APP_PASSWORD", ""))
+    parser.add_argument("--email-from", default=os.getenv("EMAIL_FROM", ""))
+    parser.add_argument("--email-from-name", default=os.getenv("EMAIL_FROM_NAME", "NGA Wolf Watcher"))
+    parser.add_argument("--email-reply-to", default=os.getenv("EMAIL_REPLY_TO", ""))
+    parser.add_argument("--email-to", default=os.getenv("EMAIL_TO", "") or os.getenv("GMAIL_TO", ""))
     parser.add_argument("--retries", type=int, default=int(os.getenv("NGA_RETRIES", "10")))
     parser.add_argument(
         "--retry-initial-delay",
@@ -6253,7 +6475,7 @@ def main() -> None:
     if uses_structured_routes(args) and not (args.once or args.mark_seen or args.send_test or args.list_feishu_chats):
         start_multi_channel(args)
         return
-    if args.ws and not is_wechat_channel(args):
+    if args.ws and bot_channel(args) == "feishu":
         start_ws(args)
         return
     if args.list_feishu_chats:
@@ -6289,6 +6511,8 @@ def main() -> None:
             try:
                 if is_wechat_channel(args):
                     changed = handle_wechat_commands(args)
+                elif is_email_channel(args):
+                    changed = False
                 else:
                     changed = handle_feishu_commands(args, state)
                 if changed:

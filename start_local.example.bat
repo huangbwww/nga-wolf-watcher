@@ -19,6 +19,16 @@ rem set "WECHAT_BOT_TARGET_USER_ID="
 rem set "WECHAT_BOT_ALLOWED_USER_IDS="
 rem set "WECHAT_BOT_POLL_TIMEOUT_MS=35000"
 rem set "WECHAT_BOT_ACCOUNT_ID=default"
+rem Set NGA_BOT_CHANNEL=email to send notifications by SMTP.
+rem set "EMAIL_SMTP_HOST=smtp.gmail.com"
+rem set "EMAIL_SMTP_PORT=587"
+rem set "EMAIL_SMTP_SECURITY=starttls"
+rem set "EMAIL_USERNAME=your-account@gmail.com"
+rem set "EMAIL_PASSWORD=your-app-password"
+rem set "EMAIL_FROM=your-account@gmail.com"
+rem set "EMAIL_FROM_NAME=NGA Wolf Watcher"
+rem set "EMAIL_REPLY_TO="
+rem set "EMAIL_TO=receiver@example.com"
 
 rem Optional defaults.
 set "NGA_DEFAULT_AUTHOR_ID=150058"
@@ -64,11 +74,11 @@ rem set "AI_SCHEDULE_ENABLED=false"
 rem set "AI_SCHEDULE_INTERVAL_MINUTES=5"
 rem set "AI_SCHEDULE_WINDOWS=weekday:09:30-11:30,13:00-15:00"
 
-echo Installing/updating Python dependency: lark-oapi
-python -m pip install lark-oapi
+echo Installing/updating Python dependencies...
+python -m pip install -r requirements.txt
 if errorlevel 1 (
     echo.
-    echo Failed to install lark-oapi. Check Python and pip, then run this script again.
+    echo Failed to install Python dependencies. Check Python and pip, then run this script again.
     pause
     exit /b 1
 )

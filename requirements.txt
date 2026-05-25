@@ -1,0 +1,6 @@
+lark-oapi
+customtkinter
+pywebview
+pystray
+Pillow
+pycryptodome
