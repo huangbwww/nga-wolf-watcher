@@ -997,6 +997,19 @@ def scrub_command_for_log(command: list[str]) -> list[str]:
     return ["<redacted>" if re.search(r"(secret|cookie|token|password)", item, re.I) else item for item in command]
 
 
+_RUNNER_SESSION_LOCKS: dict[str, threading.Lock] = {}
+_RUNNER_SESSION_LOCKS_GUARD = threading.Lock()
+
+
+def runner_session_lock(key: str) -> threading.Lock:
+    with _RUNNER_SESSION_LOCKS_GUARD:
+        lock = _RUNNER_SESSION_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _RUNNER_SESSION_LOCKS[key] = lock
+        return lock
+
+
 def resolve_executable(command: list[str], provider: str) -> list[str]:
     if not command:
         return command
@@ -1205,6 +1218,28 @@ class ClaudeRunner(BaseRunner):
             command.extend(["--permission-mode", mode])
         command.append(short_prompt)
         return command
+
+    def _session_id(self, task: AITask) -> str:
+        return str(task.metadata.get("session_id") or shared_session_id(task.work_dir))
+
+    def _session_busy(self, result: AIResult) -> bool:
+        output = f"{result.error}\n{result.stdout}\n{result.stderr}".lower()
+        return "session id" in output and "already in use" in output
+
+    def run(self, task: AITask, prompt_file: Path, prompt_text: str, logger: logging.Logger) -> AIResult:
+        session_id = self._session_id(task)
+        lock = runner_session_lock(f"claude:{session_id}")
+        with lock:
+            result = super().run(task, prompt_file, prompt_text, logger)
+            for delay in (2, 5, 10):
+                if not self._session_busy(result):
+                    break
+                logger.warning("claude session %s is busy, retrying after %s seconds", session_id, delay)
+                time.sleep(delay)
+                result = super().run(task, prompt_file, prompt_text, logger)
+                if result.ok:
+                    break
+            return result
 
 
 class CodeWhaleRunner(BaseRunner):
