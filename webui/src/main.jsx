@@ -105,6 +105,47 @@ function formatJsonList(rows) {
   return JSON.stringify(rows, null, 2);
 }
 
+const EMAIL_PROVIDER_PRESETS = [
+  { id: "163", label: "网易 163 邮箱", smtp_host: "smtp.163.com", smtp_port: "465", smtp_security: "ssl", password_hint: "填写 163 邮箱里生成的授权码" },
+  { id: "126", label: "网易 126 邮箱", smtp_host: "smtp.126.com", smtp_port: "465", smtp_security: "ssl", password_hint: "填写 126 邮箱里生成的授权码" },
+  { id: "qq", label: "QQ 邮箱", smtp_host: "smtp.qq.com", smtp_port: "465", smtp_security: "ssl", password_hint: "填写 QQ 邮箱里生成的授权码" },
+  { id: "gmail", label: "Gmail", smtp_host: "smtp.gmail.com", smtp_port: "587", smtp_security: "starttls", password_hint: "填写 Google 应用专用密码" },
+  { id: "outlook", label: "Outlook / Microsoft 365", smtp_host: "smtp.office365.com", smtp_port: "587", smtp_security: "starttls", password_hint: "填写邮箱密码或应用密码" },
+  { id: "custom", label: "自定义邮箱" },
+];
+
+function emailProviderPreset(id) {
+  return EMAIL_PROVIDER_PRESETS.find((preset) => preset.id === id) || EMAIL_PROVIDER_PRESETS[0];
+}
+
+function emailProviderId(row) {
+  const explicit = String(row.smtp_provider || "").trim();
+  if (EMAIL_PROVIDER_PRESETS.some((preset) => preset.id === explicit)) return explicit;
+  const host = String(row.smtp_host || "").trim().toLowerCase();
+  const port = String(row.smtp_port || "").trim();
+  const security = String(row.smtp_security || "").trim().toLowerCase();
+  const matched = EMAIL_PROVIDER_PRESETS.find((preset) =>
+    preset.id !== "custom"
+    && preset.smtp_host === host
+    && String(preset.smtp_port) === port
+    && preset.smtp_security === security
+  );
+  return matched?.id || "custom";
+}
+
+function applyEmailProvider(row, providerId) {
+  const preset = emailProviderPreset(providerId);
+  if (preset.id === "custom") return { ...row, smtp_provider: "custom" };
+  return {
+    ...row,
+    smtp_provider: preset.id,
+    label: row.label || preset.label,
+    smtp_host: preset.smtp_host,
+    smtp_port: preset.smtp_port,
+    smtp_security: preset.smtp_security,
+  };
+}
+
 function ensureId(prefix, row) {
   if (String(row.id || "").trim()) return String(row.id).trim();
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -126,15 +167,18 @@ function targetLabel(target) {
   const channel = target.channel === "wechat" ? "微信" : "飞书";
   const name = String(target.label || target.id || target.receive_id || "").trim();
   const receive = String(target.receive_id || "").trim();
-  return `${channel} / ${name}${receive ? ` -> ${receive}` : ""}`;
+  const displayChannel = target.channel === "email" ? "邮箱" : channel;
+  return `${displayChannel} / ${name}${receive ? ` -> ${receive}` : ""}`;
 }
 
 function channelTitle(channel) {
+  if (channel === "email") return "邮箱";
   return channel === "wechat" ? "微信" : "飞书";
 }
 
 function parseProfiles(config, key, legacy = {}) {
-  const rows = parseJsonList(config[key]).map((row) => ({ ...row, id: ensureId(key.includes("feishu") ? "feishu" : "wechat", row) }));
+  const profileKind = key.includes("email") ? "email" : key.includes("feishu") ? "feishu" : "wechat";
+  const rows = parseJsonList(config[key]).map((row) => ({ ...row, id: ensureId(profileKind, row) }));
   if (rows.length) return rows;
   if (key === "feishu_bot_profiles" && (config.feishu_app_id || config.feishu_app_secret)) {
     return [{ id: "default", label: "默认飞书", app_id: config.feishu_app_id || "", app_secret: config.feishu_app_secret || "", id_type: config.feishu_id_type || "chat_id", chats: [] }];
@@ -153,10 +197,24 @@ function parseProfiles(config, key, legacy = {}) {
       route_tag: config.wechat_bot_route_tag || "",
     }];
   }
+  if (key === "email_smtp_profiles" && (config.email_username || config.email_password || config.email_from)) {
+    return [{
+      id: "default",
+      label: "默认邮箱",
+      smtp_host: config.email_smtp_host || "smtp.gmail.com",
+      smtp_port: config.email_smtp_port || "587",
+      smtp_security: config.email_smtp_security || "starttls",
+      username: config.email_username || "",
+      password: config.email_password || "",
+      from_email: config.email_from || config.email_username || "",
+      from_name: config.email_from_name || "NGA Wolf Watcher",
+      reply_to: config.email_reply_to || "",
+    }];
+  }
   return legacy.rows || [];
 }
 
-function parsePushTargets(config, feishuProfiles, wechatProfiles) {
+function parsePushTargets(config, feishuProfiles, wechatProfiles, emailProfiles = []) {
   const rows = parseJsonList(config.push_targets).map((row) => ({ ...row, id: ensureId("target", row), channel: row.channel || "feishu", id_type: row.id_type || "chat_id" }));
   if (rows.length) return rows;
   const fallback = [];
@@ -165,6 +223,9 @@ function parsePushTargets(config, feishuProfiles, wechatProfiles) {
   }
   if (wechatProfiles.length && config.wechat_bot_target_user_id) {
     fallback.push({ id: "default_wechat", label: "默认微信", channel: "wechat", profile_id: wechatProfiles[0].id, receive_id: config.wechat_bot_target_user_id, id_type: "user_id", default_author_id: config.default_author_id || "", default_tid: config.default_tid || "" });
+  }
+  if (emailProfiles.length && config.email_to) {
+    fallback.push({ id: "default_email", label: "默认邮箱", channel: "email", profile_id: emailProfiles[0].id, receive_id: config.email_to, id_type: "email", default_author_id: config.default_author_id || "", default_tid: config.default_tid || "" });
   }
   return fallback;
 }
@@ -178,11 +239,12 @@ function parseListenRules(config) {
   }));
 }
 
-function applyStructuredConfig(config, { feishuProfiles, wechatProfiles, pushTargets, listenRules }) {
+function applyStructuredConfig(config, { feishuProfiles, wechatProfiles, emailProfiles = [], pushTargets, listenRules }) {
   const next = {
     ...config,
     feishu_bot_profiles: formatJsonList(feishuProfiles),
     wechat_bot_profiles: formatJsonList(wechatProfiles),
+    email_smtp_profiles: formatJsonList(emailProfiles),
     push_targets: formatJsonList(pushTargets),
     listen_rules: formatJsonList(listenRules),
   };
@@ -214,9 +276,30 @@ function applyStructuredConfig(config, { feishuProfiles, wechatProfiles, pushTar
     next.wechat_bot_account_id = "default";
     next.wechat_bot_route_tag = "";
   }
+  if (emailProfiles[0]) {
+    next.email_smtp_host = emailProfiles[0].smtp_host || "smtp.gmail.com";
+    next.email_smtp_port = emailProfiles[0].smtp_port || "587";
+    next.email_smtp_security = emailProfiles[0].smtp_security || "starttls";
+    next.email_username = emailProfiles[0].username || "";
+    next.email_password = emailProfiles[0].password || "";
+    next.email_from = emailProfiles[0].from_email || "";
+    next.email_from_name = emailProfiles[0].from_name || "NGA Wolf Watcher";
+    next.email_reply_to = emailProfiles[0].reply_to || "";
+  } else {
+    next.email_smtp_host = "smtp.gmail.com";
+    next.email_smtp_port = "587";
+    next.email_smtp_security = "starttls";
+    next.email_username = "";
+    next.email_password = "";
+    next.email_from = "";
+    next.email_from_name = "NGA Wolf Watcher";
+    next.email_reply_to = "";
+  }
   const firstFeishuTarget = pushTargets.find((target) => (target.channel || "feishu") === "feishu");
   next.feishu_receive_id = firstFeishuTarget?.receive_id || "";
   if (firstFeishuTarget?.id_type) next.feishu_id_type = firstFeishuTarget.id_type;
+  const firstEmailTarget = pushTargets.find((target) => target.channel === "email");
+  next.email_to = firstEmailTarget?.receive_id || "";
   const validTargetIds = new Set(pushTargets.map((target) => String(target.id || "").trim()).filter(Boolean));
   const rawScheduleTargetIds = String(next.ai_schedule_target_ids || "").trim();
   const scheduleTargetIds = rawScheduleTargetIds.toLowerCase() === "__none__" ? [] : rawScheduleTargetIds
@@ -705,6 +788,7 @@ function validationTargetForError(error) {
   if (/NGA Cookie/.test(text)) return "nga_cookie";
   if (/飞书配置|Feishu App ID|Feishu App Secret|飞书 App ID|飞书 App Secret|飞书机器人缺少 App ID|飞书机器人配置组/.test(text)) return "feishu-profiles";
   if (/微信Bot配置|微信 Bot 配置|微信 Bot Token|微信目标用户 ID|微信机器人缺少 Token|微信配置/.test(text)) return "wechat-profiles";
+  if (/Email|SMTP|email|邮箱|邮件/.test(text)) return "email-profiles";
   if (/Receive ID|chat_id|发送目标|通道/.test(text)) return "listen-rules";
   if (/监听用户 ID 列表|配置一条用户 ID|用户 ID|用户主页/.test(text)) return "watch_author_ids";
   if (/帖子预设 ID 列表|配置一条帖子 ID|帖子预设|帖子/.test(text)) return "preset_thread_ids";
@@ -718,6 +802,7 @@ function validationTargetForError(error) {
 function validationChannelForError(error) {
   const text = String(error || "");
   if (/微信|WeChat|wechat/.test(text)) return "wechat";
+  if (/Email|SMTP|email|邮箱|邮件/.test(text)) return "email";
   if (/飞书|Feishu|Receive ID|chat_id|feishu/.test(text)) return "feishu";
   return "";
 }
@@ -766,7 +851,7 @@ function Notice({ message, kind = "info" }) {
 }
 
 function ChannelPicker({ config, setConfig, channel, onChannelChange }) {
-  const value = channel || (config.bot_channel === "wechat" ? "wechat" : "feishu");
+  const value = channel || (config.bot_channel === "wechat" ? "wechat" : config.bot_channel === "email" ? "email" : "feishu");
   const update = (nextChannel) => {
     onChannelChange?.(nextChannel);
     setConfig((current) => ({ ...current, bot_channel: nextChannel }));
@@ -775,8 +860,8 @@ function ChannelPicker({ config, setConfig, channel, onChannelChange }) {
     <div className="channel-switch-card field-wide">
       <div>
         <span className="eyebrow">当前配置通道</span>
-        <strong>{value === "wechat" ? "微信 Bot" : "飞书 Bot"}</strong>
-        <p>这里只切换正在编辑的机器人配置；监听规则里再选择具体推送到哪个群或微信。</p>
+        <strong>{value === "wechat" ? "微信 Bot" : value === "email" ? "邮箱 SMTP" : "飞书 Bot"}</strong>
+        <p>这里只切换正在编辑的通道配置；监听规则里再选择具体推送目标。</p>
       </div>
       <div className="segmented" role="group" aria-label="当前配置通道">
         <button className={value === "feishu" ? "active" : ""} type="button" onClick={() => update("feishu")}>
@@ -785,6 +870,9 @@ function ChannelPicker({ config, setConfig, channel, onChannelChange }) {
         <button className={value === "wechat" ? "active" : ""} type="button" onClick={() => update("wechat")}>
           微信
         </button>
+        <button className={value === "email" ? "active" : ""} type="button" onClick={() => update("email")}>
+          邮箱
+        </button>
       </div>
     </div>
   );
@@ -792,7 +880,7 @@ function ChannelPicker({ config, setConfig, channel, onChannelChange }) {
 
 function SetupOverview({ channel, authorCount, threadCount, ruleCount, profileCount }) {
   const steps = [
-    { icon: MessageSquare, title: "通道", value: `${channel === "wechat" ? "微信" : "飞书"} ${profileCount || 0} 组` },
+    { icon: MessageSquare, title: "通道", value: `${channel === "email" ? "邮箱" : channel === "wechat" ? "微信" : "飞书"} ${profileCount || 0} 组` },
     { icon: Database, title: "Cookie", value: "用于读取 NGA" },
     { icon: Users, title: "目标", value: `${authorCount || 0} 用户 / ${threadCount || 0} 帖子` },
     { icon: ListChecks, title: "规则", value: `${ruleCount || 0} 条监听` },
@@ -909,6 +997,8 @@ function ProfileGroupEditor({ title, kind, rows, setRows, busy, onQueryChats, on
   const [draftChatStatus, setDraftChatStatus] = useState(null);
   const emptyRow = () => kind === "feishu"
     ? { id: ensureId("feishu", {}), label: "", app_id: "", app_secret: "", id_type: "chat_id", chats: [] }
+    : kind === "email"
+      ? applyEmailProvider({ id: ensureId("email", {}), label: "", username: "", password: "", from_email: "", from_name: "NGA Wolf Watcher", reply_to: "" }, "163")
     : { id: ensureId("wechat", {}), label: "", token: "", base_url: "https://ilinkai.weixin.qq.com", cdn_base_url: "https://novac2c.cdn.weixin.qq.com/c2c", target_user_id: "", allowed_user_ids: "", poll_timeout_ms: "35000", account_id: "default", route_tag: "" };
   const openAdd = () => {
     setDraft({ index: -1, row: emptyRow() });
@@ -920,6 +1010,7 @@ function ProfileGroupEditor({ title, kind, rows, setRows, busy, onQueryChats, on
   };
   const updateRow = (index, patch) => setRows(rows.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)));
   const updateDraft = (patch) => setDraft((current) => ({ ...current, row: { ...current.row, ...patch } }));
+  const replaceDraftRow = (row) => setDraft((current) => ({ ...current, row }));
   const queryDraftChats = async () => {
     if (!draft || kind !== "feishu" || !onQueryDraftChats) return;
     setDraftChatStatus({ kind: "info", text: "正在查询可用群..." });
@@ -957,7 +1048,7 @@ function ProfileGroupEditor({ title, kind, rows, setRows, busy, onQueryChats, on
       <div className="editor-header">
         <div>
           <h3>{title}</h3>
-          <p>{kind === "feishu" ? "每组 App ID / Secret 独立缓存可见群组；新增时可以先查询群，避免后续监听规则无群可选。" : "每组微信 Token 独立保存目标用户和账号标识；点击编辑维护配置。"}</p>
+          <p>{kind === "feishu" ? "每组 App ID / Secret 独立缓存可见群组；新增时可以先查询群，避免后续监听规则无群可选。" : kind === "email" ? "邮箱配置只用于发送通知，不接收邮件回复或聊天命令；收件邮箱在监听规则里填写。" : "每组微信 Token 独立保存目标用户和账号标识；点击编辑维护配置。"}</p>
         </div>
         <IconButton icon={Plus} label={`添加${title}`} kind="primary" onClick={openAdd} />
       </div>
@@ -966,7 +1057,7 @@ function ProfileGroupEditor({ title, kind, rows, setRows, busy, onQueryChats, on
           <div className={`list-row profile-list-row ${kind === "feishu" ? "with-query" : "compact-actions"}`} key={`${kind}-${row.id || index}`}>
             <div>
               <strong>{profileLabel(row, kind)}</strong>
-              <span>{kind === "feishu" ? `${row.app_id || "未填写 App ID"} · ${Array.isArray(row.chats) ? row.chats.length : 0} 个群` : `${row.target_user_id || "未绑定目标用户"} · ${row.account_id || "default"}`}</span>
+              <span>{kind === "feishu" ? `${row.app_id || "未填写 App ID"} · ${Array.isArray(row.chats) ? row.chats.length : 0} 个群` : kind === "email" ? `${row.from_email || row.username || "未填写发件邮箱"} · ${row.smtp_host || "未填写 SMTP 服务器"}` : `${row.target_user_id || "未绑定目标用户"} · ${row.account_id || "default"}`}</span>
             </div>
             {kind === "feishu" ? (
               <button className="btn slim" type="button" disabled={busy} onClick={() => onQueryChats(row.id)}>
@@ -1010,6 +1101,31 @@ function ProfileGroupEditor({ title, kind, rows, setRows, busy, onQueryChats, on
                     {draftChatStatus ? <div className={`notice ${draftChatStatus.kind} compact`}>{draftChatStatus.text}</div> : null}
                   </div>
                 </>
+              ) : kind === "email" ? (
+                <>
+                  <label className="field">
+                    <span>邮箱类型</span>
+                    <select value={emailProviderId(draft.row)} onChange={(event) => replaceDraftRow(applyEmailProvider(draft.row, event.target.value))}>
+                      {EMAIL_PROVIDER_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}
+                    </select>
+                  </label>
+                  {emailProviderId(draft.row) === "custom" ? (
+                    <>
+                      <label className="field"><span>SMTP 服务器</span><input value={draft.row.smtp_host || ""} onChange={(event) => updateDraft({ smtp_host: event.target.value })} placeholder="例如 smtp.gmail.com" /></label>
+                      <label className="field"><span>端口</span><input value={draft.row.smtp_port || ""} onChange={(event) => updateDraft({ smtp_port: event.target.value })} placeholder="587" /></label>
+                      <label className="field"><span>加密方式</span><select value={draft.row.smtp_security || "starttls"} onChange={(event) => updateDraft({ smtp_security: event.target.value })}><option value="starttls">STARTTLS（常用）</option><option value="ssl">SSL/TLS</option><option value="none">不加密</option></select></label>
+                    </>
+                  ) : (
+                    <div className="field field-wide preset-summary">
+                      <span>服务器设置</span>
+                      <p>{draft.row.smtp_host} · {draft.row.smtp_port} · {draft.row.smtp_security === "ssl" ? "SSL/TLS" : "STARTTLS"}</p>
+                    </div>
+                  )}
+                  <label className="field"><span>发件邮箱</span><input value={draft.row.from_email || draft.row.username || ""} onChange={(event) => updateDraft({ username: event.target.value, from_email: event.target.value })} placeholder="用于登录并显示为发件地址" /></label>
+                  <label className="field"><span>密码或授权码</span><input type="password" value={draft.row.password || ""} onChange={(event) => updateDraft({ password: event.target.value })} placeholder={emailProviderPreset(emailProviderId(draft.row)).password_hint || "填写邮箱服务商提供的密码或授权码"} /></label>
+                  <label className="field"><span>发件人名称</span><input value={draft.row.from_name || ""} onChange={(event) => updateDraft({ from_name: event.target.value })} placeholder="例如 NGA Wolf Watcher" /></label>
+                  <label className="field"><span>回复地址（可选）</span><input value={draft.row.reply_to || ""} onChange={(event) => updateDraft({ reply_to: event.target.value })} placeholder="不填则不设置" /></label>
+                </>
               ) : (
                 <>
                   <label className="field"><span>Token</span><input type="password" value={draft.row.token || ""} onChange={(event) => updateDraft({ token: event.target.value })} /></label>
@@ -1032,7 +1148,7 @@ function ProfileGroupEditor({ title, kind, rows, setRows, busy, onQueryChats, on
   );
 }
 
-function ListenRuleEditor({ rows, setRows, authorRows, threadRows, pushTargets, feishuProfiles, wechatProfiles, onEnsureRouteTarget, hint = null }) {
+function ListenRuleEditor({ rows, setRows, authorRows, threadRows, pushTargets, feishuProfiles, wechatProfiles, emailProfiles = [], onEnsureRouteTarget, onSendTestTarget, busy = false, hint = null }) {
   const [ruleDraft, setRuleDraft] = useState(null);
   const [targetDraft, setTargetDraft] = useState(null);
   const emptyRule = () => ({
@@ -1060,14 +1176,16 @@ function ListenRuleEditor({ rows, setRows, authorRows, threadRows, pushTargets, 
     ? `用户主页 ${row.author_id || "-"}`
     : `帖子 ${row.tid || "-"} / 用户 ${row.author_id || "-"}`;
   const openTargetDraft = () => {
-    const channel = feishuProfiles.length || !wechatProfiles.length ? "feishu" : "wechat";
-    const profile = channel === "wechat" ? wechatProfiles[0] : feishuProfiles[0];
+    const channel = feishuProfiles.length ? "feishu" : wechatProfiles.length ? "wechat" : "email";
+    const profile = channel === "wechat" ? wechatProfiles[0] : channel === "email" ? emailProfiles[0] : feishuProfiles[0];
     const chats = channel === "feishu" && profile && Array.isArray(profile.chats) ? profile.chats : [];
     setTargetDraft({ channel, profile_id: profile?.id || "", receive_id: chats[0]?.chat_id || "" });
   };
   const targetDraftProfile = targetDraft?.channel === "wechat"
     ? wechatProfiles.find((profile) => profile.id === targetDraft.profile_id) || wechatProfiles[0]
-    : feishuProfiles.find((profile) => profile.id === targetDraft?.profile_id) || feishuProfiles[0];
+    : targetDraft?.channel === "email"
+      ? emailProfiles.find((profile) => profile.id === targetDraft.profile_id) || emailProfiles[0]
+      : feishuProfiles.find((profile) => profile.id === targetDraft?.profile_id) || feishuProfiles[0];
   const targetDraftChats = targetDraft?.channel === "feishu" && targetDraftProfile && Array.isArray(targetDraftProfile.chats) ? targetDraftProfile.chats : [];
   const confirmTargetDraft = () => {
     if (!targetDraft || !ruleDraft) return;
@@ -1150,7 +1268,7 @@ function ListenRuleEditor({ rows, setRows, authorRows, threadRows, pushTargets, 
               <div className="editor-header compact">
                 <div>
                   <h3>发送目标</h3>
-                  <p>可以添加多个飞书群或微信账号。</p>
+                  <p>可以添加多个飞书群、微信账号或收件邮箱。</p>
                 </div>
                 <IconButton icon={Plus} label="添加发送目标" kind="primary" onClick={openTargetDraft} />
               </div>
@@ -1158,6 +1276,12 @@ function ListenRuleEditor({ rows, setRows, authorRows, threadRows, pushTargets, 
                 {selectedTargets(ruleDraft.row).length ? selectedTargets(ruleDraft.row).map((targetId, index) => (
                   <div className="schedule-target-row" key={`${targetId}-${index}`}>
                     <span>{targetName(targetId)}</span>
+                    {onSendTestTarget ? (
+                      <button className="btn slim" type="button" disabled={busy} onClick={() => onSendTestTarget(targetId)}>
+                        <MessageSquare size={15} />
+                        发送测试
+                      </button>
+                    ) : null}
                     <IconButton icon={Trash2} label="删除发送目标" kind="danger" onClick={() => removeDraftTarget(index)} />
                   </div>
                 )) : <span className="empty-inline">暂无发送目标，点击 + 添加。</span>}
@@ -1186,12 +1310,13 @@ function ListenRuleEditor({ rows, setRows, authorRows, threadRows, pushTargets, 
                 <span>通道</span>
                 <select value={targetDraft.channel} onChange={(event) => {
                   const channel = event.target.value;
-                  const profile = channel === "wechat" ? wechatProfiles[0] : feishuProfiles[0];
+                  const profile = channel === "wechat" ? wechatProfiles[0] : channel === "email" ? emailProfiles[0] : feishuProfiles[0];
                   const chats = channel === "feishu" && profile && Array.isArray(profile.chats) ? profile.chats : [];
                   setTargetDraft((current) => ({ ...current, channel, profile_id: profile?.id || "", receive_id: chats[0]?.chat_id || "" }));
                 }}>
                   <option value="feishu">飞书</option>
                   <option value="wechat">微信</option>
+                  <option value="email">邮箱</option>
                 </select>
               </label>
               {targetDraft.channel === "feishu" ? (
@@ -1212,6 +1337,19 @@ function ListenRuleEditor({ rows, setRows, authorRows, threadRows, pushTargets, 
                     <datalist id="rule-feishu-chats">
                       {targetDraftChats.map((chat) => <option key={chat.chat_id} value={chat.chat_id}>{chatLabel(chat)}</option>)}
                     </datalist>
+                  </label>
+                </>
+              ) : targetDraft.channel === "email" ? (
+                <>
+                  <label className="field">
+                    <span>邮箱发信配置</span>
+                    <select value={targetDraft.profile_id} onChange={(event) => setTargetDraft((current) => ({ ...current, profile_id: event.target.value }))}>
+                      {emailProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profileLabel(profile, "email")}</option>)}
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>收件邮箱</span>
+                    <input value={targetDraft.receive_id || ""} onChange={(event) => setTargetDraft((current) => ({ ...current, receive_id: event.target.value }))} placeholder="name@gmail.com" />
                   </label>
                 </>
               ) : (
@@ -1360,7 +1498,7 @@ function AiAgentControls({ config, setConfig, options, hint = null }) {
   );
 }
 
-function AiScheduleTargets({ config, setConfig, pushTargets, feishuProfiles, wechatProfiles, onCreateScheduleTarget, hint = null }) {
+function AiScheduleTargets({ config, setConfig, pushTargets, feishuProfiles, wechatProfiles, emailProfiles = [], onCreateScheduleTarget, onSendTestTarget, busy = false, hint = null }) {
   const [draft, setDraft] = useState(null);
   const rawTargetIds = String(config.ai_schedule_target_ids || "").trim();
   const allTargetIds = pushTargets.map((target) => target.id).filter(Boolean);
@@ -1378,14 +1516,16 @@ function AiScheduleTargets({ config, setConfig, pushTargets, feishuProfiles, wec
     saveSelected(selectedIds.filter((_, itemIndex) => itemIndex !== index));
   };
   const openAdd = () => {
-    const channel = feishuProfiles.length || !wechatProfiles.length ? "feishu" : "wechat";
-    const profile = channel === "wechat" ? wechatProfiles[0] : feishuProfiles[0];
+    const channel = feishuProfiles.length ? "feishu" : wechatProfiles.length ? "wechat" : "email";
+    const profile = channel === "wechat" ? wechatProfiles[0] : channel === "email" ? emailProfiles[0] : feishuProfiles[0];
     const chats = channel === "feishu" && profile && Array.isArray(profile.chats) ? profile.chats : [];
     setDraft({ channel, profile_id: profile?.id || "", receive_id: chats[0]?.chat_id || "" });
   };
   const draftProfile = draft?.channel === "wechat"
     ? wechatProfiles.find((profile) => profile.id === draft.profile_id) || wechatProfiles[0]
-    : feishuProfiles.find((profile) => profile.id === draft?.profile_id) || feishuProfiles[0];
+    : draft?.channel === "email"
+      ? emailProfiles.find((profile) => profile.id === draft.profile_id) || emailProfiles[0]
+      : feishuProfiles.find((profile) => profile.id === draft?.profile_id) || feishuProfiles[0];
   const draftChats = draft?.channel === "feishu" && draftProfile && Array.isArray(draftProfile.chats) ? draftProfile.chats : [];
   const confirmDraft = () => {
     if (!draft) return;
@@ -1411,6 +1551,12 @@ function AiScheduleTargets({ config, setConfig, pushTargets, feishuProfiles, wec
           return (
             <div className="schedule-target-row" key={`${targetId}-${index}`}>
               <span>{target ? targetLabel(target) : targetId}</span>
+              {onSendTestTarget ? (
+                <button className="btn slim" type="button" disabled={busy} onClick={() => onSendTestTarget(targetId)}>
+                  <MessageSquare size={15} />
+                  发送测试
+                </button>
+              ) : null}
               <IconButton icon={Trash2} label="删除发送目标" kind="danger" onClick={() => removeAt(index)} />
             </div>
           );
@@ -1422,7 +1568,7 @@ function AiScheduleTargets({ config, setConfig, pushTargets, feishuProfiles, wec
             <div className="editor-header">
               <div>
                 <h3>新增定时发送目标</h3>
-                <p>飞书选择配置组和群；微信只选择配置组。</p>
+                <p>飞书选择配置组和群；微信只选择配置组；邮箱选择发信配置并填写收件邮箱。</p>
               </div>
               <IconButton icon={X} label="关闭" onClick={() => setDraft(null)} />
             </div>
@@ -1431,12 +1577,13 @@ function AiScheduleTargets({ config, setConfig, pushTargets, feishuProfiles, wec
                 <span>通道</span>
                 <select value={draft.channel} onChange={(event) => {
                   const channel = event.target.value;
-                  const profile = channel === "wechat" ? wechatProfiles[0] : feishuProfiles[0];
+                  const profile = channel === "wechat" ? wechatProfiles[0] : channel === "email" ? emailProfiles[0] : feishuProfiles[0];
                   const chats = channel === "feishu" && profile && Array.isArray(profile.chats) ? profile.chats : [];
                   setDraft({ channel, profile_id: profile?.id || "", receive_id: chats[0]?.chat_id || "" });
                 }}>
                   <option value="feishu">飞书</option>
                   <option value="wechat">微信</option>
+                  <option value="email">邮箱</option>
                 </select>
               </label>
               {draft.channel === "feishu" ? (
@@ -1457,6 +1604,19 @@ function AiScheduleTargets({ config, setConfig, pushTargets, feishuProfiles, wec
                     <datalist id="schedule-feishu-chats">
                       {draftChats.map((chat) => <option key={chat.chat_id} value={chat.chat_id}>{chatLabel(chat)}</option>)}
                     </datalist>
+                  </label>
+                </>
+              ) : draft.channel === "email" ? (
+                <>
+                  <label className="field">
+                    <span>邮箱发信配置</span>
+                    <select value={draft.profile_id} onChange={(event) => setDraft((current) => ({ ...current, profile_id: event.target.value }))}>
+                      {emailProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profileLabel(profile, "email")}</option>)}
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>收件邮箱</span>
+                    <input value={draft.receive_id || ""} onChange={(event) => setDraft((current) => ({ ...current, receive_id: event.target.value }))} placeholder="name@gmail.com" />
                   </label>
                 </>
               ) : (
@@ -1498,10 +1658,11 @@ function App() {
   const logOffsetRef = useRef(0);
   const bootstrappedRef = useRef(false);
 
-  const channel = selectedChannel === "wechat" ? "wechat" : "feishu";
+  const channel = selectedChannel === "wechat" ? "wechat" : selectedChannel === "email" ? "email" : "feishu";
   const feishuProfiles = useMemo(() => parseProfiles(config, "feishu_bot_profiles"), [config]);
   const wechatProfiles = useMemo(() => parseProfiles(config, "wechat_bot_profiles"), [config]);
-  const pushTargets = useMemo(() => parsePushTargets(config, feishuProfiles, wechatProfiles), [config, feishuProfiles, wechatProfiles]);
+  const emailProfiles = useMemo(() => parseProfiles(config, "email_smtp_profiles"), [config]);
+  const pushTargets = useMemo(() => parsePushTargets(config, feishuProfiles, wechatProfiles, emailProfiles), [config, feishuProfiles, wechatProfiles, emailProfiles]);
   const listenRules = useMemo(() => parseListenRules(config), [config]);
   const authorRows = useMemo(() => parseTargetList(config.watch_author_ids, config.default_author_id), [config.watch_author_ids, config.default_author_id]);
   const threadRows = useMemo(() => parseTargetList(config.preset_thread_ids, config.default_tid), [config.preset_thread_ids, config.default_tid]);
@@ -1511,17 +1672,22 @@ function App() {
     setConfig((current) => {
       const currentFeishu = parseProfiles(current, "feishu_bot_profiles");
       const currentWechat = parseProfiles(current, "wechat_bot_profiles");
-      const currentTargets = parsePushTargets(current, currentFeishu, currentWechat);
+      const currentEmail = parseProfiles(current, "email_smtp_profiles");
+      const currentTargets = parsePushTargets(current, currentFeishu, currentWechat, currentEmail);
       const currentRules = parseListenRules(current);
       const nextFeishu = patch.feishuProfiles ?? currentFeishu;
       const nextWechat = patch.wechatProfiles ?? currentWechat;
+      const nextEmail = patch.emailProfiles ?? currentEmail;
       const validFeishuProfiles = new Set(nextFeishu.map((profile) => String(profile.id || "").trim()).filter(Boolean));
       const validWechatProfiles = new Set(nextWechat.map((profile) => String(profile.id || "").trim()).filter(Boolean));
+      const validEmailProfiles = new Set(nextEmail.map((profile) => String(profile.id || "").trim()).filter(Boolean));
       const nextTargets = (patch.pushTargets ?? currentTargets).filter((target) => {
-        const channelValue = target.channel === "wechat" ? "wechat" : "feishu";
+        const channelValue = target.channel === "wechat" ? "wechat" : target.channel === "email" ? "email" : "feishu";
         const profileId = String(target.profile_id || "").trim();
         if (!profileId) return true;
-        return channelValue === "wechat" ? validWechatProfiles.has(profileId) : validFeishuProfiles.has(profileId);
+        if (channelValue === "wechat") return validWechatProfiles.has(profileId);
+        if (channelValue === "email") return validEmailProfiles.has(profileId);
+        return validFeishuProfiles.has(profileId);
       });
       const validTargetIds = new Set(nextTargets.map((target) => String(target.id || "").trim()).filter(Boolean));
       const nextRules = (patch.listenRules ?? currentRules).map((rule) => ({
@@ -1533,20 +1699,23 @@ function App() {
       return applyStructuredConfig(current, {
         feishuProfiles: nextFeishu,
         wechatProfiles: nextWechat,
+        emailProfiles: nextEmail,
         pushTargets: nextTargets,
         listenRules: nextRules,
       });
     });
   };
   const ensureRouteTarget = (draft) => {
-    const channelValue = draft.channel === "wechat" ? "wechat" : "feishu";
+    const channelValue = draft.channel === "wechat" ? "wechat" : draft.channel === "email" ? "email" : "feishu";
     const profile = channelValue === "wechat"
       ? wechatProfiles.find((item) => item.id === draft.profile_id) || wechatProfiles[0]
-      : feishuProfiles.find((item) => item.id === draft.profile_id) || feishuProfiles[0];
+      : channelValue === "email"
+        ? emailProfiles.find((item) => item.id === draft.profile_id) || emailProfiles[0]
+        : feishuProfiles.find((item) => item.id === draft.profile_id) || feishuProfiles[0];
     const profileId = profile?.id || "";
     const receiveId = channelValue === "wechat" ? String(profile?.target_user_id || "").trim() : String(draft.receive_id || "").trim();
     if (!profileId || !receiveId) {
-      setMessage(channelValue === "wechat" ? "微信配置缺少目标用户 ID" : "请选择飞书配置和飞书群");
+      setMessage(channelValue === "wechat" ? "微信配置缺少目标用户 ID" : channelValue === "email" ? "请选择邮箱发信配置并填写收件邮箱" : "请选择飞书配置和飞书群");
       setMessageKind("error");
       return "";
     }
@@ -1558,11 +1727,11 @@ function App() {
         : null;
       target = {
         id: ensureId("target", {}),
-        label: channelValue === "feishu" ? String(chat?.name || chat?.title || receiveId) : profileLabel(profile, "wechat"),
+        label: channelValue === "feishu" ? String(chat?.name || chat?.title || receiveId) : channelValue === "email" ? receiveId : profileLabel(profile, "wechat"),
         channel: channelValue,
         profile_id: profileId,
         receive_id: receiveId,
-        id_type: channelValue === "wechat" ? "user_id" : profile?.id_type || "chat_id",
+        id_type: channelValue === "wechat" ? "user_id" : channelValue === "email" ? "email" : profile?.id_type || "chat_id",
         default_author_id: config.default_author_id || "",
         default_tid: config.default_tid || "",
       };
@@ -1575,16 +1744,19 @@ function App() {
     setConfig((current) => {
       const currentFeishu = parseProfiles(current, "feishu_bot_profiles");
       const currentWechat = parseProfiles(current, "wechat_bot_profiles");
-      const currentTargets = parsePushTargets(current, currentFeishu, currentWechat);
+      const currentEmail = parseProfiles(current, "email_smtp_profiles");
+      const currentTargets = parsePushTargets(current, currentFeishu, currentWechat, currentEmail);
       const currentRules = parseListenRules(current);
-      const channelValue = draft.channel === "wechat" ? "wechat" : "feishu";
+      const channelValue = draft.channel === "wechat" ? "wechat" : draft.channel === "email" ? "email" : "feishu";
       const profile = channelValue === "wechat"
         ? currentWechat.find((item) => item.id === draft.profile_id) || currentWechat[0]
-        : currentFeishu.find((item) => item.id === draft.profile_id) || currentFeishu[0];
+        : channelValue === "email"
+          ? currentEmail.find((item) => item.id === draft.profile_id) || currentEmail[0]
+          : currentFeishu.find((item) => item.id === draft.profile_id) || currentFeishu[0];
       const profileId = profile?.id || "";
       const receiveId = channelValue === "wechat" ? String(profile?.target_user_id || "").trim() : String(draft.receive_id || "").trim();
       if (!profileId || !receiveId) {
-        setMessage(channelValue === "wechat" ? "微信配置缺少目标用户 ID" : "请选择飞书配置和飞书群");
+        setMessage(channelValue === "wechat" ? "微信配置缺少目标用户 ID" : channelValue === "email" ? "请选择邮箱发信配置并填写收件邮箱" : "请选择飞书配置和飞书群");
         setMessageKind("error");
         return current;
       }
@@ -1596,11 +1768,11 @@ function App() {
           : null;
         target = {
           id: ensureId("target", {}),
-          label: channelValue === "feishu" ? String(chat?.name || chat?.title || receiveId) : profileLabel(profile, "wechat"),
+          label: channelValue === "feishu" ? String(chat?.name || chat?.title || receiveId) : channelValue === "email" ? receiveId : profileLabel(profile, "wechat"),
           channel: channelValue,
           profile_id: profileId,
           receive_id: receiveId,
-          id_type: channelValue === "wechat" ? "user_id" : profile?.id_type || "chat_id",
+          id_type: channelValue === "wechat" ? "user_id" : channelValue === "email" ? "email" : profile?.id_type || "chat_id",
           default_author_id: current.default_author_id || "",
           default_tid: current.default_tid || "",
         };
@@ -1614,6 +1786,7 @@ function App() {
       const next = applyStructuredConfig(current, {
         feishuProfiles: currentFeishu,
         wechatProfiles: currentWechat,
+        emailProfiles: currentEmail,
         pushTargets: nextTargets,
         listenRules: currentRules,
       });
@@ -1631,7 +1804,7 @@ function App() {
       if (isClosing()) return;
       const merged = normalizeConfig(boot.config, boot.defaults);
       setConfig(merged);
-      setSelectedChannel(merged.bot_channel === "wechat" ? "wechat" : "feishu");
+      setSelectedChannel(merged.bot_channel === "wechat" ? "wechat" : merged.bot_channel === "email" ? "email" : "feishu");
       setDefaults(boot.defaults);
       setOptions(boot.options || {});
       setStatus(boot.status);
@@ -1774,7 +1947,7 @@ function App() {
         if (result.config) {
           const normalized = normalizeConfig(result.config, defaults);
           setConfig(normalized);
-          setSelectedChannel(normalized.bot_channel === "wechat" ? "wechat" : "feishu");
+          setSelectedChannel(normalized.bot_channel === "wechat" ? "wechat" : normalized.bot_channel === "email" ? "email" : "feishu");
           setAdvancedJson(JSON.stringify(normalized, null, 2));
           if (label === "保存配置" || label === "启动监听") setSavedSnapshot(JSON.stringify(normalized));
         }
@@ -1829,7 +2002,7 @@ function App() {
       const parsed = JSON.parse(advancedJson);
       const normalized = normalizeConfig(parsed, defaults);
       setConfig(normalized);
-      setSelectedChannel(normalized.bot_channel === "wechat" ? "wechat" : "feishu");
+      setSelectedChannel(normalized.bot_channel === "wechat" ? "wechat" : normalized.bot_channel === "email" ? "email" : "feishu");
       setMessage("已应用高级 JSON，保存后生效");
       setMessageKind("success");
     } catch (error) {
@@ -1841,13 +2014,14 @@ function App() {
   const threadHelp = useMemo(
     () => [
       "先选择要配置的通道，再补齐机器人配置、NGA Cookie、用户/帖子和监听规则。",
-      "监听规则里直接选择飞书群或微信账号；手动查询可以使用所有已保存的用户和帖子。",
-      "飞书和微信配置会保留，切换下拉只影响当前展示和默认消息入口。",
+      "监听规则里直接选择飞书群、微信账号或收件邮箱；手动查询可以使用所有已保存的用户和帖子。",
+      "邮箱通道只用于发送通知，不接收邮件回复或聊天命令；飞书和微信仍可作为交互入口。",
     ],
     []
   );
   const queryChats = (profileId) => run("查询飞书群组", () => api().query_feishu_chats(config, profileId));
   const queryDraftChats = (profile) => api().query_feishu_chats_for_profile(profile);
+  const sendTestTarget = (targetId) => run("发送测试消息", () => api().send_test_target(config, targetId));
   const checkNgaCookie = async () => {
     if (!api()?.check_nga_cookie) {
       setCookieCheck({ kind: "error", text: "pywebview API 未就绪" });
@@ -1900,7 +2074,7 @@ function App() {
       }
       const normalized = normalizeConfig(result.config || config, defaults);
       setConfig(normalized);
-      setSelectedChannel(normalized.bot_channel === "wechat" ? "wechat" : "feishu");
+      setSelectedChannel(normalized.bot_channel === "wechat" ? "wechat" : normalized.bot_channel === "email" ? "email" : "feishu");
       setAdvancedJson(JSON.stringify(normalized, null, 2));
       setSavedSnapshot(JSON.stringify(normalized));
       if (result.status) setStatus(result.status);
@@ -2017,7 +2191,7 @@ function App() {
           authorCount={authorRows.length}
           threadCount={threadRows.length}
           ruleCount={listenRules.length}
-          profileCount={channel === "wechat" ? wechatProfiles.length : feishuProfiles.length}
+          profileCount={channel === "wechat" ? wechatProfiles.length : channel === "email" ? emailProfiles.length : feishuProfiles.length}
         />
 
         <Section icon={ShieldCheck} title="快速开始" description="首次使用按顺序完成：通道配置、NGA Cookie、用户/帖子、监听规则。" defaultOpen sectionId="quick" hint={sectionHint("quick")}>
@@ -2025,13 +2199,15 @@ function App() {
             <ChannelPicker config={config} setConfig={setConfig} channel={channel} onChannelChange={setSelectedChannel} />
             {channel === "wechat" ? (
               <ProfileGroupEditor title="微信机器人配置组" kind="wechat" rows={wechatProfiles} setRows={(rows) => setStructured({ wechatProfiles: rows })} busy={busy} onQueryChats={queryChats} onQueryDraftChats={queryDraftChats} hint={targetHint("wechat-profiles")} />
+            ) : channel === "email" ? (
+              <ProfileGroupEditor title="邮箱发信配置组" kind="email" rows={emailProfiles} setRows={(rows) => setStructured({ emailProfiles: rows })} busy={busy} onQueryChats={queryChats} onQueryDraftChats={queryDraftChats} hint={targetHint("email-profiles")} />
             ) : (
               <ProfileGroupEditor title="飞书机器人配置组" kind="feishu" rows={feishuProfiles} setRows={(rows) => setStructured({ feishuProfiles: rows })} busy={busy} onQueryChats={queryChats} onQueryDraftChats={queryDraftChats} hint={targetHint("feishu-profiles")} />
             )}
             <NgaCookieField config={config} setConfig={setConfig} hint={targetHint("nga_cookie")} busy={busy} status={cookieCheck} onCheck={checkNgaCookie} />
             <TargetListEditor config={config} setConfig={setConfig} configKey="watch_author_ids" fallbackKey="default_author_id" title="用户 ID 列表" idLabel="用户 UID" hint={targetHint("watch_author_ids")} />
             <TargetListEditor config={config} setConfig={setConfig} configKey="preset_thread_ids" fallbackKey="default_tid" title="帖子预设" idLabel="帖子 ID" hint={targetHint("preset_thread_ids")} />
-            <ListenRuleEditor rows={listenRules} setRows={(rows) => setStructured({ listenRules: rows })} authorRows={authorRows} threadRows={threadRows} pushTargets={pushTargets} feishuProfiles={feishuProfiles} wechatProfiles={wechatProfiles} onEnsureRouteTarget={ensureRouteTarget} hint={targetHint("listen-rules")} />
+            <ListenRuleEditor rows={listenRules} setRows={(rows) => setStructured({ listenRules: rows })} authorRows={authorRows} threadRows={threadRows} pushTargets={pushTargets} feishuProfiles={feishuProfiles} wechatProfiles={wechatProfiles} emailProfiles={emailProfiles} onEnsureRouteTarget={ensureRouteTarget} onSendTestTarget={sendTestTarget} busy={busy} hint={targetHint("listen-rules")} />
           </div>
           <div className="hint-list">
             {threadHelp.map((line) => (
@@ -2052,6 +2228,8 @@ function App() {
             <ChannelPicker config={config} setConfig={setConfig} channel={channel} onChannelChange={setSelectedChannel} />
             {channel === "wechat" ? (
               <ProfileGroupEditor title="微信机器人配置组" kind="wechat" rows={wechatProfiles} setRows={(rows) => setStructured({ wechatProfiles: rows })} busy={busy} onQueryChats={queryChats} onQueryDraftChats={queryDraftChats} hint={targetHint("wechat-profiles")} />
+            ) : channel === "email" ? (
+              <ProfileGroupEditor title="邮箱发信配置组" kind="email" rows={emailProfiles} setRows={(rows) => setStructured({ emailProfiles: rows })} busy={busy} onQueryChats={queryChats} onQueryDraftChats={queryDraftChats} hint={targetHint("email-profiles")} />
             ) : (
               <ProfileGroupEditor title="飞书机器人配置组" kind="feishu" rows={feishuProfiles} setRows={(rows) => setStructured({ feishuProfiles: rows })} busy={busy} onQueryChats={queryChats} onQueryDraftChats={queryDraftChats} hint={targetHint("feishu-profiles")} />
             )}
@@ -2075,7 +2253,7 @@ function App() {
             {fieldGroups.ai.filter((spec) => spec[0] !== "ai_enabled").map((spec) => (
               <Field key={spec[0]} config={config} setConfig={setConfig} spec={spec} hint={targetHint(spec[0])} />
             ))}
-            <AiScheduleTargets config={config} setConfig={setConfig} pushTargets={pushTargets} feishuProfiles={feishuProfiles} wechatProfiles={wechatProfiles} onCreateScheduleTarget={createScheduleTarget} hint={targetHint("ai-schedule-targets")} />
+            <AiScheduleTargets config={config} setConfig={setConfig} pushTargets={pushTargets} feishuProfiles={feishuProfiles} wechatProfiles={wechatProfiles} emailProfiles={emailProfiles} onCreateScheduleTarget={createScheduleTarget} onSendTestTarget={sendTestTarget} busy={busy} hint={targetHint("ai-schedule-targets")} />
           </div>
         </Section>
 

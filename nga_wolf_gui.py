@@ -91,6 +91,16 @@ DEFAULT_CONFIG = {
     "wechat_bot_route_tag": "",
     "wechat_bot_account_id": "default",
     "wechat_bot_profiles": "[]",
+    "email_smtp_host": "smtp.gmail.com",
+    "email_smtp_port": "587",
+    "email_smtp_security": "starttls",
+    "email_username": "",
+    "email_password": "",
+    "email_from": "",
+    "email_from_name": "NGA Wolf Watcher",
+    "email_reply_to": "",
+    "email_to": "",
+    "email_smtp_profiles": "[]",
     "default_author_id": "150058",
     "default_tid": "45974302",
     "watch_mode": "author",
@@ -325,6 +335,8 @@ def ensure_profile_id(prefix: str, profile: dict[str, Any]) -> str:
         return current
     if prefix == "feishu":
         return nga_feishu_watch.stable_profile_id("feishu", str(profile.get("app_id") or ""), str(profile.get("label") or ""))
+    if prefix == "email":
+        return nga_feishu_watch.stable_profile_id("email", str(profile.get("username") or ""), str(profile.get("from_email") or ""), str(profile.get("label") or ""))
     return nga_feishu_watch.stable_profile_id("wechat", str(profile.get("account_id") or "default"), str(profile.get("token") or "")[:16])
 
 
@@ -389,7 +401,48 @@ def load_wechat_profiles(config: dict[str, object]) -> list[dict[str, Any]]:
     ]
 
 
-def load_push_targets(config: dict[str, object], feishu_profiles: list[dict[str, Any]], wechat_profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def load_email_profiles(config: dict[str, object]) -> list[dict[str, Any]]:
+    profiles = json_list_config(config, "email_smtp_profiles")
+    for profile in profiles:
+        profile["id"] = ensure_profile_id("email", profile)
+        profile.setdefault("label", "")
+        profile.setdefault("smtp_host", "smtp.gmail.com")
+        profile.setdefault("smtp_port", "587")
+        profile.setdefault("smtp_security", "starttls")
+        profile.setdefault("username", "")
+        profile.setdefault("password", "")
+        profile.setdefault("from_email", profile.get("username", ""))
+        profile.setdefault("from_name", "NGA Wolf Watcher")
+        profile.setdefault("reply_to", "")
+    if profiles:
+        return profiles
+    username = str(config.get("email_username") or "").strip()
+    password = str(config.get("email_password") or "").strip()
+    from_email = str(config.get("email_from") or username).strip()
+    if not (username or password or from_email):
+        return []
+    return [
+        {
+            "id": "default",
+            "label": "默认邮箱",
+            "smtp_host": str(config.get("email_smtp_host") or "smtp.gmail.com").strip(),
+            "smtp_port": str(config.get("email_smtp_port") or "587").strip(),
+            "smtp_security": str(config.get("email_smtp_security") or "starttls").strip(),
+            "username": username,
+            "password": password,
+            "from_email": from_email,
+            "from_name": str(config.get("email_from_name") or "NGA Wolf Watcher").strip(),
+            "reply_to": str(config.get("email_reply_to") or "").strip(),
+        }
+    ]
+
+
+def load_push_targets(
+    config: dict[str, object],
+    feishu_profiles: list[dict[str, Any]],
+    wechat_profiles: list[dict[str, Any]],
+    email_profiles: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     targets = json_list_config(config, "push_targets")
     for target in targets:
         target.setdefault("id", nga_feishu_watch.stable_profile_id("target", str(target.get("channel") or ""), str(target.get("profile_id") or ""), str(target.get("receive_id") or "")))
@@ -431,6 +484,20 @@ def load_push_targets(config: dict[str, object], feishu_profiles: list[dict[str,
                 "default_tid": str(config.get("default_tid") or ""),
             }
         )
+    email_to = str(config.get("email_to") or "").strip()
+    if email_profiles and email_to:
+        fallback.append(
+            {
+                "id": "default_email",
+                "label": "默认邮箱",
+                "channel": "email",
+                "profile_id": str(email_profiles[0].get("id") or "default"),
+                "receive_id": email_to,
+                "id_type": "email",
+                "default_author_id": str(config.get("default_author_id") or ""),
+                "default_tid": str(config.get("default_tid") or ""),
+            }
+        )
     return fallback
 
 
@@ -458,6 +525,8 @@ def load_listen_rules(config: dict[str, object]) -> list[dict[str, Any]]:
         default_targets.append("default_feishu")
     if str(config.get("wechat_bot_target_user_id") or "").strip():
         default_targets.append("default_wechat")
+    if str(config.get("email_to") or "").strip():
+        default_targets.append("default_email")
     if mode in {"author", "both"}:
         for target in nga_feishu_watch.parse_target_list(config.get("watch_author_ids"), str(config.get("default_author_id") or "150058")):
             legacy.append({"id": f"author:{target.id}", "label": target.label, "mode": "author", "author_id": target.id, "tid": "", "target_ids": list(default_targets)})
@@ -578,6 +647,16 @@ def build_args(
         wechat_bot_account_id=str(config.get("wechat_bot_account_id") or "default").strip(),
         wechat_bot_state_dir="",
         wechat_bot_profiles=str(config.get("wechat_bot_profiles") or "").strip(),
+        email_smtp_profiles=str(config.get("email_smtp_profiles") or "").strip(),
+        email_smtp_host=str(config.get("email_smtp_host") or "smtp.gmail.com").strip(),
+        email_smtp_port=int_value(config, "email_smtp_port", 587),
+        email_smtp_security=str(config.get("email_smtp_security") or "starttls").strip(),
+        email_username=str(config.get("email_username") or "").strip(),
+        email_password=str(config.get("email_password") or "").strip(),
+        email_from=str(config.get("email_from") or "").strip(),
+        email_from_name=str(config.get("email_from_name") or "NGA Wolf Watcher").strip(),
+        email_reply_to=str(config.get("email_reply_to") or "").strip(),
+        email_to=str(config.get("email_to") or "").strip(),
         wechat_poll=str(config.get("bot_channel") or "feishu").strip() == "wechat",
         timeout=int_value(config, "timeout", 20),
         dry_run=False,
@@ -642,13 +721,15 @@ def validate_config(
     require_cookie: bool = True,
 ) -> list[str]:
     channel = str(config.get("bot_channel") or "feishu").strip()
-    if channel not in {"feishu", "wechat"}:
+    if channel not in {"feishu", "wechat", "email"}:
         channel = "feishu"
     required: list[tuple[str, str]] = []
     feishu_profiles = load_feishu_profiles(config)
     wechat_profiles = load_wechat_profiles(config)
+    email_profiles = load_email_profiles(config)
     has_feishu_profile = any(str(profile.get("app_id") or "").strip() and str(profile.get("app_secret") or "").strip() for profile in feishu_profiles)
     has_wechat_profile = any(str(profile.get("token") or "").strip() for profile in wechat_profiles)
+    has_email_profile = any(str(profile.get("username") or "").strip() and str(profile.get("password") or "").strip() for profile in email_profiles)
     push_targets = nga_feishu_watch.parse_push_targets(config.get("push_targets"))
     listen_rules = nga_feishu_watch.parse_listen_rules(config.get("listen_rules"))
     has_structured_routes = bool(push_targets or listen_rules)
@@ -662,12 +743,24 @@ def validate_config(
             )
         if require_receive_id and not has_feishu_profile:
             required.append(("feishu_receive_id", "Receive ID"))
-    elif not has_structured_routes:
+    elif not has_structured_routes and channel == "wechat":
         required.append(("wechat_bot_token", "微信 Bot Token"))
         if require_receive_id:
             required.append(("wechat_bot_target_user_id", "微信目标用户 ID"))
     if has_wechat_profile:
         required = [(key, label) for key, label in required if key not in {"wechat_bot_token", "wechat_bot_target_user_id"}]
+    if not has_structured_routes and channel == "email":
+        if not has_email_profile:
+            required.extend(
+                [
+                    ("email_username", "邮箱登录账号"),
+                    ("email_password", "邮箱密码或授权码"),
+                ]
+            )
+        if require_receive_id:
+            required.append(("email_to", "收件邮箱"))
+    if has_email_profile:
+        required = [(key, label) for key, label in required if key not in {"email_username", "email_password"}]
     if require_cookie:
         required.append(("nga_cookie", "NGA Cookie"))
     errors = [label for key, label in required if not str(config.get(key) or "").strip()]
@@ -697,6 +790,14 @@ def validate_config(
                 errors.append(f"发送目标 {target.label or target.id} 未选择有效微信机器人")
             elif not str(profile.get("token") or "").strip():
                 errors.append(f"发送目标 {target.label or target.id} 的微信机器人缺少 Token")
+        if target.channel == "email":
+            profile = next((item for item in email_profiles if str(item.get("id") or "") == target.profile_id), None)
+            if not profile:
+                errors.append(f"推送目标 {target.label or target.id} 没有可用的邮箱发信配置")
+            elif not (str(profile.get("username") or "").strip() and str(profile.get("password") or "").strip()):
+                errors.append(f"推送目标 {target.label or target.id} 的邮箱发信配置缺少登录账号或密码/授权码")
+            if not target.receive_id:
+                errors.append(f"推送目标 {target.label or target.id} 缺少收件邮箱")
     for rule in listen_rules:
         if not rule.author_id.isdigit() or (rule.mode == "thread_author" and not rule.tid.isdigit()):
             errors.append(f"监听规则 {rule.label or rule.id} 包含非数字 NGA ID")
@@ -1001,7 +1102,8 @@ class App:
         self.selected_target_indices: dict[str, int] = {}
         self.feishu_profiles = load_feishu_profiles(self.config)
         self.wechat_profiles = load_wechat_profiles(self.config)
-        self.push_targets = load_push_targets(self.config, self.feishu_profiles, self.wechat_profiles)
+        self.email_profiles = load_email_profiles(self.config)
+        self.push_targets = load_push_targets(self.config, self.feishu_profiles, self.wechat_profiles, self.email_profiles)
         self.listen_rules = load_listen_rules(self.config)
         self.feishu_profile_listboxes: list[Listbox] = []
         self.wechat_profile_listboxes: list[Listbox] = []
@@ -1012,6 +1114,7 @@ class App:
         self.ai_schedule_selected_target_ids = self.configured_ai_schedule_target_id_list()
         self.selected_feishu_profile_index = 0 if self.feishu_profiles else -1
         self.selected_wechat_profile_index = 0 if self.wechat_profiles else -1
+        self.selected_email_profile_index = 0 if self.email_profiles else -1
         self.selected_push_target_index = 0 if self.push_targets else -1
         self.selected_listen_rule_index = 0 if self.listen_rules else -1
         self.watch_mode_label_var = StringVar(
@@ -1192,7 +1295,7 @@ class App:
 
         ctk.CTkLabel(
             sidebar,
-            text="NGA Wolf Watcher\nv1.0.8",
+            text="NGA Wolf Watcher\nv1.1.6",
             justify="left",
             anchor="w",
             font=ctk.CTkFont(size=11),
@@ -3918,6 +4021,7 @@ class App:
             config[key] = self.target_list_config_text(key)
         config["feishu_bot_profiles"] = json.dumps(self.feishu_profiles, ensure_ascii=False, indent=2)
         config["wechat_bot_profiles"] = json.dumps(self.wechat_profiles, ensure_ascii=False, indent=2)
+        config["email_smtp_profiles"] = json.dumps(getattr(self, "email_profiles", []), ensure_ascii=False, indent=2)
         config["push_targets"] = json.dumps(self.push_targets, ensure_ascii=False, indent=2)
         config["listen_rules"] = json.dumps(self.listen_rules, ensure_ascii=False, indent=2)
         schedule_target_ids = self.ai_schedule_target_ids()
@@ -3950,10 +4054,31 @@ class App:
             config["wechat_bot_poll_timeout_ms"] = "35000"
             config["wechat_bot_route_tag"] = ""
             config["wechat_bot_account_id"] = "default"
+        if getattr(self, "email_profiles", []):
+            profile = self.email_profiles[0]
+            config["email_smtp_host"] = str(profile.get("smtp_host") or "smtp.gmail.com").strip()
+            config["email_smtp_port"] = str(profile.get("smtp_port") or "587").strip()
+            config["email_smtp_security"] = str(profile.get("smtp_security") or "starttls").strip()
+            config["email_username"] = str(profile.get("username") or "").strip()
+            config["email_password"] = str(profile.get("password") or "").strip()
+            config["email_from"] = str(profile.get("from_email") or "").strip()
+            config["email_from_name"] = str(profile.get("from_name") or "NGA Wolf Watcher").strip()
+            config["email_reply_to"] = str(profile.get("reply_to") or "").strip()
+        else:
+            config["email_smtp_host"] = "smtp.gmail.com"
+            config["email_smtp_port"] = "587"
+            config["email_smtp_security"] = "starttls"
+            config["email_username"] = ""
+            config["email_password"] = ""
+            config["email_from"] = ""
+            config["email_from_name"] = "NGA Wolf Watcher"
+            config["email_reply_to"] = ""
         first_feishu_target = next((target for target in self.push_targets if str(target.get("channel") or "feishu") == "feishu"), None)
         config["feishu_receive_id"] = str(first_feishu_target.get("receive_id") or "").strip() if first_feishu_target else ""
         if first_feishu_target and str(first_feishu_target.get("id_type") or "").strip():
             config["feishu_id_type"] = str(first_feishu_target.get("id_type") or "chat_id").strip() or "chat_id"
+        first_email_target = next((target for target in self.push_targets if str(target.get("channel") or "feishu") == "email"), None)
+        config["email_to"] = str(first_email_target.get("receive_id") or "").strip() if first_email_target else ""
         author_text = str(config.get("watch_author_ids") or "").strip()
         thread_text = str(config.get("preset_thread_ids") or "").strip()
         author_targets = nga_feishu_watch.parse_target_list(author_text, "")

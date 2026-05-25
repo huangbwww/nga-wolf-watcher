@@ -235,19 +235,27 @@ def read_json_config(path: Path) -> dict[str, Any]:
 def webui_preflight_errors(config: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     channel = str(config.get("bot_channel") or "feishu").strip().lower()
-    if channel not in {"feishu", "wechat"}:
+    if channel not in {"feishu", "wechat", "email"}:
         channel = "feishu"
 
     feishu_profiles = legacy.load_feishu_profiles(config)
     wechat_profiles = legacy.load_wechat_profiles(config)
+    email_profiles = legacy.load_email_profiles(config)
     has_feishu = any(
         str(profile.get("app_id") or "").strip() and str(profile.get("app_secret") or "").strip()
         for profile in feishu_profiles
     )
     has_wechat = any(str(profile.get("token") or "").strip() for profile in wechat_profiles)
+    has_email = any(
+        str(profile.get("username") or "").strip() and str(profile.get("password") or "").strip()
+        for profile in email_profiles
+    )
     if channel == "wechat":
         if not has_wechat:
             errors.append("请先配置一个微信Bot配置")
+    elif channel == "email":
+        if not has_email:
+            errors.append("请先配置一个邮箱发信配置")
     elif not has_feishu:
         errors.append("请先配置一个飞书配置")
 
@@ -550,11 +558,11 @@ class PreviewApi:
         if errors:
             non_cookie_errors = [error for error in errors if error != "NGA Cookie"]
             if non_cookie_errors:
-                return {"ok": False, "errors": non_cookie_errors}
+                return {"ok": False, "errors": webui_friendly_errors(merged, non_cookie_errors)}
         args = legacy.build_args(merged)
         target = legacy.nga_feishu_watch.find_push_target(args, target_id)
         if target is None:
-            return {"ok": False, "error": "请选择有效推送目标"}
+            return {"ok": False, "error": "请选择有效发送目标"}
         scoped_args = legacy.nga_feishu_watch.args_for_push_target(args, target)
         if legacy.nga_feishu_watch.is_wechat_channel(scoped_args):
             legacy.nga_feishu_watch.wechat_client_for_args(scoped_args).refresh_context_tokens(

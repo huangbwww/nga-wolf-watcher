@@ -458,7 +458,8 @@ header p,
 
 .segmented {
   display: inline-grid;
-  grid-template-columns: repeat(2, 86px);
+  grid-template-columns: repeat(3, minmax(72px, 1fr));
+  width: min(100%, 276px);
   padding: 3px;
   border: 1px solid #cbd5e1;
   border-radius: 9px;
@@ -743,6 +744,18 @@ textarea:focus {
   color: #64748b;
   font-size: 12px;
   line-height: 1.45;
+}
+
+.preset-summary {
+  min-height: 70px;
+  justify-content: center;
+}
+
+.preset-summary p {
+  margin: 6px 0 0;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .draft-chat-controls {
@@ -1081,7 +1094,7 @@ textarea:focus {
 .schedule-target-row {
   min-height: 38px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 34px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
@@ -1187,6 +1200,15 @@ textarea:focus {
 
   .grid {
     grid-template-columns: 1fr;
+  }
+
+  .channel-switch-card {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .segmented {
+    width: 100%;
   }
 
   .ai-agent-grid {
