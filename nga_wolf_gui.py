@@ -134,7 +134,7 @@ DEFAULT_CONFIG = {
     "ai_codewhale_command": "codewhale",
     "ai_custom_command": "",
     "ai_model": "",
-    "ai_reasoning_effort": "default",
+    "ai_reasoning_effort": "",
     "ai_ignore_codex_user_config": False,
     "ai_schedule_enabled": False,
     "ai_schedule_interval_minutes": "5",
@@ -768,7 +768,7 @@ def validate_config(
         errors.append("AI Provider 必须是 codex、claude、codewhale 或 custom")
     effort = str(config.get("ai_reasoning_effort") or "").strip().lower()
     if provider != "custom" and effort and not ai_analysis.is_valid_reasoning_effort(effort, provider):
-        values = "、".join(["default", *ai_analysis.reasoning_effort_options(provider)])
+        values = "、".join(ai_analysis.reasoning_effort_options(provider))
         errors.append(f"AI 思考强度必须是 {values}")
     if bool(config.get("ai_enabled", False)) and provider == "custom":
         if not str(config.get("ai_custom_command") or "").strip():
@@ -1907,7 +1907,7 @@ class App:
         self.ai_model_menu = ctk.CTkOptionMenu(
             frame,
             variable=self.vars["ai_model"],
-            values=["default"],
+            values=[ai_analysis.provider_default_model("codex")],
             height=34,
             fg_color="#f8fafc",
             button_color="#e2e8f0",
@@ -1928,7 +1928,7 @@ class App:
         self.ai_reasoning_menu = ctk.CTkOptionMenu(
             frame,
             variable=self.vars["ai_reasoning_effort"],
-            values=["default"],
+            values=[ai_analysis.provider_default_reasoning_effort("codex")],
             height=34,
             fg_color="#f8fafc",
             button_color="#e2e8f0",
@@ -2037,8 +2037,8 @@ class App:
     def update_ai_model_controls(self) -> None:
         provider = str(self.vars.get("ai_provider").get() if "ai_provider" in self.vars else "codex").strip().lower()
         if provider in {"codex", "claude", "codewhale"}:
-            model_values = ["default", "auto", *ai_analysis.model_options(provider)]
-            reasoning_values = ["default", *ai_analysis.reasoning_effort_options(provider)]
+            model_values = ai_analysis.model_options(provider)
+            reasoning_values = ai_analysis.reasoning_effort_options(provider)
             if self.ai_model_menu is not None:
                 self.ai_model_menu.configure(values=model_values)
                 self.ai_model_menu.grid(row=4, column=1, sticky="ew", padx=(0, 16), pady=(6, 8))
@@ -2050,9 +2050,9 @@ class App:
             if self.ai_reasoning_entry is not None:
                 self.ai_reasoning_entry.grid_forget()
             if not self.vars["ai_model"].get().strip() or self.vars["ai_model"].get().strip() not in model_values:
-                self.vars["ai_model"].set("default")
+                self.vars["ai_model"].set(ai_analysis.provider_default_model(provider))
             if not self.vars["ai_reasoning_effort"].get().strip() or self.vars["ai_reasoning_effort"].get().strip() not in reasoning_values:
-                self.vars["ai_reasoning_effort"].set("default")
+                self.vars["ai_reasoning_effort"].set(ai_analysis.provider_default_reasoning_effort(provider))
             return
 
         if self.ai_model_menu is not None:

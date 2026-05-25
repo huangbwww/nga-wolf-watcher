@@ -9,10 +9,12 @@ or other AI dependency is required unless the user explicitly enables AI tasks.
 from __future__ import annotations
 
 import argparse
+import base64
 import ctypes
 import datetime as dt
 import json
 import logging
+import mimetypes
 import os
 import queue
 import re
@@ -38,12 +40,18 @@ DEFAULT_TIMEOUT = 300
 DEFAULT_SCHEDULE_WINDOWS = "weekday:09:30-11:30,13:00-15:00"
 DEFAULT_MAX_FEISHU_CHARS = 3500
 SOURCE_NAME = "nga-wolf-watcher"
-CODEX_MODEL_OPTIONS = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2"]
-CLAUDE_MODEL_OPTIONS = ["sonnet[1m]", "opus[1m]", "haiku"]
+CODEX_DEFAULT_MODEL = "gpt-5.5"
+CLAUDE_DEFAULT_MODEL = "sonnet"
+CODEWHALE_DEFAULT_MODEL = "deepseek-v4-pro"
+CODEX_DEFAULT_REASONING_EFFORT = "medium"
+CLAUDE_DEFAULT_REASONING_EFFORT = "medium"
+CODEWHALE_DEFAULT_REASONING_EFFORT = "auto"
+CODEX_MODEL_OPTIONS = [CODEX_DEFAULT_MODEL, "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2"]
+CLAUDE_MODEL_OPTIONS = [CLAUDE_DEFAULT_MODEL, "default", "opus[1m]", "haiku"]
 CODEX_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
-CLAUDE_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
-CODEWHALE_MODEL_OPTIONS = ["deepseek-v4-flash", "deepseek-v4-pro"]
-CODEWHALE_REASONING_EFFORTS = {"auto", "off", "low", "medium", "high", "max"}
+CLAUDE_REASONING_EFFORTS = {"low", "medium", "high", "max"}
+CODEWHALE_MODEL_OPTIONS = [CODEWHALE_DEFAULT_MODEL, "deepseek-v4-flash"]
+CODEWHALE_REASONING_EFFORTS = {"auto", "off", "high", "max"}
 
 DEFAULT_AUTO_ANALYSIS_PROMPT = "根据最新的 NGA 回复历史、我目前的持仓信息和观察列表，并实时查询公开 A 股行情信息，分析盘面变化、机会与风险，给出接下来需要重点观察的方向和操作建议。"
 DEFAULT_STOCK_ANALYSIS_PROMPT = DEFAULT_AUTO_ANALYSIS_PROMPT
@@ -127,9 +135,67 @@ def provider_reasoning_env(provider: str) -> str:
 
 def normalize_model(raw: str) -> str:
     text = str(raw or "").strip()
-    if text.lower() in {"default", "unset"}:
+    if text.lower() in {"unset"}:
         return ""
     return text
+
+
+def provider_default_model(provider: str) -> str:
+    if provider == "claude":
+        return CLAUDE_DEFAULT_MODEL
+    if provider == "codewhale":
+        return CODEWHALE_DEFAULT_MODEL
+    if provider == "codex":
+        return CODEX_DEFAULT_MODEL
+    return ""
+
+
+def provider_default_reasoning_effort(provider: str) -> str:
+    if provider == "claude":
+        return CLAUDE_DEFAULT_REASONING_EFFORT
+    if provider == "codewhale":
+        return CODEWHALE_DEFAULT_REASONING_EFFORT
+    if provider == "codex":
+        return CODEX_DEFAULT_REASONING_EFFORT
+    return ""
+
+
+def normalize_provider_model(provider: str, raw: str) -> str:
+    model = normalize_model(raw)
+    if not model:
+        return ""
+    if model.lower() == "default":
+        return "default" if provider == "claude" else provider_default_model(provider)
+    if model.lower() == "auto":
+        return ""
+    if provider == "custom":
+        return model
+    options = model_options(provider)
+    if not options:
+        return model
+    for option in options:
+        if model.lower() == option.lower():
+            return option
+    return ""
+
+
+def model_for_cli(provider: str, raw: str) -> str:
+    model = normalize_provider_model(provider, raw)
+    return "" if model == "default" else model
+
+
+def is_valid_model(raw: str, provider: str = "codex") -> bool:
+    text = normalize_model(raw)
+    if not text:
+        return True
+    if text.lower() == "default":
+        return provider == "claude"
+    if text.lower() == "auto":
+        return True
+    if provider == "custom":
+        return True
+    options = model_options(provider)
+    return not options or any(text.lower() == option.lower() for option in options)
 
 
 def model_options(provider: str = "codex") -> list[str]:
@@ -157,11 +223,11 @@ def model_label(provider: str, value: str) -> str:
 
 def reasoning_effort_options(provider: str = "codex") -> list[str]:
     if provider == "claude":
-        return sorted(CLAUDE_REASONING_EFFORTS, key=["low", "medium", "high", "xhigh", "max"].index)
+        return sorted(CLAUDE_REASONING_EFFORTS, key=["low", "medium", "high", "max"].index)
     if provider == "codex":
         return sorted(CODEX_REASONING_EFFORTS, key=["low", "medium", "high", "xhigh"].index)
     if provider == "codewhale":
-        return sorted(CODEWHALE_REASONING_EFFORTS, key=["auto", "off", "low", "medium", "high", "max"].index)
+        return sorted(CODEWHALE_REASONING_EFFORTS, key=["auto", "off", "high", "max"].index)
     return []
 
 
@@ -175,6 +241,8 @@ def normalize_reasoning_effort(raw: str, provider: str = "codex") -> str:
         return ""
     if text == "auto" and provider != "codewhale":
         return ""
+    if provider == "claude" and text == "xhigh":
+        return "max"
     options = reasoning_effort_options(provider)
     if options and text not in options:
         return ""
@@ -184,6 +252,8 @@ def normalize_reasoning_effort(raw: str, provider: str = "codex") -> str:
 def is_valid_reasoning_effort(raw: str, provider: str = "codex") -> bool:
     text = str(raw or "").strip().lower()
     if text in {"", "default", "auto", "unset"}:
+        return True
+    if provider == "claude" and text == "xhigh":
         return True
     options = reasoning_effort_options(provider)
     return not options or text in options
@@ -269,7 +339,7 @@ class AIConfig:
                 str(getattr(args, "ai_permission_mode", os.getenv("AI_PERMISSION_MODE", "default")) or "default"),
                 provider,
             ),
-            model=normalize_model(str(raw_model or "")),
+            model=normalize_provider_model(provider, str(raw_model or "")),
             reasoning_effort=normalize_reasoning_effort(
                 str(raw_reasoning or ""),
                 provider,
@@ -356,6 +426,16 @@ def add_cli_arguments(parser: argparse.ArgumentParser) -> None:
 
 def utcish_now() -> str:
     return dt.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def parse_state_timestamp(value: Any) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        return dt.datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return 0.0
 
 
 def safe_key(value: str) -> str:
@@ -1059,11 +1139,11 @@ class CodexRunner(BaseRunner):
     def _model_args(self, task: AITask, *, allow_model: bool = True) -> list[str]:
         if not allow_model:
             return []
-        model = normalize_model(str(task.metadata.get("model") or self.config.model or ""))
+        model = model_for_cli("codex", str(task.metadata.get("model") or self.config.model or ""))
         return ["--model", model] if model else []
 
     def _has_model_arg(self, task: AITask) -> bool:
-        model = normalize_model(str(task.metadata.get("model") or self.config.model or ""))
+        model = model_for_cli("codex", str(task.metadata.get("model") or self.config.model or ""))
         return bool(model)
 
     def _reasoning_args(self, task: AITask) -> list[str]:
@@ -1199,6 +1279,282 @@ class CodexRunner(BaseRunner):
         )
 
 
+_CLAUDE_STREAM_SESSIONS: dict[str, "ClaudeStreamSession"] = {}
+_CLAUDE_STREAM_SESSIONS_GUARD = threading.Lock()
+
+
+def _tail_append(parts: list[str], text: str, *, limit: int = 12000) -> None:
+    if not text:
+        return
+    parts.append(text)
+    total = sum(len(part) for part in parts)
+    while parts and total > limit:
+        removed = parts.pop(0)
+        total -= len(removed)
+
+
+def _claude_session_key(config: AIConfig, task: AITask) -> str:
+    model = model_for_cli("claude", str(task.metadata.get("model") or config.model or ""))
+    effort = normalize_reasoning_effort(str(task.metadata.get("reasoning_effort") or config.reasoning_effort or ""), "claude")
+    mode = normalize_permission_mode(task.metadata.get("permission_mode") or config.permission_mode, "claude")
+    return "\n".join([
+        str(task.work_dir.resolve()),
+        config.claude_command,
+        model,
+        effort,
+        mode,
+    ])
+
+
+class ClaudeStreamSession:
+    """Long-running Claude Code stream-json process, modeled after cc-connect."""
+
+    def __init__(self, config: AIConfig, task: AITask, logger: logging.Logger) -> None:
+        self.config = config
+        self.work_dir = task.work_dir
+        self.logger = logger
+        self.events: queue.Queue[dict[str, Any]] = queue.Queue()
+        self.turn_lock = threading.Lock()
+        self.stdin_lock = threading.Lock()
+        self.stderr_parts: list[str] = []
+        self.stdout_parts: list[str] = []
+        self.session_id = ""
+        self.mode = normalize_permission_mode(task.metadata.get("permission_mode") or config.permission_mode, "claude")
+        self.process = self._start(task)
+        threading.Thread(target=self._stdout_loop, daemon=True).start()
+        threading.Thread(target=self._stderr_loop, daemon=True).start()
+
+    def _start(self, task: AITask) -> subprocess.Popen[str]:
+        base = resolve_executable(split_command_line(self.config.claude_command), "claude")
+        if not base:
+            raise RuntimeError("Empty claude command")
+        command = [
+            *base,
+            "--output-format",
+            "stream-json",
+            "--input-format",
+            "stream-json",
+            "--permission-prompt-tool",
+            "stdio",
+            "--replay-user-messages",
+            "--verbose",
+        ]
+        if self.mode != "default":
+            command.extend(["--permission-mode", self.mode])
+        effort = normalize_reasoning_effort(
+            str(task.metadata.get("reasoning_effort") or self.config.reasoning_effort or ""),
+            "claude",
+        )
+        if effort:
+            command.extend(["--effort", effort])
+        model = model_for_cli("claude", str(task.metadata.get("model") or self.config.model or ""))
+        if model:
+            command.extend(["--model", model])
+        self.logger.info("starting persistent claude stream command=%s", scrub_command_for_log(command))
+        return subprocess.Popen(
+            command,
+            cwd=str(self.work_dir),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            shell=False,
+            env=BaseRunner(self.config).build_env(task),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
+    def _stdout_loop(self) -> None:
+        try:
+            assert self.process.stdout is not None
+            for line in self.process.stdout:
+                _tail_append(self.stdout_parts, line)
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    event = json.loads(text)
+                except json.JSONDecodeError:
+                    self.logger.debug("claude stream non-json stdout: %s", text[:500])
+                    continue
+                if isinstance(event, dict):
+                    self._handle_event(event)
+        finally:
+            code = self.process.poll()
+            if code is None:
+                try:
+                    code = self.process.wait(timeout=0.2)
+                except subprocess.TimeoutExpired:
+                    code = None
+            self.events.put({"type": "_exit", "returncode": code, "stderr": self.stderr_tail()})
+
+    def _stderr_loop(self) -> None:
+        if self.process.stderr is None:
+            return
+        for line in self.process.stderr:
+            _tail_append(self.stderr_parts, line)
+
+    def _handle_event(self, event: dict[str, Any]) -> None:
+        event_type = str(event.get("type") or "")
+        if event_type in {"system", "result"}:
+            session_id = str(event.get("session_id") or "").strip()
+            if session_id:
+                self.session_id = session_id
+        if event_type == "control_request":
+            self._handle_control_request(event)
+            return
+        self.events.put(event)
+
+    def _handle_control_request(self, event: dict[str, Any]) -> None:
+        request_id = str(event.get("request_id") or "").strip()
+        request = event.get("request")
+        if not request_id or not isinstance(request, dict):
+            return
+        input_value = request.get("input")
+        updated_input = input_value if isinstance(input_value, dict) else {}
+        tool_name = str(request.get("tool_name") or "")
+        allow = self.mode == "bypassPermissions" or (self.mode == "acceptEdits" and tool_name in {"Edit", "Write", "NotebookEdit", "MultiEdit"})
+        if allow:
+            response = {"behavior": "allow", "updatedInput": updated_input}
+        else:
+            response = {
+                "behavior": "deny",
+                "message": "Permission was not pre-approved by NGA Wolf Watcher. Switch AI permission mode if this tool should run.",
+            }
+        try:
+            self._write_json({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": request_id,
+                    "response": response,
+                },
+            })
+        except Exception as exc:
+            self.logger.warning("claude permission response failed: %s", exc)
+
+    def _write_json(self, payload: dict[str, Any]) -> None:
+        if self.process.stdin is None:
+            raise RuntimeError("claude stdin is not available")
+        data = json.dumps(payload, ensure_ascii=True)
+        with self.stdin_lock:
+            self.process.stdin.write(data + "\n")
+            self.process.stdin.flush()
+
+    def alive(self) -> bool:
+        return self.process.poll() is None
+
+    def stdout_tail(self) -> str:
+        return "".join(self.stdout_parts)[-12000:]
+
+    def stderr_tail(self) -> str:
+        return "".join(self.stderr_parts)[-12000:]
+
+    def close(self) -> None:
+        try:
+            if self.process.stdin is not None:
+                self.process.stdin.close()
+        except Exception:
+            pass
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+
+    def send(self, prompt_text: str, task: AITask) -> tuple[str, str]:
+        if not self.alive():
+            raise RuntimeError(f"claude stream process is not running: {error_tail(self.stderr_tail())}")
+        self._drain_events()
+        payload: dict[str, Any] = {"type": "user", "message": {"role": "user", "content": self._message_content(prompt_text, task)}}
+        self._write_json(payload)
+        parts: list[str] = []
+        deadline = time.monotonic() + max(1, int(task.timeout))
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.close()
+                raise subprocess.TimeoutExpired("claude stream", task.timeout)
+            try:
+                event = self.events.get(timeout=min(1.0, remaining))
+            except queue.Empty:
+                if not self.alive():
+                    raise RuntimeError(f"claude exited before result: {error_tail(self.stderr_tail())}")
+                continue
+            event_type = str(event.get("type") or "")
+            if event_type == "assistant":
+                parts.extend(self._assistant_text(event))
+            elif event_type == "result":
+                text = str(event.get("result") or "").strip()
+                return (text or "".join(parts).strip(), self.session_id)
+            elif event_type == "_exit":
+                raise RuntimeError(f"claude exited with code {event.get('returncode')}: {error_tail(str(event.get('stderr') or self.stderr_tail()))}")
+
+    def _drain_events(self) -> None:
+        while True:
+            try:
+                self.events.get_nowait()
+            except queue.Empty:
+                return
+
+    def _assistant_text(self, event: dict[str, Any]) -> list[str]:
+        message = event.get("message")
+        if not isinstance(message, dict):
+            return []
+        content = message.get("content")
+        if not isinstance(content, list):
+            return []
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text = str(item.get("text") or "")
+                if text:
+                    parts.append(text)
+        return parts
+
+    def _message_content(self, prompt_text: str, task: AITask) -> str | list[dict[str, Any]]:
+        image_parts: list[dict[str, Any]] = []
+        for path in task.image_paths:
+            try:
+                data = Path(path).read_bytes()
+            except OSError as exc:
+                self.logger.warning("claude image read failed path=%s error=%s", path, exc)
+                continue
+            mime_type = mimetypes.guess_type(str(path))[0] or "image/png"
+            image_parts.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime_type,
+                    "data": base64.b64encode(data).decode("ascii"),
+                },
+            })
+        if not image_parts:
+            return prompt_text
+        image_parts.append({"type": "text", "text": prompt_text or "Please analyze the attached image(s)."})
+        return image_parts
+
+
+def claude_stream_session(config: AIConfig, task: AITask, logger: logging.Logger) -> ClaudeStreamSession:
+    key = _claude_session_key(config, task)
+    with _CLAUDE_STREAM_SESSIONS_GUARD:
+        session = _CLAUDE_STREAM_SESSIONS.get(key)
+        if session is not None and session.alive():
+            return session
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+        session = ClaudeStreamSession(config, task, logger)
+        _CLAUDE_STREAM_SESSIONS[key] = session
+        return session
+
+
 class ClaudeRunner(BaseRunner):
     provider = "claude"
 
@@ -1221,7 +1577,7 @@ class ClaudeRunner(BaseRunner):
             command.extend(["--continue", "--fork-session"])
         elif conversation_mode == "session_id":
             command.extend(["--session-id", str(values["session_id"])])
-        model = normalize_model(str(task.metadata.get("model") or self.config.model or ""))
+        model = model_for_cli("claude", str(task.metadata.get("model") or self.config.model or ""))
         if model:
             command.extend(["--model", model])
         effort = normalize_reasoning_effort(str(task.metadata.get("reasoning_effort") or self.config.reasoning_effort or ""), "claude")
@@ -1249,19 +1605,81 @@ class ClaudeRunner(BaseRunner):
         return "session id" in output and "already in use" in output
 
     def run(self, task: AITask, prompt_file: Path, prompt_text: str, logger: logging.Logger) -> AIResult:
-        session_id = self._session_id(task)
-        lock = runner_session_lock(f"claude:{task.work_dir.resolve()}")
-        with lock:
-            result = super().run(task, prompt_file, prompt_text, logger)
-            for delay in (2, 5, 10):
-                if not self._session_busy(result):
-                    break
-                logger.warning("claude session %s is busy, retrying after %s seconds", session_id, delay)
-                time.sleep(delay)
-                result = super().run(task, prompt_file, prompt_text, logger)
-                if result.ok:
-                    break
-            return result
+        if "{" in self.config.claude_command:
+            return super().run(task, prompt_file, prompt_text, logger)
+
+        started = time.time()
+        started_at = utcish_now()
+        result = AIResult(False, self.provider, task.task_type, task.output_file, started_at=started_at)
+        session: ClaudeStreamSession | None = None
+        try:
+            task.output_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            session = claude_stream_session(self.config, task, logger)
+            with session.turn_lock:
+                text, session_id = session.send(prompt_text, task)
+            result.exit_code = 0
+            result.stdout = session.stdout_tail()
+            result.stderr = session.stderr_tail()
+            result.text = text.strip()
+            if session_id:
+                self._save_session_id(task, session_id)
+            if result.text:
+                task.output_file.parent.mkdir(parents=True, exist_ok=True)
+                task.output_file.write_text(result.text + "\n", encoding="utf-8")
+                result.ok = True
+            else:
+                result.error = "claude produced empty output"
+        except subprocess.TimeoutExpired as exc:
+            result.error = f"claude timed out after {task.timeout} seconds"
+            result.stdout = session.stdout_tail() if session else ""
+            result.stderr = session.stderr_tail() if session else ""
+            self._discard_stream_session(task)
+        except FileNotFoundError as exc:
+            missing = exc.filename or self.config.claude_command
+            result.error = f"claude command not found: {missing}. Set AI_CLAUDE_COMMAND to the full executable path."
+        except Exception as exc:
+            result.error = f"claude failed: {exc}"
+            result.stdout = session.stdout_tail() if session else ""
+            result.stderr = session.stderr_tail() if session else ""
+            if session and not session.alive():
+                self._discard_stream_session(task)
+        finally:
+            result.ended_at = utcish_now()
+            result.duration_seconds = round(time.time() - started, 3)
+            logger.info(
+                "finished provider=%s task=%s ok=%s exit=%s duration=%s error=%s stdout=%s stderr=%s",
+                self.provider,
+                task.task_type,
+                result.ok,
+                result.exit_code,
+                result.duration_seconds,
+                result.error,
+                result.stdout[-2000:],
+                result.stderr[-2000:],
+            )
+            write_json(task.output_file.with_suffix(task.output_file.suffix + ".meta.json"), asdict(result) | {"output_file": str(task.output_file)})
+        return result
+
+    def _save_session_id(self, task: AITask, session_id: str) -> None:
+        state = read_json(task.work_dir / "state.json", {})
+        if not isinstance(state, dict):
+            state = {}
+        state["claude_stream_session_id"] = session_id
+        state["claude_stream_session_updated_at"] = utcish_now()
+        write_json(task.work_dir / "state.json", state)
+
+    def _discard_stream_session(self, task: AITask) -> None:
+        key = _claude_session_key(self.config, task)
+        with _CLAUDE_STREAM_SESSIONS_GUARD:
+            session = _CLAUDE_STREAM_SESSIONS.pop(key, None)
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
 
 
 class CodeWhaleRunner(BaseRunner):
@@ -1274,6 +1692,15 @@ class CodeWhaleRunner(BaseRunner):
         state = read_json(self._state_path(task), {})
         if not isinstance(state, dict):
             return ""
+        current_model = model_for_cli("codewhale", str(task.metadata.get("model") or self.config.model or ""))
+        current_reasoning = normalize_reasoning_effort(
+            str(task.metadata.get("reasoning_effort") or self.config.reasoning_effort or ""),
+            "codewhale",
+        )
+        saved_model = str(state.get("codewhale_session_model") or "").strip()
+        saved_reasoning = str(state.get("codewhale_session_reasoning_effort") or "").strip()
+        if saved_model != current_model or saved_reasoning != current_reasoning:
+            return ""
         return str(state.get("codewhale_session_id") or "").strip()
 
     def _save_session_id(self, task: AITask, session_id: str) -> None:
@@ -1284,15 +1711,20 @@ class CodeWhaleRunner(BaseRunner):
         if not isinstance(state, dict):
             state = {}
         state["codewhale_session_id"] = session_id
+        state["codewhale_session_model"] = model_for_cli("codewhale", str(task.metadata.get("model") or self.config.model or ""))
+        state["codewhale_session_reasoning_effort"] = normalize_reasoning_effort(
+            str(task.metadata.get("reasoning_effort") or self.config.reasoning_effort or ""),
+            "codewhale",
+        )
         state["codewhale_session_updated_at"] = utcish_now()
         write_json(self._state_path(task), state)
 
     def _model_args(self, task: AITask) -> list[str]:
-        model = normalize_model(str(task.metadata.get("model") or self.config.model or ""))
+        model = model_for_cli("codewhale", str(task.metadata.get("model") or self.config.model or ""))
         return ["--model", model] if model else []
 
     def _has_model_arg(self, task: AITask) -> bool:
-        model = normalize_model(str(task.metadata.get("model") or self.config.model or ""))
+        model = model_for_cli("codewhale", str(task.metadata.get("model") or self.config.model or ""))
         return bool(model)
 
     def _reasoning_config_path(self, task: AITask) -> Path:
@@ -1542,6 +1974,7 @@ class AIManager:
         self._queue: queue.Queue[tuple[AITask, str | None]] = queue.Queue(maxsize=8)
         self._worker_started = False
         self._lock = threading.Lock()
+        self._started_at = time.time()
 
     @property
     def state_path(self) -> Path:
@@ -1613,22 +2046,46 @@ class AIManager:
         raw = str(state.get("permission_mode") or self.config.permission_mode or "default")
         return normalize_permission_mode(raw, self.config.provider)
 
+    def _runtime_setting_is_current(self, state: dict[str, Any], key: str) -> bool:
+        marker = state.get(f"{key}_updated_at")
+        return parse_state_timestamp(marker) >= self._started_at - 2
+
     def effective_model(self) -> str:
         state = self.read_state()
-        if "model" in state:
-            return normalize_model(str(state.get("model") or ""))
-        return normalize_model(self.config.model)
+        if "model" in state and self._runtime_setting_is_current(state, "model"):
+            raw = str(state.get("model") or "").strip()
+            model = normalize_provider_model(self.config.provider, raw)
+            if model or raw.lower() in {"", "auto", "unset", "default"}:
+                return model
+        config_raw = str(self.config.model or "").strip()
+        if config_raw:
+            model = normalize_provider_model(self.config.provider, config_raw)
+            if model or config_raw.lower() in {"auto", "unset", "default"}:
+                return model
+        return provider_default_model(self.config.provider)
 
     def effective_reasoning_effort(self) -> str:
         state = self.read_state()
-        if "reasoning_effort" in state:
-            return normalize_reasoning_effort(str(state.get("reasoning_effort") or ""), self.config.provider)
-        return normalize_reasoning_effort(self.config.reasoning_effort, self.config.provider)
+        if "reasoning_effort" in state and self._runtime_setting_is_current(state, "reasoning_effort"):
+            raw = str(state.get("reasoning_effort") or "").strip()
+            effort = normalize_reasoning_effort(raw, self.config.provider)
+            if effort:
+                return effort
+            if raw.lower() in {"", "auto", "unset", "default"}:
+                return provider_default_reasoning_effort(self.config.provider)
+        config_raw = str(self.config.reasoning_effort or "").strip()
+        if config_raw:
+            effort = normalize_reasoning_effort(config_raw, self.config.provider)
+            if effort:
+                return effort
+        return provider_default_reasoning_effort(self.config.provider)
 
     def clear_runtime_model_config(self) -> None:
         state = self.read_state()
         state.pop("model", None)
         state.pop("reasoning_effort", None)
+        state.pop("model_updated_at", None)
+        state.pop("reasoning_effort_updated_at", None)
         state["updated_at"] = utcish_now()
         self.write_state(state)
 
@@ -1927,45 +2384,61 @@ class AIManager:
         if action == "model":
             if not arg.strip():
                 model = self.effective_model()
-                return f"Current AI model: `{model or 'auto'}`."
+                return f"Current AI model: `{model}`."
             if not self.is_authorized(sender_id):
                 return "AI command rejected: sender is not authorized."
             raw = arg.strip()
             lowered = raw.lower()
-            if lowered == "default":
-                state.pop("model", None)
+            if lowered in {"default", "auto", "unset"}:
+                if self.config.provider == "claude":
+                    if lowered == "default":
+                        state["model"] = "default"
+                    else:
+                        state.pop("model", None)
+                else:
+                    state.pop("model", None)
                 state["updated_at"] = utcish_now()
+                state["model_updated_at"] = state["updated_at"]
                 self.write_state(state)
                 model = self.effective_model()
-                return f"AI model restored to default: `{model or 'auto'}`."
-            model = "" if lowered in {"auto", "unset"} else normalize_model(raw)
+                return f"AI model restored to default: `{model}`."
+            if not is_valid_model(raw, self.config.provider):
+                options = model_options(self.config.provider)
+                if self.config.provider == "claude" and "default" not in options:
+                    options = ["default", *options]
+                detail = ", ".join(options) if options else "any custom string"
+                return f"Unknown AI model for {self.config.provider}: `{raw}`. Available: {detail}."
+            model = normalize_provider_model(self.config.provider, raw)
             state["model"] = model
             state["updated_at"] = utcish_now()
+            state["model_updated_at"] = state["updated_at"]
             self.write_state(state)
-            return f"AI model set to `{model or 'auto'}`."
+            return f"AI model set to `{model}`."
         if action == "reasoning":
             if not arg.strip():
                 effort = self.effective_reasoning_effort()
-                return f"Current AI reasoning effort: `{effort or 'default'}`."
+                return f"Current AI reasoning effort: `{effort}`."
             if not self.is_authorized(sender_id):
                 return "AI command rejected: sender is not authorized."
             raw = arg.strip()
             lowered = raw.lower()
-            if lowered == "default":
+            if lowered in {"default", "unset"} or (lowered == "auto" and self.config.provider != "codewhale"):
                 state.pop("reasoning_effort", None)
                 state["updated_at"] = utcish_now()
+                state["reasoning_effort_updated_at"] = state["updated_at"]
                 self.write_state(state)
                 effort = self.effective_reasoning_effort()
-                return f"AI reasoning effort restored to default: `{effort or 'default'}`."
+                return f"AI reasoning effort restored to default: `{effort}`."
             if not is_valid_reasoning_effort(raw, self.config.provider):
                 options = reasoning_effort_options(self.config.provider)
                 detail = ", ".join(options) if options else "any custom string"
-                return f"Unknown AI reasoning effort: `{raw}`. Available: default, auto, {detail}."
-            effort = "" if lowered in {"auto", "unset"} else normalize_reasoning_effort(raw, self.config.provider)
+                return f"Unknown AI reasoning effort: `{raw}`. Available: {detail}."
+            effort = normalize_reasoning_effort(raw, self.config.provider)
             state["reasoning_effort"] = effort
             state["updated_at"] = utcish_now()
+            state["reasoning_effort_updated_at"] = state["updated_at"]
             self.write_state(state)
-            return f"AI reasoning effort set to `{effort or 'default'}`."
+            return f"AI reasoning effort set to `{effort}`."
         if action == "on":
             state["ai_enabled"] = True
             self.write_state(state)
@@ -2049,8 +2522,8 @@ class AIManager:
                 f"enabled: {self.effective_enabled()}",
                 f"provider: {self.config.provider}",
                 f"permission_mode: {self.effective_permission_mode()}",
-                f"model: {self.effective_model() or 'auto'}",
-                f"reasoning_effort: {self.effective_reasoning_effort() or 'default'}",
+                f"model: {self.effective_model()}",
+                f"reasoning_effort: {self.effective_reasoning_effort()}",
                 f"work_dir: {self.config.work_dir}",
                 f"session_key: {shared_session_id(self.config.work_dir)}",
                 f"auto_analyze_new_post: {self.effective_auto()}",
@@ -2131,8 +2604,8 @@ def ai_help_text() -> str:
             "/ai latest",
             "/ai ask <question> (optional; plain non-command messages also go to AI when AI is on)",
             "/mode [default|auto-edit|full-auto|yolo] or /ai mode <name>",
-            "/model [auto|default|name] or /ai model <name>",
-            "/reasoning [default|low|medium|high|xhigh] or /ai reasoning <level>",
+            "/model <name> or /ai model <name> (Claude also supports default)",
+            "/reasoning <level> or /ai reasoning <level>",
             "/ai schedule on | /ai schedule off",
             "/ai schedule every <minutes>",
             f"/ai schedule windows {DEFAULT_SCHEDULE_WINDOWS}",

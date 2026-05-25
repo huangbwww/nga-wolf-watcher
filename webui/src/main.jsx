@@ -59,7 +59,6 @@ const fieldGroups = {
   ],
   ai: [
     ["ai_enabled", "启用 AI", "checkbox"],
-    ["ai_provider", "Provider", "select", ["codex", "claude", "codewhale", "custom"]],
     ["ai_auto_analyze_new_post", "新帖自动分析", "checkbox"],
     ["ai_work_dir", "AI 工作目录", "text"],
     ["ai_auto_analysis_prompt", "自动分析提示词", "textarea"],
@@ -1315,25 +1314,28 @@ function ThreadAuthorEditor({ config, setConfig }) {
   );
 }
 
-function AiModelControls({ config, setConfig, options, hint = null }) {
+function AiAgentControls({ config, setConfig, options, hint = null }) {
   const provider = config.ai_provider || "codex";
   const update = (key, value) => setConfig((current) => ({ ...current, [key]: value }));
-  const modelOptions = options.aiModels?.[provider] || ["default", "auto"];
-  const reasoningOptions = options.aiReasoning?.[provider] || ["default"];
+  const modelOptions = options.aiModels?.[provider] || [];
+  const reasoningOptions = options.aiReasoning?.[provider] || [];
+  const providerSpec = ["ai_provider", "AI Agent", "select", options.aiProviders || ["codex", "claude", "codewhale", "custom"]];
   if (provider === "custom") {
     return (
-      <div className={`field-wide ai-settings-grid ${hint ? "validation-target-active" : ""}`} data-validation-target="ai-settings">
+      <div className={`field-wide ai-settings-grid ai-agent-grid ${hint ? "validation-target-active" : ""}`} data-validation-target="ai-settings">
         {hint ? <div className="field-alert field-wide">{hint}</div> : null}
+        <Field config={config} setConfig={setConfig} spec={providerSpec} />
         <Field config={config} setConfig={setConfig} spec={["ai_model", "模型", "text"]} />
         <Field config={config} setConfig={setConfig} spec={["ai_reasoning_effort", "思考强度", "text"]} />
       </div>
     );
   }
-  const modelValue = modelOptions.includes(config.ai_model) ? config.ai_model : "default";
-  const reasoningValue = reasoningOptions.includes(config.ai_reasoning_effort) ? config.ai_reasoning_effort : "default";
+  const modelValue = modelOptions.includes(config.ai_model) ? config.ai_model : modelOptions[0] || "";
+  const reasoningValue = reasoningOptions.includes(config.ai_reasoning_effort) ? config.ai_reasoning_effort : reasoningOptions[0] || "";
   return (
-    <div className={`field-wide ai-settings-grid ${hint ? "validation-target-active" : ""}`} data-validation-target="ai-settings">
+    <div className={`field-wide ai-settings-grid ai-agent-grid ${hint ? "validation-target-active" : ""}`} data-validation-target="ai-settings">
       {hint ? <div className="field-alert field-wide">{hint}</div> : null}
+      <Field config={config} setConfig={setConfig} spec={providerSpec} />
       <label className="field">
         <span>模型</span>
         <select value={modelValue} onChange={(event) => update("ai_model", event.target.value)}>
@@ -2066,10 +2068,13 @@ function App() {
 
         <Section icon={Bot} title="AI 分析" description="AI 是公共配置，结果跟随当前消息通道发送。" defaultOpen={false} sectionId="ai" hint={sectionHint("ai")}>
           <div id="ai" className="grid">
-            {fieldGroups.ai.map((spec) => (
+            {fieldGroups.ai.filter((spec) => spec[0] === "ai_enabled").map((spec) => (
               <Field key={spec[0]} config={config} setConfig={setConfig} spec={spec} hint={targetHint(spec[0])} />
             ))}
-            <AiModelControls config={config} setConfig={setConfig} options={options} hint={targetHint("ai-settings")} />
+            <AiAgentControls config={config} setConfig={setConfig} options={options} hint={targetHint("ai-settings")} />
+            {fieldGroups.ai.filter((spec) => spec[0] !== "ai_enabled").map((spec) => (
+              <Field key={spec[0]} config={config} setConfig={setConfig} spec={spec} hint={targetHint(spec[0])} />
+            ))}
             <AiScheduleTargets config={config} setConfig={setConfig} pushTargets={pushTargets} feishuProfiles={feishuProfiles} wechatProfiles={wechatProfiles} onCreateScheduleTarget={createScheduleTarget} hint={targetHint("ai-schedule-targets")} />
           </div>
         </Section>

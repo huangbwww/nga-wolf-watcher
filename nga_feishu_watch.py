@@ -1193,7 +1193,13 @@ def fetch_nga_thread_page(
 ) -> dict[str, Any]:
     query = urllib.parse.urlencode({"tid": tid, "page": str(page), "__output": "8"})
     referer = f"https://bbs.nga.cn/read.php?tid={urllib.parse.quote(str(tid), safe='')}"
-    return fetch_nga_json(f"{NGA_READ_ENDPOINT}?{query}", cookie, timeout, f"帖子 {tid} 第 {page} 页", request_min_interval, cache_ttl, referer)
+    try:
+        return fetch_nga_json(f"{NGA_READ_ENDPOINT}?{query}", cookie, timeout, f"帖子 {tid} 第 {page} 页", request_min_interval, cache_ttl, referer)
+    except NgaTemporaryUnavailable as exc:
+        if not is_truncated_nga_response_error(exc):
+            raise
+        print(f"NGA 帖子 {tid} 第 {page} 页结构化响应被截断，改用 HTML 页面兜底解析。", file=sys.stderr)
+        return fetch_nga_thread_html_page(tid, page, cookie, timeout, referer)
 
 
 def nga_json_cache_key(url: str, cookie: str) -> str:
@@ -1256,6 +1262,126 @@ def parse_nga_json_text(text: str) -> dict[str, Any]:
     return value
 
 
+def looks_like_truncated_nga_json(text: str, exc: json.JSONDecodeError) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("{") and not stripped.endswith("}"):
+        return True
+    if stripped.startswith("window.script_muti_get_var_store") and not stripped.rstrip().endswith(";"):
+        return True
+    if exc.pos >= max(0, len(stripped) - 200) and exc.msg in {"Expecting ',' delimiter", "Unterminated string starting at"}:
+        return True
+    return False
+
+
+def is_truncated_nga_response_error(exc: BaseException | None) -> bool:
+    current = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if "response looks truncated" in str(current):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def fetch_nga_thread_html_page(tid: str, page: int, cookie: str, timeout: int, referer: str = "https://bbs.nga.cn/") -> dict[str, Any]:
+    query = urllib.parse.urlencode({"tid": tid, "page": str(page)})
+    req = urllib.request.Request(
+        f"{NGA_READ_ENDPOINT}?{query}",
+        headers={
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Cookie": cookie,
+            "Accept": "text/html,*/*",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Referer": referer or "https://bbs.nga.cn/",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+        charset = resp.headers.get_content_charset() or "gb18030"
+        status = getattr(resp, "status", 200)
+        content_type = resp.headers.get("Content-Type", "")
+    if status >= 400:
+        raise NgaTemporaryUnavailable(f"NGA HTML fallback HTTP status={status}, content_type={content_type}", status_code=status)
+    return parse_nga_thread_html_page(raw.decode(charset, errors="replace"), tid, page)
+
+
+def parse_nga_thread_html_page(text: str, tid: str, page: int) -> dict[str, Any]:
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", text, flags=re.I | re.S)
+    subject = ""
+    if title_match:
+        subject = strip_markup(html.unescape(title_match.group(1)))
+        subject = re.split(r"[-_]\s*NGA", subject, maxsplit=1)[0].strip()
+    max_page = page
+    for value in re.findall(r"[?&]page=(\d+)", text):
+        try:
+            max_page = max(max_page, int(value))
+        except ValueError:
+            pass
+
+    replies: dict[str, dict[str, Any]] = {}
+    users: dict[str, dict[str, Any]] = {}
+    blocks = re.split(r"<table\b[^>]*class=['\"][^'\"]*\bpostbox\b[^'\"]*['\"][^>]*>", text, flags=re.I)
+    for block in blocks[1:]:
+        floor_match = re.search(r"id=['\"]postcontent(\d+)['\"]", block, flags=re.I)
+        pid_match = re.search(r"id=['\"]pid(\d+)Anchor['\"]", block, flags=re.I)
+        if not floor_match or not pid_match:
+            continue
+        floor = floor_match.group(1)
+        pid = pid_match.group(1)
+        content_match = re.search(rf"id=['\"]postcontent{re.escape(floor)}['\"][^>]*>(.*?)</span>", block, flags=re.I | re.S)
+        if not content_match:
+            continue
+        raw_content = html.unescape(content_match.group(1).strip())
+        subject_match = re.search(rf"id=['\"]postsubject{re.escape(floor)}['\"][^>]*>(.*?)</h3>", block, flags=re.I | re.S)
+        post_subject = html.unescape(subject_match.group(1).strip()) if subject_match else ""
+        date_match = re.search(rf"id=['\"]postdate{re.escape(floor)}['\"][^>]*>(.*?)</span>", block, flags=re.I | re.S)
+        postdate = strip_markup(html.unescape(date_match.group(1).strip())) if date_match else ""
+        uid_match = re.search(r"nuke\.php\?func=ucp&uid=(\d+)", block, flags=re.I)
+        if not uid_match:
+            uid_match = re.search(r"commonui\.postArg\.proc\([^)]*?,\s*null,\s*['\"]?(\d+)['\"]?", block, flags=re.I | re.S)
+        uid = uid_match.group(1) if uid_match else ""
+        author_match = re.search(rf"id=['\"]postauthor{re.escape(floor)}['\"][^>]*>(.*?)</a>", block, flags=re.I | re.S)
+        author = strip_markup(html.unescape(author_match.group(1).strip())) if author_match else ""
+        if not author and uid:
+            author = f"UID:{uid}"
+        reply_to = ""
+        quote_match = re.search(r"\[pid=(\d+),", raw_content)
+        if quote_match:
+            reply_to = quote_match.group(1)
+        item = {
+            "pid": pid,
+            "fid": "",
+            "tid": str(tid),
+            "authorid": uid,
+            "author": author,
+            "postdate": postdate,
+            "subject": post_subject,
+            "content": raw_content,
+            "lou": floor,
+            "reply_to": reply_to,
+        }
+        replies[str(len(replies))] = item
+        if uid:
+            users[uid] = {"uid": uid, "username": author or f"UID:{uid}"}
+    if not replies:
+        raise RuntimeError("NGA HTML fallback did not find thread replies")
+    return {
+        "data": {
+            "__U": users,
+            "__R": replies,
+            "__T": {"tid": str(tid), "subject": subject},
+            "__PAGE": int(page),
+            "__ROWS": max(max_page, page) * 20,
+            "__R__ROWS_PAGE": 20,
+        }
+    }
+
+
 def fetch_nga_json_uncached(url: str, cookie: str, timeout: int, label: str, referer: str = "https://bbs.nga.cn/") -> dict[str, Any]:
     req = urllib.request.Request(
         url,
@@ -1295,6 +1421,8 @@ def fetch_nga_json_uncached(url: str, cookie: str, timeout: int, label: str, ref
             f"NGA 在 {label} 返回的不是 JSON："
             f"状态码={status}，内容类型={content_type}，解析错误={exc.msg}，响应预览={preview}"
         )
+        if looks_like_truncated_nga_json(text, exc):
+            raise NgaTemporaryUnavailable(f"{message}; response looks truncated", status_code=None) from exc
         if status in NGA_TEMPORARY_STATUS_CODES:
             raise NgaTemporaryUnavailable(message, status_code=status) from exc
         raise RuntimeError(message) from exc
@@ -3875,21 +4003,21 @@ def ai_settings_card(manager: ai_analysis.AIManager, mention_enabled: bool = Fal
     mode_options = ai_analysis.permission_mode_options(manager.config.provider)
     current_model = manager.effective_model()
     current_reasoning = manager.effective_reasoning_effort()
-    runtime_model = "model" in state
-    runtime_reasoning = "reasoning_effort" in state
-    model_choices = ["default", "auto", *ai_analysis.model_options(manager.config.provider)]
-    reasoning_choices = ["default", *ai_analysis.reasoning_effort_options(manager.config.provider)]
-    if manager.config.provider in {"codex", "claude"}:
+    runtime_model = "model" in state and manager._runtime_setting_is_current(state, "model")
+    runtime_reasoning = "reasoning_effort" in state and manager._runtime_setting_is_current(state, "reasoning_effort")
+    model_choices = ai_analysis.model_options(manager.config.provider)
+    reasoning_choices = ai_analysis.reasoning_effort_options(manager.config.provider)
+    if manager.config.provider in {"codex", "claude", "codewhale"}:
         model_control = {
             "tag": "select_static",
             "name": "model",
-            "placeholder": {"tag": "plain_text", "content": f"当前：{current_model or 'auto'}"},
+            "placeholder": {"tag": "plain_text", "content": f"当前：{current_model}"},
             "options": [{"text": {"tag": "plain_text", "content": item}, "value": item} for item in model_choices],
         }
         reasoning_control = {
             "tag": "select_static",
             "name": "reasoning_effort",
-            "placeholder": {"tag": "plain_text", "content": f"当前：{current_reasoning or 'default'}"},
+            "placeholder": {"tag": "plain_text", "content": f"当前：{current_reasoning}"},
             "options": [
                 {"text": {"tag": "plain_text", "content": ai_analysis.reasoning_effort_label(manager.config.provider, item)}, "value": item}
                 for item in reasoning_choices
@@ -3899,13 +4027,13 @@ def ai_settings_card(manager: ai_analysis.AIManager, mention_enabled: bool = Fal
         model_control = {
             "tag": "input",
             "name": "model",
-            "placeholder": {"tag": "plain_text", "content": "自定义模型名；留空为 auto"},
+            "placeholder": {"tag": "plain_text", "content": "自定义模型名"},
             "default_value": current_model,
         }
         reasoning_control = {
             "tag": "input",
             "name": "reasoning_effort",
-            "placeholder": {"tag": "plain_text", "content": "自定义思考强度；留空为 default"},
+            "placeholder": {"tag": "plain_text", "content": "自定义思考强度"},
             "default_value": current_reasoning,
         }
     schedule_prompt = str(state.get("schedule_prompt") or effective.schedule_prompt or ai_analysis.DEFAULT_SCHEDULED_ANALYSIS_PROMPT)
@@ -3925,8 +4053,8 @@ def ai_settings_card(manager: ai_analysis.AIManager, mention_enabled: bool = Fal
                         f"定时间隔：`{effective.schedule_interval_minutes}` 分钟\n"
                         f"时间窗口：`{effective.schedule_windows}`\n"
                         f"权限模式：`{manager.effective_permission_mode()}`\n"
-                        f"模型：`{current_model or 'auto'}`{'（运行时）' if runtime_model else '（默认）'}\n"
-                        f"思考强度：`{current_reasoning or 'default'}`{'（运行时）' if runtime_reasoning else '（默认）'}\n"
+                        f"模型：`{current_model}`{'（运行时）' if runtime_model else '（默认）'}\n"
+                        f"思考强度：`{current_reasoning}`{'（运行时）' if runtime_reasoning else '（默认）'}\n"
                         f"@提醒：`{'开' if mention_enabled else '关'}`"
                         f"{f' | 当前对象：`{mention_user_id}`' if mention_user_id else ''}"
                     ),
@@ -3970,12 +4098,12 @@ def ai_settings_card(manager: ai_analysis.AIManager, mention_enabled: bool = Fal
                         },
                         {
                             "tag": "markdown",
-                            "content": "**模型**\nCodex/Claude 使用下拉选择；`default` 回到 GUI/启动默认值，`auto` 表示本次运行时不指定模型。",
+                            "content": "**模型**\nCodex/Claude/CodeWhale 使用下拉选择；Claude 可选择 `default` 让 Claude Code 使用自己的默认模型。",
                         },
                         model_control,
                         {
                             "tag": "markdown",
-                            "content": "**思考强度**\nCodex: `low/medium/high/xhigh`；Claude: `low/medium/high/xhigh/max`；`default` 使用默认。",
+                            "content": "**思考强度**\nCodex: `low/medium/high/xhigh`；Claude: `low/medium/high/max`；CodeWhale: `auto/off/high/max`。",
                         },
                         reasoning_control,
                         {
@@ -4263,8 +4391,8 @@ def wechat_settings_text(args: argparse.Namespace, manager: ai_analysis.AIManage
             f"定时间隔: {effective.schedule_interval_minutes} 分钟",
             f"时间窗口: {effective.schedule_windows}",
             f"权限模式: {manager.effective_permission_mode()}",
-            f"模型: {manager.effective_model() or 'auto'}",
-            f"思考强度: {manager.effective_reasoning_effort() or 'default'}",
+            f"模型: {manager.effective_model()}",
+            f"思考强度: {manager.effective_reasoning_effort()}",
             f"微信目标用户: {cfg.target_user_id or '未设置'}",
             "",
             "可复制命令：",
@@ -4287,8 +4415,8 @@ def wechat_settings_text(args: argparse.Namespace, manager: ai_analysis.AIManage
             "/ai schedule every 5",
             f"/ai schedule windows {ai_analysis.DEFAULT_SCHEDULE_WINDOWS}",
             "/mode default",
-            "/model auto",
-            "/reasoning high",
+            f"/model {manager.effective_model()}",
+            f"/reasoning {manager.effective_reasoning_effort()}",
             "",
             wechat_bot.describe_binding(cfg),
         ]
@@ -4832,10 +4960,10 @@ def start_ws(args: argparse.Namespace) -> None:
                 reasoning_effort = str(form.get("reasoning_effort") or "").strip()
                 if mode:
                     manager.handle_command(f"/mode {mode}", sender_id)
-                if "model" in form:
-                    manager.handle_command(f"/model {model or 'auto'}", sender_id)
-                if "reasoning_effort" in form:
-                    manager.handle_command(f"/reasoning {reasoning_effort or 'default'}", sender_id)
+                if "model" in form and model:
+                    manager.handle_command(f"/model {model}", sender_id)
+                if "reasoning_effort" in form and reasoning_effort:
+                    manager.handle_command(f"/reasoning {reasoning_effort}", sender_id)
                 if interval:
                     manager.handle_command(f"/ai schedule every {interval}", sender_id)
                 if windows:
