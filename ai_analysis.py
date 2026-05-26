@@ -2256,7 +2256,26 @@ class AIManager:
         while True:
             task, chat_label = self._queue.get()
             try:
-                result = self.run_task(task)
+                try:
+                    result = self.run_task(task)
+                except Exception as exc:
+                    self.logger().exception("AI worker task crashed task_type=%s", task.task_type)
+                    result = AIResult(
+                        ok=False,
+                        provider=self.config.provider,
+                        task_type=task.task_type,
+                        output_file=task.output_file,
+                        error=f"AI worker task crashed: {exc}",
+                        started_at=utcish_now(),
+                        ended_at=utcish_now(),
+                    )
+                    try:
+                        state = self.read_state()
+                        state["last_error"] = result.error
+                        state["updated_at"] = utcish_now()
+                        self.write_state(state)
+                    except Exception:
+                        self.logger().exception("failed to persist AI worker crash state")
                 if self.send_result:
                     if result.ok or self.config.send_errors_to_feishu:
                         self.send_result(result)
