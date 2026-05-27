@@ -2276,14 +2276,17 @@ class AIManager:
                         self.write_state(state)
                     except Exception:
                         self.logger().exception("failed to persist AI worker crash state")
-                if self.send_result:
-                    if result.ok or self.config.send_errors_to_feishu:
-                        self.send_result(result)
-                elif self.send_text:
-                    if result.ok:
-                        self.send_ai_result(result)
-                    elif self.config.send_errors_to_feishu:
-                        self.send_text(f"AI task failed: {result.error}")
+                try:
+                    if self.send_result:
+                        if result.ok or self.config.send_errors_to_feishu:
+                            self.send_result(result)
+                    elif self.send_text:
+                        if result.ok:
+                            self.send_ai_result(result)
+                        elif self.config.send_errors_to_feishu:
+                            self.send_text(f"AI task failed: {result.error}")
+                except Exception:
+                    self.logger().exception("AI worker result delivery failed task_type=%s", task.task_type)
             finally:
                 self._queue.task_done()
 
