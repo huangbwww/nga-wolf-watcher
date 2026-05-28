@@ -195,6 +195,8 @@ class NgaPost:
     author_id: str = ""
     floor: str = ""
     image_urls: tuple[str, ...] = ()
+    quote_image_urls: tuple[str, ...] = ()
+    reply_image_urls: tuple[str, ...] = ()
     source_type: str = ""
     source_id: str = ""
     source_label: str = ""
@@ -1007,6 +1009,8 @@ def add_post_source(post: NgaPost, source_type: str, target: WatchTarget) -> Nga
         author_id=post.author_id,
         floor=post.floor,
         image_urls=post.image_urls,
+        quote_image_urls=post.quote_image_urls,
+        reply_image_urls=post.reply_image_urls,
         source_type=source_type,
         source_id=target.id,
         source_label=target.label,
@@ -1025,6 +1029,8 @@ def add_thread_author_source(post: NgaPost, watch: ThreadAuthorWatch) -> NgaPost
         author_id=post.author_id,
         floor=post.floor,
         image_urls=post.image_urls,
+        quote_image_urls=post.quote_image_urls,
+        reply_image_urls=post.reply_image_urls,
         source_type="thread_author",
         source_id=watch.key,
         source_label=watch.label,
@@ -1670,12 +1676,62 @@ def extract_image_urls(raw_content: str, item: dict[str, Any] | None = None) -> 
     return tuple(urls)
 
 
+def unique_image_urls(urls: Iterable[str]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw in urls:
+        url = normalize_nga_image_url(str(raw or ""))
+        if url and url not in seen:
+            seen.add(url)
+            result.append(url)
+    return tuple(result)
+
+
+def raw_content_with_quote_markers(value: str) -> str:
+    text = html.unescape(value or "")
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    text = re.sub(r"\[quote[^\]]*\]", "", text, flags=re.I)
+    text = re.sub(r"\[/quote\]", f"\n\n{QUOTE_END_MARKER}\n\n", text, flags=re.I)
+    return text.strip()
+
+
+def split_raw_image_sections(raw_content: str) -> tuple[str, str]:
+    marked = raw_content_with_quote_markers(raw_content)
+    if not marked:
+        return "", ""
+    quoted = split_quoted_reply(marked)
+    if quoted:
+        quote_header, quote_body, reply_body = quoted
+        quote_parts = [quote_header]
+        if quote_body:
+            quote_parts.append(quote_body)
+        return "\n".join(part for part in quote_parts if part).strip(), reply_body.strip()
+    if QUOTE_END_MARKER in marked:
+        quote_body, reply_body = marked.split(QUOTE_END_MARKER, 1)
+        return quote_body.strip(), reply_body.strip()
+    return "", marked
+
+
+def image_sections_from_raw(raw_content: str, item: dict[str, Any] | None = None) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    all_urls = extract_image_urls(raw_content, item)
+    quote_raw, reply_raw = split_raw_image_sections(raw_content)
+    quote_urls = unique_image_urls(extract_image_urls(quote_raw))
+    reply_urls = unique_image_urls(extract_image_urls(reply_raw))
+    assigned = set(quote_urls) | set(reply_urls)
+    remaining = tuple(url for url in all_urls if url not in assigned)
+    if remaining and not quote_urls and reply_raw and reply_raw.strip() == raw_content_with_quote_markers(raw_content).strip():
+        reply_urls = unique_image_urls((*reply_urls, *remaining))
+        remaining = ()
+    return quote_urls, reply_urls, remaining
+
+
 def make_post(item: dict[str, Any], fallback_subject: str = "") -> NgaPost | None:
     raw_content = first_str(item, "content", "postcontent", "post_content", "message")
     if not raw_content:
         return None
 
-    image_urls = extract_image_urls(raw_content, item)
+    quote_image_urls, reply_image_urls, other_image_urls = image_sections_from_raw(raw_content, item)
+    image_urls = unique_image_urls((*quote_image_urls, *reply_image_urls, *other_image_urls))
     content = strip_markup(raw_content)
     if not content:
         if not image_urls:
@@ -1709,6 +1765,8 @@ def make_post(item: dict[str, Any], fallback_subject: str = "") -> NgaPost | Non
         author_id=author_id,
         floor=floor,
         image_urls=image_urls,
+        quote_image_urls=quote_image_urls,
+        reply_image_urls=reply_image_urls,
         canonical_key=key,
     )
 
@@ -1888,6 +1946,38 @@ def feishu_sign(secret: str, timestamp: str) -> str:
     return base64.b64encode(digest).decode("utf-8")
 
 
+def post_image_sections(post: NgaPost) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    quote_urls = unique_image_urls(post.quote_image_urls)
+    reply_urls = unique_image_urls(post.reply_image_urls)
+    assigned = set(quote_urls) | set(reply_urls)
+    remaining = tuple(url for url in unique_image_urls(post.image_urls) if url not in assigned)
+    if remaining and not quote_urls and not reply_urls and not split_quoted_reply(post.content):
+        reply_urls = unique_image_urls((*reply_urls, *remaining))
+        remaining = ()
+    return quote_urls, reply_urls, remaining
+
+
+def post_image_lines(post: NgaPost, limit: int = 6) -> list[str]:
+    quote_urls, reply_urls, other_urls = post_image_sections(post)
+    sections = [
+        ("被回复图片：", quote_urls),
+        ("本次回复图片：", reply_urls),
+        ("图片（来源未识别）：", other_urls),
+    ]
+    lines: list[str] = []
+    remaining = max(0, limit)
+    for label, urls in sections:
+        if remaining <= 0 or not urls:
+            continue
+        selected = urls[:remaining]
+        if not lines:
+            lines.append("")
+        lines.append(label)
+        lines.extend(f"- {url}" for url in selected)
+        remaining -= len(selected)
+    return lines
+
+
 def feishu_message_text(post: NgaPost) -> str:
     byline = f"Author: {post.author or post.author_id or 'unknown'}"
     if post.floor:
@@ -1905,8 +1995,7 @@ def feishu_message_text(post: NgaPost) -> str:
     if source_line:
         lines.append(source_line)
     lines.extend([f"Link: {post.url}", "", friendly_post_content(post.content, quote_limit=700, reply_limit=1200)[:1800]])
-    if post.image_urls:
-        lines.extend(["", "Images:", *[f"- {url}" for url in post.image_urls]])
+    lines.extend(post_image_lines(post, limit=10))
     return "\n".join(lines)
 
 
@@ -1924,8 +2013,7 @@ def feishu_history_text(posts: list[NgaPost], title: str) -> str:
             meta += f" | watch {post.source_label or post.source_id}"
         lines.append(f"{meta} {post.url}")
         lines.append(excerpt)
-        if post.image_urls:
-            lines.append("Images: " + ", ".join(post.image_urls[:5]))
+        lines.extend(post_image_lines(post, limit=5))
     return "\n".join(lines)
 
 
@@ -1946,8 +2034,7 @@ def wechat_posts_text(posts: list[NgaPost], title: str) -> str:
         lines.append(post.url)
         lines.append("")
         lines.append(friendly_post_content(post.content, quote_limit=900, reply_limit=1600))
-        if post.image_urls:
-            lines.extend(["", "图片：", *[f"- {url}" for url in post.image_urls[:6]]])
+        lines.extend(post_image_lines(post, limit=6))
     return "\n".join(lines).strip()
 
 
@@ -1964,8 +2051,10 @@ def posts_to_txt(posts: list[NgaPost], title: str) -> str:
             meta.append(f"floor: {post.floor}")
         if post.source_id:
             meta.append(f"watch: {post.source_type or 'target'} {post.source_label or post.source_id} ({post.source_id})")
-        if post.image_urls:
-            meta.extend(f"image: {url}" for url in post.image_urls)
+        quote_images, reply_images, other_images = post_image_sections(post)
+        meta.extend(f"quoted-image: {url}" for url in quote_images)
+        meta.extend(f"reply-image: {url}" for url in reply_images)
+        meta.extend(f"image: {url}" for url in other_images)
         chunks.append("\n".join(meta))
         chunks.append(friendly_post_content(post.content, quote_limit=1200, reply_limit=3000))
         chunks.append("-" * 60)
@@ -2049,6 +2138,41 @@ def lark_quote(value: str) -> str:
     return "\n".join(f"> {line}" if line else ">" for line in escaped.splitlines())
 
 
+def append_post_image_elements(
+    elements: list[dict[str, Any]],
+    urls: Iterable[str],
+    image_keys_by_url: dict[str, str],
+    title: str,
+    limit: int,
+    show_heading: bool = False,
+) -> None:
+    selected = list(unique_image_urls(urls))[: max(0, limit)]
+    if not selected:
+        return
+    if show_heading:
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**{lark_md_escape(title)}**"}})
+    fallback_lines: list[str] = []
+    for idx, url in enumerate(selected, 1):
+        image_key = str(image_keys_by_url.get(url) or "").strip()
+        if image_key:
+            elements.append(
+                {
+                    "tag": "img",
+                    "img_key": image_key,
+                    "alt": {"tag": "plain_text", "content": f"{title} {idx}"},
+                }
+            )
+        else:
+            fallback_lines.append(f"[image {idx}]({lark_md_escape(url)})")
+    if fallback_lines:
+        elements.append(
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": "\n".join(fallback_lines)},
+            }
+        )
+
+
 def post_card_element(post: NgaPost, image_keys_by_url: dict[str, str] | None = None) -> list[dict[str, Any]]:
     title = lark_md_escape(post.subject)
     time_text = lark_md_escape(post.post_time or "unknown")
@@ -2069,6 +2193,10 @@ def post_card_element(post: NgaPost, image_keys_by_url: dict[str, str] | None = 
         },
     ]
 
+    quote_images, reply_images, other_images = post_image_sections(post)
+    image_keys_by_url = image_keys_by_url or {}
+    remaining_image_slots = 6
+
     quoted = split_quoted_reply(post.content)
     if quoted:
         quote_header, quote_body, reply_body = quoted
@@ -2084,6 +2212,9 @@ def post_card_element(post: NgaPost, image_keys_by_url: dict[str, str] | None = 
                 },
             }
         )
+        quote_image_count = len(list(unique_image_urls(quote_images)))
+        append_post_image_elements(elements, quote_images, image_keys_by_url, "被回复图片", remaining_image_slots)
+        remaining_image_slots -= min(quote_image_count, remaining_image_slots)
         elements.append(
             {
                 "tag": "div",
@@ -2093,6 +2224,9 @@ def post_card_element(post: NgaPost, image_keys_by_url: dict[str, str] | None = 
                 },
             }
         )
+        reply_image_count = len(list(unique_image_urls(reply_images)))
+        append_post_image_elements(elements, reply_images, image_keys_by_url, "本次回复图片", remaining_image_slots)
+        remaining_image_slots -= min(reply_image_count, remaining_image_slots)
     else:
         excerpt = lark_md_escape(truncate_text(display_text(post.content), 850)).replace("\n", "\n\n")
         elements.append(
@@ -2104,29 +2238,12 @@ def post_card_element(post: NgaPost, image_keys_by_url: dict[str, str] | None = 
                 },
             }
         )
+        reply_image_count = len(list(unique_image_urls(reply_images)))
+        append_post_image_elements(elements, reply_images, image_keys_by_url, "回复图片", remaining_image_slots)
+        remaining_image_slots -= min(reply_image_count, remaining_image_slots)
 
-    if post.image_urls:
-        image_keys_by_url = image_keys_by_url or {}
-        fallback_lines: list[str] = []
-        for idx, url in enumerate(post.image_urls[:6], 1):
-            image_key = str(image_keys_by_url.get(url) or "").strip()
-            if image_key:
-                elements.append(
-                    {
-                        "tag": "img",
-                        "img_key": image_key,
-                        "alt": {"tag": "plain_text", "content": f"NGA image {idx}"},
-                    }
-                )
-            else:
-                fallback_lines.append(f"[image {idx}]({lark_md_escape(url)})")
-        if fallback_lines:
-            elements.append(
-                {
-                    "tag": "div",
-                    "text": {"tag": "lark_md", "content": f"**Images**\n{chr(10).join(fallback_lines)}"},
-                }
-            )
+    if remaining_image_slots > 0:
+        append_post_image_elements(elements, other_images, image_keys_by_url, "图片（来源未识别）", remaining_image_slots, show_heading=True)
 
     elements.append(
         {
@@ -2265,19 +2382,25 @@ def feishu_deferred_summary_card(
 def serialize_post(post: NgaPost) -> dict[str, Any]:
     data = asdict(post)
     data["image_urls"] = list(post.image_urls or ())
+    data["quote_image_urls"] = list(post.quote_image_urls or ())
+    data["reply_image_urls"] = list(post.reply_image_urls or ())
     return data
+
+
+def deserialize_image_urls(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return tuple(url.strip() for url in value.splitlines() if url.strip())
+    if isinstance(value, (list, tuple)):
+        return tuple(str(url) for url in value if str(url).strip())
+    return ()
 
 
 def deserialize_post(value: Any) -> NgaPost | None:
     if not isinstance(value, dict):
         return None
-    raw_images = value.get("image_urls") or ()
-    if isinstance(raw_images, str):
-        image_urls = tuple(url.strip() for url in raw_images.splitlines() if url.strip())
-    elif isinstance(raw_images, (list, tuple)):
-        image_urls = tuple(str(url) for url in raw_images if str(url).strip())
-    else:
-        image_urls = ()
+    image_urls = deserialize_image_urls(value.get("image_urls") or ())
+    quote_image_urls = deserialize_image_urls(value.get("quote_image_urls") or ())
+    reply_image_urls = deserialize_image_urls(value.get("reply_image_urls") or ())
     try:
         return NgaPost(
             key=str(value.get("key") or ""),
@@ -2289,6 +2412,8 @@ def deserialize_post(value: Any) -> NgaPost | None:
             author_id=str(value.get("author_id") or ""),
             floor=str(value.get("floor") or ""),
             image_urls=image_urls,
+            quote_image_urls=quote_image_urls,
+            reply_image_urls=reply_image_urls,
             source_type=str(value.get("source_type") or ""),
             source_id=str(value.get("source_id") or ""),
             source_label=str(value.get("source_label") or ""),
