@@ -18,7 +18,7 @@ import nga_wolf_gui as legacy
 import wechat_bot
 
 
-APP_TITLE = "NGA Wolf Watcher Preview"
+APP_TITLE = "NGA Wolf Watcher"
 _ACTIVE_WINDOW: Any | None = None
 _CLOSE_CONFIRMED = False
 _TRAY_ICON: Any | None = None
@@ -183,16 +183,16 @@ def app_icon_path() -> Path:
 def fallback_html() -> str:
     return """<!doctype html>
 <meta charset="utf-8">
-<title>NGA Wolf Watcher Preview</title>
+<title>NGA Wolf Watcher</title>
 <style>
 body{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f5f7fb;color:#111827}
 main{max-width:760px;margin:80px auto;padding:32px;background:white;border:1px solid #e5e7eb;border-radius:16px}
 code{background:#f3f4f6;padding:2px 6px;border-radius:6px}
 </style>
 <main>
-  <h1>NGA Wolf Watcher Preview</h1>
-  <p>The React preview UI has not been built yet.</p>
-  <p>Run <code>npm.cmd install</code> once if dependencies are missing, then run <code>npm.cmd run build</code> in <code>webui</code> and reopen this preview.</p>
+  <h1>NGA Wolf Watcher</h1>
+  <p>The React UI has not been built yet.</p>
+  <p>Run <code>npm.cmd install</code> once if dependencies are missing, then run <code>npm.cmd run build</code> in <code>webui</code> and reopen this app.</p>
 </main>"""
 
 

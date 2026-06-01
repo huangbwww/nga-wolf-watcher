@@ -45,7 +45,7 @@ Feature ideas are also welcome. They can be related to NGA, stock-related workfl
 
 This path does not require editing code or running Python commands.
 
-1. Download a client from [Releases](https://github.com/huangbwww/nga-wolf-watcher/releases/latest). `NGA-Wolf-Watcher-Preview.exe` is recommended and uses the new configuration UI. If your Windows environment cannot run the preview UI, or you hit pywebview/WebView2 compatibility issues, use `NGA-Wolf-Watcher-Classic.exe`.
+1. Download `NGA-Wolf-Watcher.exe` from [Releases](https://github.com/huangbwww/nga-wolf-watcher/releases/latest). Starting from 1.2.x, releases only ship the new configuration client.
 2. Open [Feishu Open Platform](https://open.feishu.cn/page/openclaw), create a bot app, and copy the app's `App ID` and `App Secret`.
 3. Add the bot to the target Feishu group.
 4. If you want to use `/start` and other commands without mentioning the bot, grant `im:message.group_msg`.
@@ -326,7 +326,7 @@ Run the local GUI manager from source:
 python .\nga_wolf_gui.py
 ```
 
-Run the pywebview + React preview UI:
+Run the pywebview + React UI:
 
 ```powershell
 python -m pip install pywebview pystray pillow
@@ -337,7 +337,7 @@ cd ..
 python .\nga_wolf_webgui.py
 ```
 
-The recommended client reuses the same `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`, runtime state, and watcher startup path, but presents NGA resources, message channel profiles, listen rules, AI settings, do-not-disturb, runtime options, and an advanced JSON editor in clearer collapsible panels. With the new model, Feishu and WeChat can be configured at the same time; listen rules decide where automatic pushes go. The classic client remains available as a compatibility fallback when the preview UI is not usable on a specific Windows environment.
+The recommended client reuses the same `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`, runtime state, and watcher startup path, but presents NGA resources, message channel profiles, listen rules, AI settings, do-not-disturb, runtime options, and an advanced JSON editor in clearer collapsible panels. With the new model, Feishu, WeChat, DingTalk, and email can be configured at the same time; listen rules decide where automatic pushes go.
 
 Only test message/card callbacks, without periodic NGA watch:
 
@@ -629,20 +629,7 @@ The script stores pushed reply ids, handled command ids, and deferred quiet-hour
 
 ### Build The EXE
 
-```powershell
-python -m pip install pyinstaller
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name NGA-Wolf-Watcher-Classic --icon .\assets\app_icon.ico --add-data ".\assets\app_icon.ico;assets" --add-data ".\assets\app_icon.png;assets" --collect-all lark_oapi --collect-all customtkinter --hidden-import Crypto.Cipher.AES .\nga_wolf_gui.py
-```
-
-The output is `dist\NGA-Wolf-Watcher-Classic.exe`.
-
-The repository also includes the equivalent `NGA-Wolf-Watcher.spec`:
-
-```powershell
-python -m PyInstaller --noconfirm --clean .\NGA-Wolf-Watcher.spec
-```
-
-To package the pywebview preview UI, build the frontend first, install/collect `pywebview`, and include `webui\dist`:
+Build the frontend first, then package the pywebview client:
 
 ```powershell
 cd .\webui
@@ -653,7 +640,7 @@ python -m pip install pywebview pystray pillow pyinstaller
 python -m PyInstaller --noconfirm --clean .\NGA-Wolf-Watcher-Web.spec
 ```
 
-The output is `dist\NGA-Wolf-Watcher-Preview.exe`.
+The output is `dist\NGA-Wolf-Watcher.exe`.
 
 ## Legacy Custom Bot Webhook
 
