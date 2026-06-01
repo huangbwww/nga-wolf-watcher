@@ -1037,7 +1037,7 @@ function TargetListEditor({ config, setConfig, configKey, fallbackKey, title, id
   );
 }
 
-function ProfileGroupEditor({ title, kind, rows, setRows, busy, onQueryChats, onQueryDraftChats, hint = null }) {
+function ProfileGroupEditor({ title, kind, rows, setRows, busy, onQueryChats, onQueryDraftChats, onRecentDingtalkUser, hint = null }) {
   const [draft, setDraft] = useState(null);
   const [draftChatStatus, setDraftChatStatus] = useState(null);
   const emptyRow = () => kind === "feishu"
@@ -1070,6 +1070,23 @@ function ProfileGroupEditor({ title, kind, rows, setRows, busy, onQueryChats, on
       const chats = Array.isArray(result.chats) ? result.chats : [];
       updateDraft({ chats });
       setDraftChatStatus({ kind: chats.length ? "success" : "info", text: chats.length ? `已查询到 ${chats.length} 个群，确认后可在监听规则里选择。` : "没有查到可用群。请确认 App 已加入目标群后再查询。" });
+    } catch (error) {
+      setDraftChatStatus({ kind: "error", text: String(error?.message || error) });
+    }
+  };
+  const fillRecentDingtalkUser = async () => {
+    if (!draft || kind !== "dingtalk" || !onRecentDingtalkUser) return;
+    setDraftChatStatus({ kind: "info", text: "正在读取最近收到的钉钉用户 ID..." });
+    try {
+      const result = await onRecentDingtalkUser(draft.row);
+      if (!result?.ok) {
+        setDraftChatStatus({ kind: "error", text: (result?.errors || [result?.error || "没有可用的钉钉用户 ID"]).join("\n") });
+        return;
+      }
+      const userId = String(result.user_id || result.user?.user_id || "").trim();
+      updateDraft({ target_user_ids: userId });
+      const senderName = String(result.user?.sender_name || "").trim();
+      setDraftChatStatus({ kind: "success", text: senderName ? `已填入 ${senderName} 的钉钉用户 ID` : "已填入最近钉钉用户 ID" });
     } catch (error) {
       setDraftChatStatus({ kind: "error", text: String(error?.message || error) });
     }
@@ -1179,6 +1196,19 @@ function ProfileGroupEditor({ title, kind, rows, setRows, busy, onQueryChats, on
                   <label className="field"><span>Client Secret / App Secret</span><input type="password" value={draft.row.client_secret || ""} onChange={(event) => updateDraft({ client_secret: event.target.value })} /></label>
                   <label className="field"><span>Robot Code</span><input value={draft.row.robot_code || ""} onChange={(event) => updateDraft({ robot_code: event.target.value })} placeholder="主动推送需要，空则使用 Client ID" /></label>
                   <label className="field"><span>目标用户 ID</span><input value={draft.row.target_user_ids || ""} onChange={(event) => updateDraft({ target_user_ids: event.target.value })} placeholder="多个用逗号分隔" /></label>
+                  <div className="field field-wide draft-chat-query">
+                    <div>
+                      <span>自动填入目标用户</span>
+                      <p>先在钉钉给机器人发送 /start 或任意消息，再点击读取最近用户 ID。</p>
+                    </div>
+                    <div className="draft-chat-controls single">
+                      <button className="btn slim" type="button" disabled={busy} onClick={fillRecentDingtalkUser}>
+                        <Search size={15} />
+                        获取最近用户 ID
+                      </button>
+                    </div>
+                    {draftChatStatus ? <div className={`notice ${draftChatStatus.kind} compact`}>{draftChatStatus.text}</div> : null}
+                  </div>
                   <label className="field"><span>允许用户 ID</span><input value={draft.row.allowed_user_ids || ""} onChange={(event) => updateDraft({ allowed_user_ids: event.target.value })} placeholder="为空则不限制" /></label>
                   <label className="field"><span>账号标识</span><input value={draft.row.account_id || ""} onChange={(event) => updateDraft({ account_id: event.target.value })} /></label>
                 </>
@@ -2128,6 +2158,7 @@ function App() {
   );
   const queryChats = (profileId) => run("查询飞书群组", () => api().query_feishu_chats(config, profileId));
   const queryDraftChats = (profile) => api().query_feishu_chats_for_profile(profile);
+  const recentDingtalkUser = (profile) => api().recent_dingtalk_user_for_profile(profile);
   const sendTestTarget = (targetId) => run("发送测试消息", () => api().send_test_target(config, targetId));
   const checkNgaCookie = async () => {
     if (!api()?.check_nga_cookie) {
@@ -2307,7 +2338,7 @@ function App() {
             {channel === "wechat" ? (
               <ProfileGroupEditor title="微信机器人配置组" kind="wechat" rows={wechatProfiles} setRows={(rows) => setStructured({ wechatProfiles: rows })} busy={busy} onQueryChats={queryChats} onQueryDraftChats={queryDraftChats} hint={targetHint("wechat-profiles")} />
             ) : channel === "dingtalk" ? (
-              <ProfileGroupEditor title="钉钉机器人配置组" kind="dingtalk" rows={dingtalkProfiles} setRows={(rows) => setStructured({ dingtalkProfiles: rows })} busy={busy} onQueryChats={queryChats} onQueryDraftChats={queryDraftChats} hint={targetHint("dingtalk-profiles")} />
+              <ProfileGroupEditor title="钉钉机器人配置组" kind="dingtalk" rows={dingtalkProfiles} setRows={(rows) => setStructured({ dingtalkProfiles: rows })} busy={busy} onQueryChats={queryChats} onQueryDraftChats={queryDraftChats} onRecentDingtalkUser={recentDingtalkUser} hint={targetHint("dingtalk-profiles")} />
             ) : channel === "email" ? (
               <ProfileGroupEditor title="邮箱发信配置组" kind="email" rows={emailProfiles} setRows={(rows) => setStructured({ emailProfiles: rows })} busy={busy} onQueryChats={queryChats} onQueryDraftChats={queryDraftChats} hint={targetHint("email-profiles")} />
             ) : (
@@ -2338,7 +2369,7 @@ function App() {
             {channel === "wechat" ? (
               <ProfileGroupEditor title="微信机器人配置组" kind="wechat" rows={wechatProfiles} setRows={(rows) => setStructured({ wechatProfiles: rows })} busy={busy} onQueryChats={queryChats} onQueryDraftChats={queryDraftChats} hint={targetHint("wechat-profiles")} />
             ) : channel === "dingtalk" ? (
-              <ProfileGroupEditor title="钉钉机器人配置组" kind="dingtalk" rows={dingtalkProfiles} setRows={(rows) => setStructured({ dingtalkProfiles: rows })} busy={busy} onQueryChats={queryChats} onQueryDraftChats={queryDraftChats} hint={targetHint("dingtalk-profiles")} />
+              <ProfileGroupEditor title="钉钉机器人配置组" kind="dingtalk" rows={dingtalkProfiles} setRows={(rows) => setStructured({ dingtalkProfiles: rows })} busy={busy} onQueryChats={queryChats} onQueryDraftChats={queryDraftChats} onRecentDingtalkUser={recentDingtalkUser} hint={targetHint("dingtalk-profiles")} />
             ) : channel === "email" ? (
               <ProfileGroupEditor title="邮箱发信配置组" kind="email" rows={emailProfiles} setRows={(rows) => setStructured({ emailProfiles: rows })} busy={busy} onQueryChats={queryChats} onQueryDraftChats={queryDraftChats} hint={targetHint("email-profiles")} />
             ) : (

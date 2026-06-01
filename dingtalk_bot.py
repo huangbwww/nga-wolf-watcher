@@ -7,6 +7,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -25,6 +26,17 @@ class DingTalkMessage:
     conversation_title: str = ""
     text: str = ""
     session_webhook: str = ""
+    raw: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class DingTalkCardAction:
+    message_id: str
+    user_id: str
+    card_instance_id: str = ""
+    action: str = ""
+    command: str = ""
+    params: dict[str, Any] | None = None
     raw: dict[str, Any] | None = None
 
 
@@ -148,6 +160,125 @@ class DingTalkBotClient:
             }
             self._post_json(webhook, body)
 
+    def reply_markdown_card(self, raw_message: dict[str, Any] | None, markdown: str, title: str = "NGA Wolf Watcher") -> str:
+        raw = raw_message if isinstance(raw_message, dict) else {}
+        card_target = self._card_target_from_raw(raw)
+        if not card_target:
+            raise RuntimeError("DingTalk card target is unavailable for this message.")
+        card_id = f"nga-wolf-{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}"
+        body: dict[str, Any] = {
+            "cardTemplateId": "589420e2-c1e2-46ef-a5ed-b8728e654da9.schema",
+            "outTrackId": card_id,
+            "callbackType": "STREAM",
+            "userIdType": 1,
+            "cardData": {
+                "cardParamMap": {
+                    "title": title,
+                    "markdown": preprocess_markdown(markdown),
+                }
+            },
+            "imGroupOpenSpaceModel": {"supportForward": True},
+            "imRobotOpenSpaceModel": {"supportForward": True},
+            **card_target,
+        }
+        self._post_json(
+            f"{DINGTALK_API}/v1.0/card/instances/createAndDeliver",
+            body,
+            headers={"x-acs-dingtalk-access-token": self.get_access_token()},
+        )
+        return card_id
+
+    def reply_action_card(
+        self,
+        raw_message: dict[str, Any] | None,
+        markdown: str,
+        buttons: list[dict[str, str]],
+        title: str = "NGA Wolf Watcher",
+    ) -> str:
+        raw = raw_message if isinstance(raw_message, dict) else {}
+        card_target = self._card_target_from_raw(raw)
+        if not card_target:
+            raise RuntimeError("DingTalk card target is unavailable for this message.")
+        card_id = f"nga-wolf-{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}"
+        msg_buttons = []
+        for button in buttons[:8]:
+            command = str(button.get("command") or "").strip()
+            text = str(button.get("text") or command or "执行").strip()
+            if not command:
+                continue
+            msg_buttons.append(
+                {
+                    "text": text,
+                    "color": str(button.get("color") or "blue"),
+                    "actionType": "callback",
+                    "params": {"command": command, "action": str(button.get("action") or "command")},
+                }
+            )
+        body: dict[str, Any] = {
+            "cardTemplateId": "1366a1eb-bc54-4859-ac88-517c56a9acb1.schema",
+            "outTrackId": card_id,
+            "callbackType": "STREAM",
+            "userIdType": 1,
+            "cardData": {
+                "cardParamMap": {
+                    "title": title,
+                    "markdown": preprocess_markdown(markdown),
+                    "tips": "点击按钮或直接回复短命令",
+                    "sys_full_json_obj": json.dumps({"msgButtons": msg_buttons}, ensure_ascii=False),
+                }
+            },
+            "imGroupOpenSpaceModel": {"supportForward": True},
+            "imRobotOpenSpaceModel": {"supportForward": True},
+            **card_target,
+        }
+        self._post_json(
+            f"{DINGTALK_API}/v1.0/card/instances/createAndDeliver",
+            body,
+            headers={"x-acs-dingtalk-access-token": self.get_access_token()},
+        )
+        return card_id
+
+    def update_markdown_card(self, card_instance_id: str, markdown: str, title: str = "NGA Wolf Watcher") -> None:
+        if not card_instance_id:
+            return
+        body = {
+            "outTrackId": card_instance_id,
+            "cardData": {
+                "cardParamMap": {
+                    "title": title,
+                    "markdown": preprocess_markdown(markdown),
+                }
+            },
+            "cardUpdateOptions": {"updateCardDataByKey": True, "updatePrivateDataByKey": True},
+        }
+        result = self._post_json(
+            f"{DINGTALK_API}/v1.0/card/instances",
+            body,
+            headers={"x-acs-dingtalk-access-token": self.get_access_token()},
+        )
+        if isinstance(result, dict):
+            errcode = result.get("errcode")
+            code = result.get("code")
+            success = result.get("success")
+            if (errcode not in (None, 0, "0")) or (code not in (None, 0, "0")) or success is False:
+                raise RuntimeError(f"DingTalk card update failed: {result}")
+
+    def _card_target_from_raw(self, raw: dict[str, Any]) -> dict[str, Any]:
+        conversation_type = str(raw.get("conversationType") or "").strip()
+        conversation_id = str(raw.get("conversationId") or "").strip()
+        sender_staff_id = str(raw.get("senderStaffId") or raw.get("senderId") or "").strip()
+        if conversation_type == "2" and conversation_id:
+            return {
+                "openSpaceId": f"dtv1.card//IM_GROUP.{conversation_id}",
+                "imGroupOpenDeliverModel": {"robotCode": self.config.effective_robot_code},
+            }
+        if sender_staff_id:
+            return {
+                "openSpaceId": f"dtv1.card//IM_ROBOT.{sender_staff_id}",
+                "imRobotOpenDeliverModel": {"spaceType": "IM_ROBOT"},
+            }
+        return {}
+
     def send_text_to_targets(self, text: str, target_user_ids: str = "") -> None:
         user_ids = csv_values(target_user_ids or self.config.target_user_ids)
         if not user_ids:
@@ -184,7 +315,11 @@ class DingTalkBotClient:
             return {}
         return json.loads(raw.decode("utf-8"))
 
-    def start_stream(self, on_message: Callable[[DingTalkMessage], None]) -> None:
+    def start_stream(
+        self,
+        on_message: Callable[[DingTalkMessage], None],
+        on_card_action: Callable[[DingTalkCardAction], None] | None = None,
+    ) -> None:
         self.validate_for_stream()
         import dingtalk_stream
         from dingtalk_stream import AckMessage
@@ -202,7 +337,16 @@ class DingTalkBotClient:
                     on_message(message)
                 return AckMessage.STATUS_OK, "OK"
 
+        class CardHandler(dingtalk_stream.CallbackHandler):
+            async def process(self, callback: Any) -> Any:
+                raw = callback.data if isinstance(callback.data, dict) else {}
+                action = parse_card_action(raw, getattr(getattr(callback, "headers", None), "message_id", ""))
+                if action and on_card_action:
+                    on_card_action(action)
+                return AckMessage.STATUS_OK, "OK"
+
         client.register_callback_handler(dingtalk_stream.chatbot.ChatbotMessage.TOPIC, Handler())
+        client.register_callback_handler(dingtalk_stream.CallbackHandler.TOPIC_CARD_CALLBACK, CardHandler())
         client.start_forever()
 
 
@@ -233,6 +377,50 @@ def parse_stream_message(raw: dict[str, Any]) -> DingTalkMessage | None:
         conversation_title=str(raw.get("conversationTitle") or "").strip(),
         text=text,
         session_webhook=str(raw.get("sessionWebhook") or "").strip(),
+        raw=raw,
+    )
+
+
+def parse_card_action(raw: dict[str, Any], message_id: str = "") -> DingTalkCardAction | None:
+    if not isinstance(raw, dict):
+        return None
+    content = raw.get("content")
+    if isinstance(content, str):
+        try:
+            content = json.loads(content)
+        except Exception:
+            content = {}
+    if not isinstance(content, dict):
+        content = {}
+    card_private = content.get("cardPrivateData")
+    if isinstance(card_private, str):
+        try:
+            card_private = json.loads(card_private)
+        except Exception:
+            card_private = {}
+    if not isinstance(card_private, dict):
+        card_private = {}
+    params = card_private.get("params") or content.get("params") or raw.get("params") or {}
+    if isinstance(params, str):
+        try:
+            params = json.loads(params)
+        except Exception:
+            params = {}
+    if not isinstance(params, dict):
+        params = {}
+    action = str(params.get("action") or content.get("action") or raw.get("action") or "").strip()
+    command = str(params.get("command") or params.get("cmd") or "").strip()
+    user_id = str(raw.get("userId") or raw.get("user_id") or "").strip()
+    card_instance_id = str(raw.get("outTrackId") or raw.get("cardInstanceId") or "").strip()
+    if not (action or command or user_id or card_instance_id):
+        return None
+    return DingTalkCardAction(
+        message_id=str(message_id or raw.get("messageId") or raw.get("msgId") or f"dingtalk-card-{int(time.time() * 1000)}"),
+        user_id=user_id,
+        card_instance_id=card_instance_id,
+        action=action,
+        command=command,
+        params=params,
         raw=raw,
     )
 

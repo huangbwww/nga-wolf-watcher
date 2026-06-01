@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 from argparse import Namespace
+from unittest.mock import patch
 
 import dingtalk_bot
 import nga_feishu_watch
@@ -42,6 +44,24 @@ class DingTalkChannelTests(unittest.TestCase):
         self.assertEqual(message.sender_id, "user-2")
         self.assertIn("Title", message.text)
         self.assertIn("body", message.text)
+
+    def test_parse_card_action_callback(self) -> None:
+        action = dingtalk_bot.parse_card_action(
+            {
+                "userId": "user-1",
+                "outTrackId": "card-1",
+                "content": '{"cardPrivateData":"{\\"params\\":{\\"action\\":\\"command\\",\\"command\\":\\"/setting\\"}}"}',
+            },
+            "callback-1",
+        )
+
+        self.assertIsNotNone(action)
+        assert action is not None
+        self.assertEqual(action.message_id, "callback-1")
+        self.assertEqual(action.user_id, "user-1")
+        self.assertEqual(action.card_instance_id, "card-1")
+        self.assertEqual(action.action, "command")
+        self.assertEqual(action.command, "/setting")
 
     def test_allowed_users_empty_means_all(self) -> None:
         self.assertTrue(dingtalk_bot.is_allowed("", "user-1"))
@@ -93,6 +113,115 @@ class DingTalkChannelTests(unittest.TestCase):
         self.assertEqual(nga_feishu_watch.dingtalk_normalize_short_command(args, "ht"), "/history_t 45974302 10")
         self.assertEqual(nga_feishu_watch.dingtalk_normalize_short_command(args, "pt50"), "/pack_t 45974302 50")
         self.assertEqual(nga_feishu_watch.dingtalk_normalize_short_command(args, "s"), "/setting")
+
+    def test_dingtalk_current_target_state_and_menu(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Namespace(
+                default_author_id="150058",
+                default_tid="45974302",
+                watch_author_ids="150058:狼大,123456:测试用户",
+                preset_thread_ids="45974302:主贴,87021655:副贴",
+                dingtalk_target_user_ids="sender-1",
+                dingtalk_client_id="cid",
+                dingtalk_client_secret="secret",
+                dingtalk_robot_code="robot",
+                dingtalk_allowed_user_ids="",
+                dingtalk_account_id="state-test",
+                dingtalk_state_dir=tmp,
+            )
+
+            self.assertEqual(nga_feishu_watch.dingtalk_normalize_short_command(args, "u2"), "/start")
+            self.assertEqual(nga_feishu_watch.dingtalk_normalize_short_command(args, "t2"), "/start")
+            self.assertEqual(nga_feishu_watch.dingtalk_normalize_short_command(args, "hr"), "/history_r 123456 5")
+            self.assertEqual(nga_feishu_watch.dingtalk_normalize_short_command(args, "ht"), "/history_t 87021655 10")
+            menu = nga_feishu_watch.dingtalk_start_markdown(args)
+            self.assertIn("u2 测试用户", menu)
+            self.assertIn("t2 副贴", menu)
+            self.assertIn("当前", menu)
+
+    def test_dingtalk_push_target_receive_matches_csv_member(self) -> None:
+        args = Namespace(
+            push_targets='[{"id":"dt","channel":"dingtalk","target_user_ids":"u1,u2","default_author_id":"123456"}]',
+            feishu_app_id="",
+            feishu_app_secret="",
+            feishu_receive_id="",
+            feishu_id_type="chat_id",
+            feishu_bot_profiles="",
+            wechat_bot_profiles="",
+            dingtalk_bot_profiles="",
+            email_profiles="",
+        )
+
+        target = nga_feishu_watch.push_target_for_channel_receive(args, "dingtalk", "u2")
+
+        self.assertIsNotNone(target)
+        assert target is not None
+        self.assertEqual(target.id, "dt")
+        self.assertEqual(target.default_author_id, "123456")
+
+    def test_dingtalk_posts_markdown_cleans_nga_quote_header(self) -> None:
+        post = nga_feishu_watch.NgaPost(
+            key="1",
+            subject="自立自强",
+            content="[pid=870216155,45974302,6241]Reply[/pid] Post by stephanie1P (2026-06-01 14:31):\n狼大像半导体和PCB硬件这种暴跌的是不是得考虑下减仓保利润了\n\n反正半导体没调整完 我觉得就还有低",
+            url="https://bbs.nga.cn/read.php?tid=45974302&pid=870216155",
+            post_time="2026-06-01 14:34:18",
+            author="150058",
+        )
+
+        markdown = nga_feishu_watch.dingtalk_posts_markdown([post], "NGA 用户 最新 1 条")
+
+        self.assertIn("## NGA 用户 最新 1 条", markdown)
+        self.assertIn("- 时间: 2026-06-01 14:34:18", markdown)
+        self.assertIn("引用 stephanie1P（2026-06-01 14:31）：", markdown)
+        self.assertNotIn("[pid=", markdown)
+        self.assertNotIn("Reply[/pid]", markdown)
+
+    def test_dingtalk_ai_result_falls_back_when_status_update_fails(self) -> None:
+        args = Namespace(bot_channel="dingtalk", dingtalk_ai_status_card_id="card-1")
+
+        with (
+            patch.object(nga_feishu_watch, "update_dingtalk_processing_card", return_value=False) as update,
+            patch.object(nga_feishu_watch, "push_dingtalk_markdown_card") as send_card,
+        ):
+            nga_feishu_watch.push_ai_markdown(args, "AI 回复", "123")
+
+        update.assert_called_once_with(args, "card-1", "AI 回复", "123")
+        send_card.assert_called_once_with(args, "AI 回复", "123")
+        self.assertTrue(getattr(args, "dingtalk_ai_result_sent"))
+
+    def test_dingtalk_client_cache_keeps_reply_scope(self) -> None:
+        base = Namespace(
+            timeout=20,
+            dingtalk_client_id="cid",
+            dingtalk_client_secret="secret",
+            dingtalk_robot_code="robot",
+            dingtalk_target_user_ids="",
+            dingtalk_allowed_user_ids="",
+            dingtalk_account_id="test-cache",
+            dingtalk_state_dir="",
+            dingtalk_session_webhook="",
+            dingtalk_bot_profiles="",
+            push_targets="",
+            feishu_app_id="",
+            feishu_app_secret="",
+            feishu_receive_id="",
+            feishu_id_type="chat_id",
+            feishu_bot_profiles="",
+            wechat_bot_profiles="",
+            email_profiles="",
+            default_author_id="150058",
+            default_tid="45974302",
+        )
+
+        nga_feishu_watch._DINGTALK_CLIENTS.clear()
+        base_client = nga_feishu_watch.dingtalk_client_for_args(base)
+        scoped = nga_feishu_watch.args_for_dingtalk_user(base, "sender-1", "https://example.invalid/session")
+        scoped_client = nga_feishu_watch.dingtalk_client_for_args(scoped)
+
+        self.assertIsNot(base_client, scoped_client)
+        self.assertEqual(scoped_client.config.target_user_ids, "sender-1")
+        self.assertEqual(scoped_client.config.session_webhook, "https://example.invalid/session")
 
 
 if __name__ == "__main__":

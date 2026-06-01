@@ -1,5 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
+import sys
+from pathlib import Path
+
 from PyInstaller.utils.hooks import collect_all
+
+
+LOCAL_DEP_DIRS = [
+    Path('.build_deps'),
+    Path('.build_dingtalk_only'),
+]
+pathex = []
+for path in LOCAL_DEP_DIRS:
+    if path.exists():
+        resolved = str(path.resolve())
+        pathex.append(resolved)
+        if resolved not in sys.path:
+            sys.path.insert(0, resolved)
 
 datas = [('.\\assets\\app_icon.ico', 'assets'), ('.\\assets\\app_icon.png', 'assets')]
 binaries = []
@@ -14,7 +30,7 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 a = Analysis(
     ['nga_wolf_gui.py'],
-    pathex=[],
+    pathex=pathex,
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

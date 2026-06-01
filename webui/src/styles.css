@@ -458,8 +458,8 @@ header p,
 
 .segmented {
   display: inline-grid;
-  grid-template-columns: repeat(3, minmax(72px, 1fr));
-  width: min(100%, 276px);
+  grid-template-columns: repeat(4, minmax(56px, 1fr));
+  width: min(100%, 292px);
   padding: 3px;
   border: 1px solid #cbd5e1;
   border-radius: 9px;

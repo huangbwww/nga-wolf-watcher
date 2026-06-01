@@ -105,7 +105,17 @@ DINGTALK_ALLOWED_USER_IDS=<empty means all, or comma-separated user IDs>
 DINGTALK_ACCOUNT_ID=default
 ```
 
-Messages sent to the DingTalk bot, such as `/start`, `/setting`, `/history_r`, `/pack_r`, and normal AI chat messages, are replied to through the Stream session. Proactive pushes, including new NGA replies, do-not-disturb summaries, and scheduled AI analysis, use `DINGTALK_TARGET_USER_IDS` and require the DingTalk app's robot proactive-send permission. DingTalk currently sends text/markdown rather than Feishu-style cards.
+Messages sent to the DingTalk bot, such as `/start`, `/setting`, `/history_r`, `/pack_r`, and normal AI chat messages, are replied to through the Stream session. Proactive pushes, including new NGA replies, do-not-disturb summaries, and scheduled AI analysis, use `DINGTALK_TARGET_USER_IDS` and require the DingTalk app's robot proactive-send permission.
+
+Recommended EXE setup:
+
+1. Create a DingTalk app in the DingTalk developer console, enable the robot / Stream connection, then fill the app's `Client ID` / `App Key` and `Client Secret` / `App Secret` in the DingTalk profile.
+2. `Robot Code` can be left empty at first; proactive sends fall back to `Client ID`. If your DingTalk app page shows a separate robotCode, fill that value.
+3. Save the config, start the watcher once, then send `/start` or any message to the DingTalk bot.
+4. Return to the EXE's DingTalk profile dialog and click `获取最近用户 ID` / `Get recent user ID`. The app reads the last received DingTalk message and fills the sender's user ID into `Target user ID`.
+5. Save again, then choose that DingTalk profile in `Send targets` / `Listen rules`. Automatic new replies, quiet-hour summaries, and scheduled AI analysis can then be pushed proactively to that user. Multiple user IDs can be comma-separated.
+
+DingTalk currently uses Markdown cards and text menus. `/start` and `/setting` return card-styled menus; reply with `1` through `8`, `hr10`, `u1`, `t1`, `a1/a0`, and similar short commands to operate them. DingTalk temporary Markdown cards cannot be overwritten in place like Feishu cards. During AI generation the bot sends an `AI 正在生成` card; when the result is ready it tries to update that card, and if DingTalk rejects the update because `cardTemplateId` is required, the watcher sends a new `AI 回复` result card instead. True clickable and in-place-updatable DingTalk interactive cards require a template created in DingTalk Card Builder and a configured `cardTemplateId`.
 
 In the GUI, click `扫码绑定` in the WeChat config card. The watcher requests a QR code from the ilink gateway, opens the QR link, and waits for confirmation from your phone. After confirmation, it fills `WECHAT_BOT_TOKEN`, `WECHAT_BOT_TARGET_USER_ID`, `WECHAT_BOT_ALLOWED_USER_IDS`, and `WECHAT_BOT_ACCOUNT_ID`. Save the config before starting the watcher.
 

@@ -90,7 +90,7 @@ _NGA_REQUEST_LOCK = threading.Lock()
 _NGA_LAST_REQUEST_AT = 0.0
 _NGA_JSON_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _WECHAT_CLIENTS: dict[tuple[str, str], wechat_bot.WeChatBotClient] = {}
-_DINGTALK_CLIENTS: dict[tuple[str, str, str], dingtalk_bot.DingTalkBotClient] = {}
+_DINGTALK_CLIENTS: dict[tuple[str, ...], dingtalk_bot.DingTalkBotClient] = {}
 _LARK_WS_LOOP_LOCK = threading.Lock()
 
 
@@ -960,7 +960,9 @@ def push_target_for_channel_receive(args: argparse.Namespace, channel: str, rece
     if not wanted_receive:
         return None
     for target in configured_push_targets(args):
-        if target.channel == wanted_channel and target.receive_id == wanted_receive:
+        if target.channel != wanted_channel:
+            continue
+        if target.receive_id == wanted_receive or wanted_receive in csv_values(target.receive_id):
             return target
     return None
 
@@ -1169,7 +1171,14 @@ def wechat_client_for_args(args: argparse.Namespace) -> wechat_bot.WeChatBotClie
 def dingtalk_client_for_args(args: argparse.Namespace) -> dingtalk_bot.DingTalkBotClient:
     config = dingtalk_bot.DingTalkBotConfig.from_namespace(args)
     secret_hash = hashlib.sha1(config.client_secret.encode("utf-8")).hexdigest()[:12] if config.client_secret else ""
-    key = (str(config.state_dir.resolve()), config.client_id, secret_hash)
+    key = (
+        str(config.state_dir.resolve()),
+        config.client_id,
+        secret_hash,
+        config.robot_code,
+        config.target_user_ids,
+        config.session_webhook,
+    )
     client = _DINGTALK_CLIENTS.get(key)
     if client is None:
         client = dingtalk_bot.DingTalkBotClient(config)
@@ -1309,10 +1318,11 @@ def args_for_wechat_user(args: argparse.Namespace, user_id: str) -> argparse.Nam
     return cloned
 
 
-def args_for_dingtalk_user(args: argparse.Namespace, user_id: str, session_webhook: str = "") -> argparse.Namespace:
+def args_for_dingtalk_user(args: argparse.Namespace, user_id: str, session_webhook: str = "", raw_message: dict[str, Any] | None = None) -> argparse.Namespace:
     cloned = copy.copy(args)
     cloned.dingtalk_target_user_ids = user_id
     cloned.dingtalk_session_webhook = session_webhook
+    cloned.dingtalk_raw_message = raw_message or {}
     target = push_target_for_channel_receive(args, "dingtalk", user_id)
     if target:
         if target.default_author_id:
@@ -2215,6 +2225,33 @@ def posts_to_txt(posts: list[NgaPost], title: str) -> str:
     return "\n".join(chunks)
 
 
+def dingtalk_posts_markdown(posts: list[NgaPost], title: str) -> str:
+    lines = [f"## {title}"]
+    for idx, post in enumerate(posts, 1):
+        if idx > 1:
+            lines.extend(["", "---"])
+        lines.extend(["", f"### {idx}. {post.subject}", ""])
+        meta: list[str] = []
+        if post.post_time:
+            meta.append(f"- 时间: {post.post_time}")
+        if post.author or post.author_id:
+            meta.append(f"- 作者: {post.author or post.author_id}")
+        if post.floor:
+            meta.append(f"- 楼层: #{post.floor}")
+        if post.source_id:
+            meta.append(f"- 监听: {post.source_label or post.source_id}")
+        if post.url:
+            meta.append(f"- 链接: [打开 NGA]({post.url})")
+        lines.extend(meta)
+        content = friendly_post_content(post.content, quote_limit=360, reply_limit=760)
+        if content:
+            lines.extend(["", content])
+        image_lines = post_image_lines(post, limit=4)
+        if image_lines:
+            lines.extend(image_lines)
+    return "\n".join(lines).strip()
+
+
 def lark_md_escape(value: str) -> str:
     return value.replace("<", "&lt;").replace(">", "&gt;")
 
@@ -2227,7 +2264,28 @@ def truncate_text(value: str, limit: int) -> str:
 
 
 def display_text(value: str) -> str:
-    return value.replace(QUOTE_END_MARKER, "").strip()
+    return clean_nga_display_text(value)
+
+
+def clean_nga_display_text(value: str) -> str:
+    text = str(value or "").replace(QUOTE_END_MARKER, "").strip()
+    text = re.sub(r"\[[^\]\n]*pid[^\]\n]*\]\s*Reply\s*\[/pid\]\s*", "", text, flags=re.I)
+    text = re.sub(r"\[/?(?:collapse|color|size|b|i|u|url|img|align|quote)[^\]]*\]", "", text, flags=re.I)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def nga_quote_header_label(value: str) -> str:
+    match = re.search(r"Post by\s+(.+?)(?:\s*\(([^)\n]+)\))?:\s*$", str(value or "").strip(), flags=re.I)
+    if not match:
+        return "引用："
+    author = clean_nga_display_text(match.group(1)).strip()
+    posted_at = clean_nga_display_text(match.group(2) or "").strip()
+    if author and posted_at:
+        return f"引用 {author}（{posted_at}）："
+    if author:
+        return f"引用 {author}："
+    return "引用："
 
 
 def friendly_post_content(value: str, *, quote_limit: int = 600, reply_limit: int = 1200) -> str:
@@ -2247,7 +2305,7 @@ def friendly_post_content(value: str, *, quote_limit: int = 600, reply_limit: in
         return display_text(value)
     quote_header, quote_body, reply_body = quoted
     lines: list[str] = ["被回复内容："]
-    quote_parts = [quote_header]
+    quote_parts = [nga_quote_header_label(quote_header)]
     if quote_body:
         quote_parts.append(quote_body)
     lines.append(truncate_text(display_text("\n".join(part for part in quote_parts if part)), quote_limit))
@@ -3075,6 +3133,58 @@ def push_channel_text(args: argparse.Namespace, title: str, text: str) -> None:
     push_feishu_text(args, title, text)
 
 
+def push_dingtalk_markdown_card(args: argparse.Namespace, title: str, markdown: str) -> None:
+    raw = getattr(args, "dingtalk_raw_message", None)
+    if not isinstance(raw, dict) or not raw:
+        push_channel_raw_text(args, markdown)
+        return
+    try:
+        dingtalk_client_for_args(args).reply_markdown_card(raw, markdown, title)
+    except Exception as exc:
+        print(f"DingTalk markdown card failed, falling back to text: {exc}", file=sys.stderr)
+        push_channel_raw_text(args, markdown)
+
+
+def push_dingtalk_action_card(
+    args: argparse.Namespace,
+    title: str,
+    markdown: str,
+    buttons: list[dict[str, str]],
+) -> None:
+    raw = getattr(args, "dingtalk_raw_message", None)
+    if not isinstance(raw, dict) or not raw:
+        push_dingtalk_markdown_card(args, title, markdown)
+        return
+    try:
+        dingtalk_client_for_args(args).reply_action_card(raw, markdown, buttons, title)
+    except Exception as exc:
+        print(f"DingTalk action card failed, falling back to markdown card: {exc}", file=sys.stderr)
+        push_dingtalk_markdown_card(args, title, markdown)
+
+
+def push_dingtalk_processing_card(args: argparse.Namespace, title: str, detail: str) -> str:
+    raw = getattr(args, "dingtalk_raw_message", None)
+    if not isinstance(raw, dict) or not raw:
+        return ""
+    markdown = "\n".join(["## 正在生成", "", detail or "AI 正在生成结果，请稍候。"])
+    try:
+        return dingtalk_client_for_args(args).reply_markdown_card(raw, markdown, title)
+    except Exception as exc:
+        print(f"DingTalk processing card failed: {exc}", file=sys.stderr)
+        return ""
+
+
+def update_dingtalk_processing_card(args: argparse.Namespace, card_id: str, title: str, detail: str) -> bool:
+    if not card_id:
+        return False
+    try:
+        dingtalk_client_for_args(args).update_markdown_card(card_id, detail, title)
+        return True
+    except Exception as exc:
+        print(f"DingTalk processing card update failed: {exc}", file=sys.stderr)
+        return False
+
+
 def save_wechat_outgoing_file(args: argparse.Namespace, file_name: str, text: str) -> Path:
     config = wechat_client_for_args(args).config
     safe_name = wechat_bot.safe_segment(Path(file_name).name or f"nga_file_{int(time.time())}.txt")
@@ -3132,7 +3242,7 @@ def push_channel_posts(args: argparse.Namespace, posts: list[NgaPost], title: st
         push_channel_raw_text(args, wechat_posts_text(posts, title))
         return
     if is_dingtalk_channel(args):
-        push_channel_raw_text(args, posts_to_txt(posts, title))
+        push_dingtalk_markdown_card(args, title, dingtalk_posts_markdown(posts, title))
         return
     if is_email_channel(args):
         push_email_text(args, title, posts_to_txt(posts, title))
@@ -3329,16 +3439,34 @@ def enrich_reply_file_refs(args: argparse.Namespace, current_message_id: str, fi
 
 def with_ai_reply_status(args: argparse.Namespace, message_id: str, label: str, fn: Callable[[], None]) -> None:
     reaction_id = ""
+    dingtalk_status_card_id = ""
     emoji_type = os.getenv("AI_REPLY_STATUS_EMOJI", "WITTY").strip().upper() or "WITTY"
     try:
-        app_id, app_secret, _receive_id, _receive_id_type = feishu_credentials(args)
-        if message_id and app_id and app_secret:
-            try:
-                reaction_id = create_feishu_reaction(args, message_id, emoji_type)
-            except Exception as exc:
-                print(f"AI 回复状态添加失败 {label}: {exc}", file=sys.stderr)
+        if is_dingtalk_channel(args):
+            dingtalk_status_card_id = push_dingtalk_processing_card(args, "AI 正在生成", "AI 正在生成结果，请稍候。")
+            if dingtalk_status_card_id:
+                setattr(args, "dingtalk_ai_status_card_id", dingtalk_status_card_id)
+                setattr(args, "dingtalk_ai_result_sent", False)
+        else:
+            app_id, app_secret, _receive_id, _receive_id_type = feishu_credentials(args)
+            if message_id and app_id and app_secret:
+                try:
+                    reaction_id = create_feishu_reaction(args, message_id, emoji_type)
+                except Exception as exc:
+                    print(f"AI 回复状态添加失败 {label}: {exc}", file=sys.stderr)
         fn()
     finally:
+        if dingtalk_status_card_id:
+            try:
+                if not bool(getattr(args, "dingtalk_ai_result_sent", False)):
+                    update_dingtalk_processing_card(args, dingtalk_status_card_id, "AI 已完成", "## AI 已完成\n\n没有生成新的输出。")
+            except Exception as exc:
+                print(f"DingTalk AI status cleanup failed {label}: {exc}", file=sys.stderr)
+            finally:
+                if hasattr(args, "dingtalk_ai_status_card_id"):
+                    delattr(args, "dingtalk_ai_status_card_id")
+                if hasattr(args, "dingtalk_ai_result_sent"):
+                    delattr(args, "dingtalk_ai_result_sent")
         if reaction_id:
             try:
                 delete_feishu_reaction(args, message_id, reaction_id)
@@ -3479,6 +3607,16 @@ def push_ai_markdown(args: argparse.Namespace, title: str, markdown: str, *, is_
     if is_email_channel(args):
         push_channel_text(args, title, markdown)
         return
+    if is_dingtalk_channel(args):
+        status_card_id = str(getattr(args, "dingtalk_ai_status_card_id", "") or "").strip()
+        if status_card_id:
+            if update_dingtalk_processing_card(args, status_card_id, title, markdown):
+                setattr(args, "dingtalk_ai_result_sent", True)
+                return
+            print("DingTalk AI result card update failed; sending a new result card instead.", file=sys.stderr)
+        push_dingtalk_markdown_card(args, title, markdown)
+        setattr(args, "dingtalk_ai_result_sent", True)
+        return
     chunks = split_text_chunks(markdown, 2800)
     total = len(chunks)
     try:
@@ -3507,15 +3645,13 @@ def ai_manager_for_args(args: argparse.Namespace) -> ai_analysis.AIManager:
     config = ai_analysis.AIConfig.from_namespace(args)
     if is_wechat_channel(args):
         target = getattr(args, "wechat_bot_target_user_id", "")
+    elif is_dingtalk_channel(args):
+        target = getattr(args, "dingtalk_target_user_ids", "")
     elif is_email_channel(args):
         target = getattr(args, "email_to", "")
     else:
         target = getattr(args, "feishu_receive_id", "")
     key = (str(config.work_dir.resolve()), f"{bot_channel(args)}:{target or ''}")
-    manager = _AI_MANAGERS.get(key)
-    if manager is not None:
-        manager.config = config
-        return manager
 
     def send_text(text: str) -> None:
         push_channel_text(args, "AI analysis", text)
@@ -3525,6 +3661,14 @@ def ai_manager_for_args(args: argparse.Namespace) -> ai_analysis.AIManager:
 
     def send_result(result: ai_analysis.AIResult) -> None:
         push_ai_result(args, result)
+
+    manager = _AI_MANAGERS.get(key)
+    if manager is not None:
+        manager.config = config
+        manager.send_text = send_text
+        manager.send_file = send_file
+        manager.send_result = send_result
+        return manager
 
     manager = ai_analysis.AIManager(config, send_text=send_text, send_file=send_file, send_result=send_result)
     _AI_MANAGERS[key] = manager
@@ -4829,6 +4973,59 @@ def wechat_active_target_ids(
     return active_uid, active_tid
 
 
+def dingtalk_target_state_path(args: argparse.Namespace) -> Path:
+    return dingtalk_bot.DingTalkBotConfig.from_namespace(args).state_dir / "target_state.json"
+
+
+def dingtalk_user_target_state(args: argparse.Namespace, user_id: str) -> dict[str, str]:
+    data = read_json(dingtalk_target_state_path(args), {})
+    if not isinstance(data, dict):
+        return {}
+    item = data.get(user_id or "default")
+    if not isinstance(item, dict):
+        return {}
+    return {str(key): str(value) for key, value in item.items() if value is not None}
+
+
+def dingtalk_set_active_target(args: argparse.Namespace, user_id: str, target_type: str, target_id: str) -> None:
+    path = dingtalk_target_state_path(args)
+    data = read_json(path, {})
+    if not isinstance(data, dict):
+        data = {}
+    key = user_id or "default"
+    item = data.get(key)
+    if not isinstance(item, dict):
+        item = {}
+    if target_type == "author":
+        item["author_id"] = str(target_id)
+    elif target_type == "thread":
+        item["thread_id"] = str(target_id)
+    item["updated_at"] = int(time.time())
+    data[key] = item
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(path, data)
+
+
+def dingtalk_active_target_ids(
+    args: argparse.Namespace,
+    user_id: str,
+    author_targets: list[WatchTarget] | None = None,
+    thread_targets: list[WatchTarget] | None = None,
+) -> tuple[str, str]:
+    author_targets = author_targets or watch_author_targets(args)
+    thread_targets = thread_targets or preset_thread_targets(args)
+    default_uid = author_targets[0].id if author_targets else str(getattr(args, "default_author_id", DEFAULT_AUTHOR_ID))
+    default_tid = thread_targets[0].id if thread_targets else str(getattr(args, "default_tid", DEFAULT_TID))
+    state = dingtalk_user_target_state(args, user_id)
+    active_uid = str(state.get("author_id") or "").strip()
+    active_tid = str(state.get("thread_id") or "").strip()
+    if not active_uid or not target_id_exists(author_targets, active_uid):
+        active_uid = default_uid
+    if not active_tid or not target_id_exists(thread_targets, active_tid):
+        active_tid = default_tid
+    return active_uid, active_tid
+
+
 def target_alias_label(targets: list[WatchTarget], target_id: str, prefix: str) -> str:
     for index, target in enumerate(targets, 1):
         if target.id == target_id:
@@ -4979,6 +5176,135 @@ def wechat_settings_text(args: argparse.Namespace, manager: ai_analysis.AIManage
     )
 
 
+def dingtalk_start_markdown(args: argparse.Namespace) -> str:
+    target_user = str(getattr(args, "dingtalk_target_user_ids", "") or "").strip()
+    author_targets = watch_author_targets(args)
+    thread_targets = preset_thread_targets(args)
+    active_uid, active_tid = dingtalk_active_target_ids(args, target_user, author_targets, thread_targets)
+    lines = [
+        "## NGA Wolf Watcher",
+        "",
+        "### 当前默认",
+        "",
+        f"- 用户: `{target_alias_label(author_targets, active_uid, 'u')}`",
+        f"- 帖子: `{target_alias_label(thread_targets, active_tid, 't')}`",
+        "",
+        "### 快捷菜单",
+        "",
+        f"1. 查询当前用户最近 {DEFAULT_REPLY_COUNT} 条回复",
+        "2. 打包当前用户最近 20 条回复",
+        f"3. 查询当前帖子最近 {DEFAULT_THREAD_COUNT} 条回复",
+        "4. 打包当前帖子最近 50 条回复",
+        "5. 打开设置",
+        "",
+        "### 常用短命令",
+        "",
+        f"- `hr1` / `hr10`: 查询当前用户 `{active_uid}` 的最近回复",
+        f"- `pr20`: 打包当前用户 `{active_uid}` 的最近回复",
+        f"- `ht10`: 查询当前帖子 `{active_tid}` 的最近回复",
+        f"- `pt50`: 打包当前帖子 `{active_tid}` 的最近回复",
+        "- `u1`: 切换默认用户到第 1 个预设",
+        "- `t1`: 切换默认帖子到第 1 个预设",
+        "- `s`: 打开设置",
+        "- `/id`: 查看主动推送要填写的钉钉用户 ID",
+    ]
+    if author_targets:
+        lines.extend(["", "### 用户预设", ""])
+        for index, target in enumerate(author_targets, 1):
+            marker = "当前" if target.id == active_uid else "可选"
+            lines.append(f"- `{marker}` `u{index}` {target_display_name(target)}")
+    if thread_targets:
+        lines.extend(["", "### 帖子预设", ""])
+        for index, target in enumerate(thread_targets, 1):
+            marker = "当前" if target.id == active_tid else "可选"
+            lines.append(f"- `{marker}` `t{index}` {target_display_name(target)}")
+    lines.extend(["", "直接回复菜单数字或短命令即可执行。"])
+    return "\n".join(lines)
+
+
+def dingtalk_start_buttons(args: argparse.Namespace) -> list[dict[str, str]]:
+    default_uid = str(getattr(args, "default_author_id", DEFAULT_AUTHOR_ID) or DEFAULT_AUTHOR_ID)
+    default_tid = str(getattr(args, "default_tid", DEFAULT_TID) or DEFAULT_TID)
+    return [
+        {"text": "查询用户回复", "command": f"/history_r {default_uid} {DEFAULT_REPLY_COUNT}", "color": "blue"},
+        {"text": "打包用户回复", "command": f"/pack_r {default_uid} 20", "color": "gray"},
+        {"text": "查询帖子回复", "command": f"/history_t {default_tid} {DEFAULT_THREAD_COUNT}", "color": "blue"},
+        {"text": "打包帖子回复", "command": f"/pack_t {default_tid} 50", "color": "gray"},
+        {"text": "设置", "command": "/setting", "color": "blue"},
+    ]
+
+
+def dingtalk_settings_markdown(args: argparse.Namespace, manager: ai_analysis.AIManager) -> str:
+    effective = manager.effective_config()
+    target_user_ids = str(getattr(args, "dingtalk_target_user_ids", "") or "").strip()
+    return "\n".join(
+        [
+            "## NGA Wolf Watcher 设置",
+            "",
+            f"- AI: {'开' if effective.enabled else '关'}",
+            f"- 自动分析: {'开' if effective.auto_analyze_new_post else '关'}",
+            f"- 定时分析: {'开' if effective.schedule_enabled else '关'}",
+            f"- 定时间隔: {effective.schedule_interval_minutes} 分钟",
+            f"- 时间窗口: `{effective.schedule_windows}`",
+            f"- 权限模式: `{manager.effective_permission_mode()}`",
+            f"- 模型: `{manager.effective_model()}`",
+            f"- 思考强度: `{manager.effective_reasoning_effort()}`",
+            f"- 当前钉钉用户 ID: `{target_user_ids or '未识别'}`",
+            "",
+            "### 回复数字切换",
+            "",
+            "1. AI 开",
+            "2. AI 关",
+            "3. 自动分析开",
+            "4. 自动分析关",
+            "5. 定时分析开",
+            "6. 定时分析关",
+            "7. 查看 AI 状态",
+            "8. 返回主菜单",
+            "",
+            "### 也可以发送短命令",
+            "",
+            "`a1` AI 开，`a0` AI 关  ",
+            "`n1` 自动分析开，`n0` 自动分析关  ",
+            "`q1` 定时分析开，`q0` 定时分析关  ",
+            "`/ai schedule every 5` 设置定时间隔",
+        ]
+    )
+
+
+def dingtalk_settings_buttons(manager: ai_analysis.AIManager) -> list[dict[str, str]]:
+    effective = manager.effective_config()
+    return [
+        {"text": "AI 关" if effective.enabled else "AI 开", "command": "/ai off" if effective.enabled else "/ai on", "color": "blue"},
+        {
+            "text": "自动分析关" if effective.auto_analyze_new_post else "自动分析开",
+            "command": "/ai auto off" if effective.auto_analyze_new_post else "/ai auto on",
+            "color": "blue",
+        },
+        {
+            "text": "定时分析关" if effective.schedule_enabled else "定时分析开",
+            "command": "/ai schedule off" if effective.schedule_enabled else "/ai schedule on",
+            "color": "blue",
+        },
+        {"text": "AI 状态", "command": "/ai status", "color": "gray"},
+        {"text": "返回主菜单", "command": "/start", "color": "gray"},
+    ]
+
+
+def dingtalk_id_markdown(message: dingtalk_bot.DingTalkMessage) -> str:
+    return "\n".join(
+        [
+            "## 钉钉 ID",
+            "",
+            f"- 主动推送目标用户 ID: `{message.sender_id or '未识别'}`",
+            f"- 会话 ID: `{message.conversation_id or '未识别'}`",
+            f"- 会话标题: `{message.conversation_title or '单聊/未命名'}`",
+            "",
+            "把上面的“主动推送目标用户 ID”填到程序里的 `目标用户 ID`。",
+        ]
+    )
+
+
 def wechat_normalize_short_command(args: argparse.Namespace, user_id: str, text: str) -> str:
     raw = str(text or "").strip()
     compact = " ".join(raw.split()).lower()
@@ -5070,6 +5396,11 @@ def dingtalk_normalize_short_command(args: argparse.Namespace, text: str) -> str
     if compact in aliases:
         return aliases[compact]
 
+    user_id = str(getattr(args, "dingtalk_target_user_ids", "") or "").strip()
+    menu = ""
+    if user_id:
+        menu = wechat_bot.WeChatMenuState(dingtalk_bot.DingTalkBotConfig.from_namespace(args).state_dir).get(user_id)
+
     def parse_short_count(prefix: str, default: int) -> int | None:
         match = re.fullmatch(rf"{re.escape(prefix)}(?:\s*(\d{{1,3}}))?", compact)
         if not match:
@@ -5078,8 +5409,36 @@ def dingtalk_normalize_short_command(args: argparse.Namespace, text: str) -> str
             return max(1, min(int(match.group(1)), 500))
         return default
 
-    default_uid = str(getattr(args, "default_author_id", DEFAULT_AUTHOR_ID) or DEFAULT_AUTHOR_ID)
-    default_tid = str(getattr(args, "default_tid", DEFAULT_TID) or DEFAULT_TID)
+    author_targets = watch_author_targets(args)
+    thread_targets = preset_thread_targets(args)
+    default_uid, default_tid = dingtalk_active_target_ids(args, user_id, author_targets, thread_targets)
+    author_switch = target_from_alias(compact, author_targets, "u")
+    if author_switch is not None:
+        dingtalk_set_active_target(args, user_id, "author", author_switch.id)
+        return "/start"
+    thread_switch = target_from_alias(compact, thread_targets, "t")
+    if thread_switch is not None:
+        dingtalk_set_active_target(args, user_id, "thread", thread_switch.id)
+        return "/start"
+    if compact in {"1", "2", "3", "4", "5"} and menu == "start":
+        return {
+            "1": f"/history_r {default_uid} {DEFAULT_REPLY_COUNT}",
+            "2": f"/pack_r {default_uid} 20",
+            "3": f"/history_t {default_tid} {DEFAULT_THREAD_COUNT}",
+            "4": f"/pack_t {default_tid} 50",
+            "5": "/setting",
+        }[compact]
+    if compact in {"1", "2", "3", "4", "5", "6", "7", "8"} and menu == "setting":
+        return {
+            "1": "/ai on",
+            "2": "/ai off",
+            "3": "/ai auto on",
+            "4": "/ai auto off",
+            "5": "/ai schedule on",
+            "6": "/ai schedule off",
+            "7": "/ai status",
+            "8": "/start",
+        }[compact]
     hr_count = parse_short_count("hr", DEFAULT_REPLY_COUNT)
     if hr_count is not None:
         return f"/history_r {default_uid} {hr_count}"
@@ -5260,22 +5619,34 @@ def settings_card_for_args(args: argparse.Namespace, manager: ai_analysis.AIMana
 
 def run_bot_command(args: argparse.Namespace, command: BotCommand) -> None:
     if command.action == "start":
-        if is_wechat_channel(args) or is_dingtalk_channel(args):
+        if is_dingtalk_channel(args):
+            target_user = str(getattr(args, "dingtalk_target_user_ids", "") or "").strip()
+            if target_user:
+                wechat_bot.WeChatMenuState(dingtalk_bot.DingTalkBotConfig.from_namespace(args).state_dir).set(target_user, "start")
+            push_dingtalk_markdown_card(args, "NGA Wolf Watcher", dingtalk_start_markdown(args))
+            return
+        if is_wechat_channel(args):
             target_user = str(getattr(args, "wechat_bot_target_user_id", "") or "").strip()
             if target_user:
                 wechat_bot.WeChatMenuState(wechat_client_for_args(args).config.state_dir).set(target_user, "start")
             author_targets = watch_author_targets(args)
             thread_targets = preset_thread_targets(args)
-            active_uid, active_tid = wechat_active_target_ids(args, target_user, author_targets, thread_targets) if is_wechat_channel(args) else (args.default_author_id, args.default_tid)
+            active_uid, active_tid = wechat_active_target_ids(args, target_user, author_targets, thread_targets)
             push_channel_raw_text(args, wechat_start_text(args.default_author_id, args.default_tid, author_targets, thread_targets, active_uid, active_tid))
             return
         push_feishu_card(args, start_form_card(args.default_author_id, args.default_tid))
         return
     if command.action == "setting":
         manager = ai_manager_for_args(args)
-        if is_wechat_channel(args) or is_dingtalk_channel(args):
+        if is_dingtalk_channel(args):
+            target_user = str(getattr(args, "dingtalk_target_user_ids", "") or "").strip()
+            if target_user:
+                wechat_bot.WeChatMenuState(dingtalk_bot.DingTalkBotConfig.from_namespace(args).state_dir).set(target_user, "setting")
+            push_dingtalk_markdown_card(args, "NGA Wolf Watcher 设置", dingtalk_settings_markdown(args, manager))
+            return
+        if is_wechat_channel(args):
             target_user = str(getattr(args, "wechat_bot_target_user_id", "") or "").strip()
-            if target_user and is_wechat_channel(args):
+            if target_user:
                 wechat_bot.WeChatMenuState(wechat_client_for_args(args).config.state_dir).set(target_user, "setting")
             push_channel_raw_text(args, wechat_settings_text(args, manager))
             return
@@ -5303,6 +5674,9 @@ def run_bot_command(args: argparse.Namespace, command: BotCommand) -> None:
     if not command.days and len(posts) < command.count:
         title += f"（请求 {command.count} 条，NGA 临时限流时会先返回已获取部分）"
     if command.action == "pack":
+        if is_dingtalk_channel(args):
+            push_channel_posts(args, posts, title)
+            return
         file_name = command_pack_file_name(command, len(posts))
         push_channel_file(args, file_name, posts_to_txt(posts, title))
     else:
@@ -6487,6 +6861,64 @@ def dingtalk_handled_state_path(args: argparse.Namespace) -> Path:
     return dingtalk_client_for_args(args).config.state_dir / "handled_messages.json"
 
 
+def dingtalk_last_user_state_path(args: argparse.Namespace) -> Path:
+    return dingtalk_client_for_args(args).config.state_dir / "last_user.json"
+
+
+def remember_dingtalk_user(args: argparse.Namespace, message: dingtalk_bot.DingTalkMessage) -> None:
+    if not message.sender_id:
+        return
+    path = dingtalk_last_user_state_path(args)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(
+        path,
+        {
+            "user_id": message.sender_id,
+            "sender_name": message.sender_name,
+            "conversation_id": message.conversation_id,
+            "conversation_title": message.conversation_title,
+            "updated_at": int(time.time()),
+        },
+    )
+
+
+def read_last_dingtalk_user(args: argparse.Namespace) -> dict[str, Any]:
+    data = read_json(dingtalk_last_user_state_path(args), {})
+    return data if isinstance(data, dict) else {}
+
+
+def handle_dingtalk_card_action(args: argparse.Namespace, action: dingtalk_bot.DingTalkCardAction) -> None:
+    message_id = action.message_id or action.card_instance_id
+    if dingtalk_is_handled(args, message_id):
+        return
+    command = str(action.command or "").strip()
+    if not command:
+        return
+    scoped_args = args_for_dingtalk_user(args, action.user_id or str(getattr(args, "dingtalk_target_user_ids", "") or ""), "")
+    sender_id = action.user_id or str(getattr(scoped_args, "dingtalk_target_user_ids", "") or "")
+    try:
+        parsed_ai = ai_analysis.parse_ai_command(command)
+        if parsed_ai is not None:
+            run_ai_command_background(scoped_args, command, sender_id, f"DingTalk card:{message_id}", message_id)
+            return
+        author_targets = watch_author_targets(scoped_args)
+        thread_targets = preset_thread_targets(scoped_args)
+        parsed = parse_bot_command(command, args.default_author_id, args.default_tid, author_targets, thread_targets, args.default_author_id, args.default_tid)
+        if parsed is not None:
+            run_command_background(scoped_args, parsed, f"DingTalk card:{message_id}")
+        else:
+            push_channel_raw_text(scoped_args, f"无法识别按钮命令: {command}")
+    except Exception as exc:
+        print(f"DingTalk card action handling failed {message_id}: {exc}", file=sys.stderr)
+        try:
+            push_channel_text(scoped_args, "DingTalk card action failed", str(exc))
+        except Exception as nested:
+            print(f"Failed to send DingTalk card action error: {nested}", file=sys.stderr)
+    finally:
+        if message_id:
+            dingtalk_mark_handled(args, message_id)
+
+
 def dingtalk_is_handled(args: argparse.Namespace, message_id: str) -> bool:
     data = read_json(dingtalk_handled_state_path(args), {"handled": []})
     handled = data.get("handled", []) if isinstance(data, dict) else []
@@ -6510,22 +6942,16 @@ def dingtalk_mark_handled(args: argparse.Namespace, message_id: str) -> None:
 def handle_dingtalk_message(args: argparse.Namespace, message: dingtalk_bot.DingTalkMessage) -> None:
     if args.disable_commands or dingtalk_is_handled(args, message.message_id):
         return
-    scoped_args = args_for_dingtalk_user(args, message.sender_id, message.session_webhook)
+    remember_dingtalk_user(args, message)
+    scoped_args = args_for_dingtalk_user(args, message.sender_id, message.session_webhook, message.raw)
     text = dingtalk_normalize_short_command(scoped_args, message.text)
     sender_id = message.sender_id
     try:
+        if text == "/id":
+            push_dingtalk_markdown_card(scoped_args, "钉钉 ID", dingtalk_id_markdown(message))
+            return
         if ai_analysis.parse_ai_command(text) is not None:
-            enqueue_ai_direct_job(
-                scoped_args,
-                f"DingTalk message:{message.message_id} /ai",
-                lambda scoped_args=scoped_args, text=text, sender_id=sender_id: run_ai_command(
-                    scoped_args,
-                    text,
-                    sender_id,
-                    [],
-                    [],
-                ),
-            )
+            run_ai_command_background(scoped_args, text, sender_id, f"DingTalk message:{message.message_id}", message.message_id)
         else:
             author_targets = watch_author_targets(scoped_args)
             thread_targets = preset_thread_targets(scoped_args)
@@ -6535,17 +6961,7 @@ def handle_dingtalk_message(args: argparse.Namespace, message: dingtalk_bot.Ding
             elif should_forward_plain_text_to_ai(scoped_args, text, sender_id, [], []):
                 manager = ai_manager_for_args(scoped_args)
                 if manager.effective_enabled() and manager.is_authorized(sender_id):
-                    enqueue_ai_direct_job(
-                        scoped_args,
-                        f"DingTalk message:{message.message_id} AI conversation",
-                        lambda scoped_args=scoped_args, text=text, sender_id=sender_id: run_ai_plain_text(
-                            scoped_args,
-                            text,
-                            sender_id,
-                            [],
-                            [],
-                        ),
-                    )
+                    run_ai_plain_text_background(scoped_args, text, sender_id, f"DingTalk message:{message.message_id}", message.message_id)
     except Exception as exc:
         print(f"DingTalk message handling failed {message.message_id}: {exc}", file=sys.stderr)
         try:
@@ -6583,7 +6999,10 @@ def start_dingtalk_stream(args: argparse.Namespace) -> None:
     while True:
         try:
             client = dingtalk_client_for_args(args)
-            client.start_stream(lambda message: handle_dingtalk_message(args, message))
+            client.start_stream(
+                lambda message: handle_dingtalk_message(args, message),
+                lambda action: handle_dingtalk_card_action(args, action),
+            )
             print("DingTalk Stream client exited, reconnecting in 5 seconds.", file=sys.stderr)
         except Exception as exc:
             print(f"DingTalk Stream client failed, reconnecting in 5 seconds: {exc}", file=sys.stderr)

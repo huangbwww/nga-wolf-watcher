@@ -107,6 +107,16 @@ DINGTALK_ACCOUNT_ID=default
 
 钉钉里给机器人发 `/start`、`/setting`、`/history_r`、`/pack_r`、普通 AI 对话消息等，会通过 Stream 会话直接回复；NGA 新回复、免打扰汇总和定时 AI 分析属于主动推送，需要填写 `DINGTALK_TARGET_USER_IDS`，并确保钉钉应用有对应机器人主动发送权限。
 
+EXE 推荐配置步骤：
+
+1. 在钉钉开放平台创建应用并启用机器人/Stream 模式，把应用的 `Client ID` / `App Key` 和 `Client Secret` / `App Secret` 填到钉钉配置组。
+2. `Robot Code` 可以先留空；主动推送接口会默认使用 `Client ID`。如果你的应用后台单独显示了 robotCode，再填入该值。
+3. 先保存配置并启动监听一次，在钉钉里给机器人发送 `/start` 或任意一条消息。
+4. 回到 EXE 的钉钉配置组，点击 `获取最近用户 ID`。程序会读取刚才收到的钉钉消息，并把发送人的用户 ID 填到 `目标用户 ID`。
+5. 再次保存配置，在 `发送目标` / `监听规则` 里选择这个钉钉配置组；之后自动新回复、免打扰汇总和定时 AI 分析就能主动推送到该用户。多个用户 ID 可以用逗号分隔。
+
+钉钉目前使用 Markdown 卡片和文本菜单：`/start`、`/setting` 会返回卡片样式菜单，直接回复 `1` 到 `8`、`hr10`、`u1`、`t1`、`a1/a0` 等短命令即可操作。钉钉的临时 Markdown 卡片不能像飞书卡片那样原地覆盖更新；AI 生成中会先发一张“AI 正在生成”，结果出来后会尝试更新，若钉钉接口要求 `cardTemplateId` 导致更新失败，则自动补发一张新的 `AI 回复` 卡片。要做真正可点击、可覆盖更新的钉钉互动卡片，需要先在钉钉卡片搭建器创建模板并提供 `cardTemplateId`。
+
 GUI 里可以直接点击微信配置卡片的 `扫码绑定`。程序会向 ilink 网关申请二维码，打开二维码链接并后台等待手机确认；确认成功后会自动回填 `WECHAT_BOT_TOKEN`、`WECHAT_BOT_TARGET_USER_ID`、`WECHAT_BOT_ALLOWED_USER_IDS` 和 `WECHAT_BOT_ACCOUNT_ID`。回填后点击 `保存配置` 再启动监听。
 
 微信没有飞书卡片按钮，但提供文本快捷菜单：

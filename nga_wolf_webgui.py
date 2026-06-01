@@ -557,6 +557,25 @@ class PreviewApi:
         cleaned = legacy.nga_feishu_watch.merge_feishu_chats(chats)
         return {"ok": True, "chats": cleaned, "status": self._status()}
 
+    def recent_dingtalk_user_for_profile(self, profile: dict[str, Any] | None = None) -> dict[str, Any]:
+        data = profile if isinstance(profile, dict) else {}
+        merged = self._merged_config()
+        if data:
+            merged["dingtalk_client_id"] = str(data.get("client_id") or "").strip()
+            merged["dingtalk_client_secret"] = str(data.get("client_secret") or "").strip()
+            merged["dingtalk_robot_code"] = str(data.get("robot_code") or "").strip()
+            merged["dingtalk_target_user_ids"] = str(data.get("target_user_ids") or "").strip()
+            merged["dingtalk_allowed_user_ids"] = str(data.get("allowed_user_ids") or "").strip()
+            merged["dingtalk_account_id"] = str(data.get("account_id") or "default").strip() or "default"
+        if not (str(merged.get("dingtalk_client_id") or "").strip() and str(merged.get("dingtalk_client_secret") or "").strip()):
+            return {"ok": False, "error": "请先填写钉钉 Client ID 和 Client Secret"}
+        args = legacy.build_args(merged)
+        user = legacy.nga_feishu_watch.read_last_dingtalk_user(args)
+        user_id = str(user.get("user_id") or "").strip()
+        if not user_id:
+            return {"ok": False, "error": "还没有收到这个钉钉配置的用户消息。请先在钉钉给机器人发送 /start 或任意消息，再点击获取。"}
+        return {"ok": True, "user": user, "user_id": user_id, "status": self._status()}
+
     def send_test_target(self, config: dict[str, Any] | None = None, target_id: str = "") -> dict[str, Any]:
         merged = self._merged_config(config)
         errors = legacy.validate_config(merged, require_cookie=False)

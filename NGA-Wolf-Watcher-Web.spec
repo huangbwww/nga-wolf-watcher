@@ -7,6 +7,23 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_all
 
 
+LOCAL_DEP_DIRS = [
+    Path('.build_deps'),
+    Path('.build_dingtalk_only'),
+]
+
+
+def local_dep_paths():
+    paths = []
+    for path in LOCAL_DEP_DIRS:
+        if path.exists():
+            resolved = str(path.resolve())
+            paths.append(resolved)
+            if resolved not in sys.path:
+                sys.path.insert(0, resolved)
+    return paths
+
+
 def ensure_webui_dist():
     index_path = Path('webui') / 'dist' / 'index.html'
     package_json = Path('webui') / 'package.json'
@@ -21,6 +38,7 @@ def ensure_webui_dist():
 
 
 ensure_webui_dist()
+pathex = local_dep_paths()
 
 datas = [
     ('.\\assets\\app_icon.ico', 'assets'),
@@ -39,7 +57,7 @@ for package in ('lark_oapi', 'customtkinter', 'webview', 'pystray', 'PIL', 'ding
 
 a = Analysis(
     ['nga_wolf_webgui.py'],
-    pathex=[],
+    pathex=pathex,
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
