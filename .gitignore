@@ -1,6 +1,8 @@
 .nga_seen.json
 .env.ps1
 .venv/
+.build_deps/
+.build_dingtalk_only/
 start_local.bat
 run_local.bat
 nga_wolf_config.json

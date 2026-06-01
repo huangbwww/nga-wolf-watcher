@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import ai_analysis
+import dingtalk_bot
 import email_channel
 import wechat_bot
 
@@ -89,6 +90,7 @@ _NGA_REQUEST_LOCK = threading.Lock()
 _NGA_LAST_REQUEST_AT = 0.0
 _NGA_JSON_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _WECHAT_CLIENTS: dict[tuple[str, str], wechat_bot.WeChatBotClient] = {}
+_DINGTALK_CLIENTS: dict[tuple[str, str, str], dingtalk_bot.DingTalkBotClient] = {}
 _LARK_WS_LOOP_LOCK = threading.Lock()
 
 
@@ -255,6 +257,18 @@ class WeChatBotProfile:
 
 
 @dataclass(frozen=True)
+class DingTalkBotProfile:
+    id: str
+    label: str = ""
+    client_id: str = ""
+    client_secret: str = ""
+    robot_code: str = ""
+    target_user_ids: str = ""
+    allowed_user_ids: str = ""
+    account_id: str = "default"
+
+
+@dataclass(frozen=True)
 class EmailSmtpProfile:
     id: str
     label: str = ""
@@ -385,10 +399,14 @@ def parse_route_parts(route_parts: list[str]) -> dict[str, str]:
 
 def route_channel_from_parts(route: dict[str, str], default: str = "") -> str:
     value = (route.get("channel") or route.get("route_channel") or default).strip().lower()
-    if value in {"feishu", "wechat"}:
+    if value in {"feishu", "wechat", "email", "dingtalk"}:
         return value
     if route.get("wechat_profile") or route.get("wechat_profile_id"):
         return "wechat"
+    if route.get("dingtalk_profile") or route.get("dingtalk_profile_id"):
+        return "dingtalk"
+    if route.get("email_profile") or route.get("email_profile_id"):
+        return "email"
     if route.get("bot") or route.get("profile") or route.get("profile_id") or route.get("receive_id"):
         return "feishu"
     return ""
@@ -426,8 +444,8 @@ def parse_target_list(raw: Any, fallback_id: str = "") -> list[WatchTarget]:
                 target_id,
                 label,
                 route_channel=route_channel_from_parts(route),
-                route_profile_id=route.get("bot", "") or route.get("profile", "") or route.get("profile_id", "") or route.get("wechat_profile", "") or route.get("wechat_profile_id", ""),
-                route_receive_id=route.get("receive_id", "") or route.get("feishu_receive_id", ""),
+                route_profile_id=route.get("bot", "") or route.get("profile", "") or route.get("profile_id", "") or route.get("wechat_profile", "") or route.get("wechat_profile_id", "") or route.get("dingtalk_profile", "") or route.get("dingtalk_profile_id", "") or route.get("email_profile", "") or route.get("email_profile_id", ""),
+                route_receive_id=route.get("receive_id", "") or route.get("feishu_receive_id", "") or route.get("dingtalk_target_user_ids", "") or route.get("target_user_ids", "") or route.get("email_to", ""),
                 route_id_type=route.get("id_type", "") or route.get("receive_id_type", "") or route.get("feishu_id_type", "chat_id"),
             )
         )
@@ -479,10 +497,10 @@ def parse_thread_author_watches(raw: Any) -> list[ThreadAuthorWatch]:
                     author_id=author_id,
                     label=label,
                     route_channel=route_channel_from_parts(route),
-                    route_profile_id=route.get("bot", "") or route.get("profile", "") or route.get("profile_id", "") or route.get("wechat_profile", "") or route.get("wechat_profile_id", ""),
+                    route_profile_id=route.get("bot", "") or route.get("profile", "") or route.get("profile_id", "") or route.get("wechat_profile", "") or route.get("wechat_profile_id", "") or route.get("dingtalk_profile", "") or route.get("dingtalk_profile_id", "") or route.get("email_profile", "") or route.get("email_profile_id", ""),
                     feishu_app_id=route.get("app_id", "") or route.get("feishu_app_id", ""),
                     feishu_app_secret=route.get("app_secret", "") or route.get("feishu_app_secret", ""),
-                    feishu_receive_id=route.get("receive_id", "") or route.get("feishu_receive_id", ""),
+                    feishu_receive_id=route.get("receive_id", "") or route.get("feishu_receive_id", "") or route.get("dingtalk_target_user_ids", "") or route.get("target_user_ids", "") or route.get("email_to", ""),
                     feishu_id_type=route.get("id_type", "") or route.get("receive_id_type", "") or route.get("feishu_id_type", "chat_id"),
                 )
             )
@@ -594,6 +612,34 @@ def parse_wechat_bot_profiles(raw: Any) -> list[WeChatBotProfile]:
     return profiles
 
 
+def parse_dingtalk_bot_profiles(raw: Any) -> list[DingTalkBotProfile]:
+    profiles: list[DingTalkBotProfile] = []
+    seen: set[str] = set()
+    for item in json_list_value(raw):
+        if not isinstance(item, dict):
+            continue
+        client_id = str(item.get("client_id") or item.get("app_key") or item.get("dingtalk_client_id") or "").strip()
+        client_secret = str(item.get("client_secret") or item.get("app_secret") or item.get("dingtalk_client_secret") or "").strip()
+        account_id = str(item.get("account_id") or item.get("dingtalk_account_id") or "default").strip() or "default"
+        profile_id = str(item.get("id") or "").strip() or stable_profile_id("dingtalk", account_id, client_id, str(item.get("label") or ""))
+        if not profile_id or profile_id in seen:
+            continue
+        seen.add(profile_id)
+        profiles.append(
+            DingTalkBotProfile(
+                id=profile_id,
+                label=str(item.get("label") or item.get("name") or "").strip(),
+                client_id=client_id,
+                client_secret=client_secret,
+                robot_code=str(item.get("robot_code") or item.get("dingtalk_robot_code") or "").strip(),
+                target_user_ids=str(item.get("target_user_ids") or item.get("target_user_id") or item.get("dingtalk_target_user_ids") or "").strip(),
+                allowed_user_ids=str(item.get("allowed_user_ids") or item.get("dingtalk_allowed_user_ids") or "").strip(),
+                account_id=account_id,
+            )
+        )
+    return profiles
+
+
 def parse_email_smtp_profiles(raw: Any) -> list[EmailSmtpProfile]:
     profiles: list[EmailSmtpProfile] = []
     for item in json_list_value(raw):
@@ -626,7 +672,7 @@ def parse_email_smtp_profiles(raw: Any) -> list[EmailSmtpProfile]:
 
 def normalize_channel(raw: Any, default: str = "feishu") -> str:
     value = str(raw or default).strip().lower()
-    return value if value in {"feishu", "wechat", "email"} else default
+    return value if value in {"feishu", "wechat", "email", "dingtalk"} else default
 
 
 def normalize_listen_mode(raw: Any, default: str = "thread_author") -> str:
@@ -647,7 +693,9 @@ def parse_push_targets(raw: Any) -> list[PushTarget]:
             item.get("receive_id")
             or item.get("chat_id")
             or item.get("target_user_id")
+            or item.get("target_user_ids")
             or item.get("feishu_receive_id")
+            or item.get("dingtalk_target_user_ids")
             or item.get("route_receive_id")
             or ""
         ).strip()
@@ -663,7 +711,7 @@ def parse_push_targets(raw: Any) -> list[PushTarget]:
                 channel=channel,
                 profile_id=profile_id,
                 receive_id=receive_id,
-                id_type=str(item.get("id_type") or item.get("receive_id_type") or item.get("feishu_id_type") or ("email" if channel == "email" else "chat_id")).strip() or ("email" if channel == "email" else "chat_id"),
+                id_type=str(item.get("id_type") or item.get("receive_id_type") or item.get("feishu_id_type") or ("email" if channel == "email" else ("user_id" if channel == "dingtalk" else "chat_id"))).strip() or ("email" if channel == "email" else ("user_id" if channel == "dingtalk" else "chat_id")),
                 default_author_id=str(item.get("default_author_id") or item.get("author_id") or "").strip(),
                 default_tid=str(item.get("default_tid") or item.get("tid") or "").strip(),
             )
@@ -758,6 +806,30 @@ def wechat_bot_profiles(args: argparse.Namespace) -> list[WeChatBotProfile]:
     ]
 
 
+def dingtalk_bot_profiles(args: argparse.Namespace) -> list[DingTalkBotProfile]:
+    raw = getattr(args, "dingtalk_bot_profiles", "") or os.getenv("DINGTALK_BOT_PROFILES", "")
+    profiles = parse_dingtalk_bot_profiles(raw)
+    if profiles:
+        return profiles
+    client_id = getattr(args, "dingtalk_client_id", "") or os.getenv("DINGTALK_CLIENT_ID", "")
+    client_secret = getattr(args, "dingtalk_client_secret", "") or os.getenv("DINGTALK_CLIENT_SECRET", "")
+    robot_code = getattr(args, "dingtalk_robot_code", "") or os.getenv("DINGTALK_ROBOT_CODE", "")
+    if not (client_id or client_secret or robot_code):
+        return []
+    return [
+        DingTalkBotProfile(
+            id="default",
+            label="default",
+            client_id=str(client_id).strip(),
+            client_secret=str(client_secret).strip(),
+            robot_code=str(robot_code).strip(),
+            target_user_ids=str(getattr(args, "dingtalk_target_user_ids", "") or os.getenv("DINGTALK_TARGET_USER_IDS", "")).strip(),
+            allowed_user_ids=str(getattr(args, "dingtalk_allowed_user_ids", "") or os.getenv("DINGTALK_ALLOWED_USER_IDS", "")).strip(),
+            account_id=str(getattr(args, "dingtalk_account_id", "") or os.getenv("DINGTALK_ACCOUNT_ID", "default")).strip() or "default",
+        )
+    ]
+
+
 def email_smtp_profiles(args: argparse.Namespace) -> list[EmailSmtpProfile]:
     raw = (
         getattr(args, "email_smtp_profiles", "")
@@ -809,6 +881,23 @@ def configured_push_targets(args: argparse.Namespace) -> list[PushTarget]:
                     channel="wechat",
                     profile_id=profile.id if profile else "",
                     receive_id=receive_id or (profile.target_user_id if profile else ""),
+                    default_author_id=str(getattr(args, "default_author_id", "") or DEFAULT_AUTHOR_ID),
+                    default_tid=str(getattr(args, "default_tid", "") or DEFAULT_TID),
+                )
+            ]
+        return []
+    if channel == "dingtalk":
+        profile = find_dingtalk_profile(args, "")
+        receive_id = str(getattr(args, "dingtalk_target_user_ids", "") or os.getenv("DINGTALK_TARGET_USER_IDS", "")).strip()
+        if profile or receive_id:
+            return [
+                PushTarget(
+                    id="default",
+                    label="Default DingTalk",
+                    channel="dingtalk",
+                    profile_id=profile.id if profile else "",
+                    receive_id=receive_id or (profile.target_user_ids if profile else ""),
+                    id_type="user_id",
                     default_author_id=str(getattr(args, "default_author_id", "") or DEFAULT_AUTHOR_ID),
                     default_tid=str(getattr(args, "default_tid", "") or DEFAULT_TID),
                 )
@@ -916,6 +1005,18 @@ def args_for_push_target(args: argparse.Namespace, target: PushTarget) -> argpar
         cloned = args_for_configured_route(args, route_channel="wechat", route_profile_id=target.profile_id)
         if target.receive_id:
             cloned.wechat_bot_target_user_id = target.receive_id
+        if target.default_author_id:
+            cloned.default_author_id = target.default_author_id
+        if target.default_tid:
+            cloned.default_tid = target.default_tid
+        return cloned
+    if target.channel == "dingtalk":
+        cloned = args_for_configured_route(
+            args,
+            route_channel="dingtalk",
+            route_profile_id=target.profile_id,
+            receive_id=target.receive_id,
+        )
         if target.default_author_id:
             cloned.default_author_id = target.default_author_id
         if target.default_tid:
@@ -1040,7 +1141,7 @@ def add_thread_author_source(post: NgaPost, watch: ThreadAuthorWatch) -> NgaPost
 
 def bot_channel(args: argparse.Namespace) -> str:
     channel = str(getattr(args, "bot_channel", "") or os.getenv("NGA_BOT_CHANNEL", "feishu")).strip().lower()
-    return channel if channel in {"feishu", "wechat", "email"} else "feishu"
+    return channel if channel in {"feishu", "wechat", "email", "dingtalk"} else "feishu"
 
 
 def is_wechat_channel(args: argparse.Namespace) -> bool:
@@ -1051,6 +1152,10 @@ def is_email_channel(args: argparse.Namespace) -> bool:
     return bot_channel(args) == "email"
 
 
+def is_dingtalk_channel(args: argparse.Namespace) -> bool:
+    return bot_channel(args) == "dingtalk"
+
+
 def wechat_client_for_args(args: argparse.Namespace) -> wechat_bot.WeChatBotClient:
     config = wechat_bot.WeChatBotConfig.from_namespace(args)
     key = (str(config.state_dir.resolve()), config.token)
@@ -1058,6 +1163,17 @@ def wechat_client_for_args(args: argparse.Namespace) -> wechat_bot.WeChatBotClie
     if client is None:
         client = wechat_bot.WeChatBotClient(config)
         _WECHAT_CLIENTS[key] = client
+    return client
+
+
+def dingtalk_client_for_args(args: argparse.Namespace) -> dingtalk_bot.DingTalkBotClient:
+    config = dingtalk_bot.DingTalkBotConfig.from_namespace(args)
+    secret_hash = hashlib.sha1(config.client_secret.encode("utf-8")).hexdigest()[:12] if config.client_secret else ""
+    key = (str(config.state_dir.resolve()), config.client_id, secret_hash)
+    client = _DINGTALK_CLIENTS.get(key)
+    if client is None:
+        client = dingtalk_bot.DingTalkBotClient(config)
+        _DINGTALK_CLIENTS[key] = client
     return client
 
 
@@ -1079,6 +1195,17 @@ def find_wechat_profile(args: argparse.Namespace, profile_id: str) -> WeChatBotP
         return profiles[0]
     for profile in profiles:
         if target in {profile.id, profile.label, profile.account_id, profile.target_user_id}:
+            return profile
+    return None
+
+
+def find_dingtalk_profile(args: argparse.Namespace, profile_id: str) -> DingTalkBotProfile | None:
+    target = str(profile_id or "").strip()
+    profiles = dingtalk_bot_profiles(args)
+    if not target and profiles:
+        return profiles[0]
+    for profile in profiles:
+        if target in {profile.id, profile.label, profile.account_id, profile.client_id, profile.robot_code}:
             return profile
     return None
 
@@ -1120,6 +1247,20 @@ def args_for_configured_route(
             cloned.wechat_bot_route_tag = profile.route_tag
             cloned.wechat_bot_account_id = profile.account_id
         return cloned
+    if channel == "dingtalk":
+        profile = find_dingtalk_profile(args, route_profile_id)
+        cloned = copy.copy(args)
+        cloned.bot_channel = "dingtalk"
+        if profile:
+            cloned.dingtalk_client_id = profile.client_id
+            cloned.dingtalk_client_secret = profile.client_secret
+            cloned.dingtalk_robot_code = profile.robot_code
+            cloned.dingtalk_target_user_ids = profile.target_user_ids
+            cloned.dingtalk_allowed_user_ids = profile.allowed_user_ids
+            cloned.dingtalk_account_id = profile.account_id
+        if receive_id:
+            cloned.dingtalk_target_user_ids = receive_id
+        return cloned
     if channel == "email":
         profile = find_email_profile(args, route_profile_id)
         cloned = copy.copy(args)
@@ -1160,6 +1301,19 @@ def args_for_wechat_user(args: argparse.Namespace, user_id: str) -> argparse.Nam
     cloned = copy.copy(args)
     cloned.wechat_bot_target_user_id = user_id
     target = push_target_for_channel_receive(args, "wechat", user_id)
+    if target:
+        if target.default_author_id:
+            cloned.default_author_id = target.default_author_id
+        if target.default_tid:
+            cloned.default_tid = target.default_tid
+    return cloned
+
+
+def args_for_dingtalk_user(args: argparse.Namespace, user_id: str, session_webhook: str = "") -> argparse.Namespace:
+    cloned = copy.copy(args)
+    cloned.dingtalk_target_user_ids = user_id
+    cloned.dingtalk_session_webhook = session_webhook
+    target = push_target_for_channel_receive(args, "dingtalk", user_id)
     if target:
         if target.default_author_id:
             cloned.default_author_id = target.default_author_id
@@ -2897,6 +3051,9 @@ def push_channel_raw_text(args: argparse.Namespace, text: str) -> None:
     if is_wechat_channel(args):
         wechat_client_for_args(args).send_text_to_target(text)
         return
+    if is_dingtalk_channel(args):
+        dingtalk_client_for_args(args).reply_text(text)
+        return
     if is_email_channel(args):
         push_email_text(args, "NGA Wolf Watcher", text)
         return
@@ -2907,6 +3064,10 @@ def push_channel_text(args: argparse.Namespace, title: str, text: str) -> None:
     if is_wechat_channel(args):
         content = f"{title}\n\n{text}" if title else text
         wechat_client_for_args(args).send_text_to_target(content)
+        return
+    if is_dingtalk_channel(args):
+        content = f"## {title}\n\n{text}" if title else text
+        dingtalk_client_for_args(args).reply_text(content)
         return
     if is_email_channel(args):
         push_email_text(args, title or "NGA Wolf Watcher", text)
@@ -2950,7 +3111,10 @@ def push_channel_file(args: argparse.Namespace, file_name: str, text: str) -> No
                         text,
                     ]
                 ),
-            )
+        )
+        return
+    if is_dingtalk_channel(args):
+        push_channel_raw_text(args, "\n".join([file_name, "", str(text or "")]))
         return
     if is_email_channel(args):
         push_email_text(
@@ -2966,6 +3130,9 @@ def push_channel_file(args: argparse.Namespace, file_name: str, text: str) -> No
 def push_channel_posts(args: argparse.Namespace, posts: list[NgaPost], title: str, mention_user_id: str = "") -> None:
     if is_wechat_channel(args):
         push_channel_raw_text(args, wechat_posts_text(posts, title))
+        return
+    if is_dingtalk_channel(args):
+        push_channel_raw_text(args, posts_to_txt(posts, title))
         return
     if is_email_channel(args):
         push_email_text(args, title, posts_to_txt(posts, title))
@@ -4885,6 +5052,57 @@ def wechat_normalize_short_command(args: argparse.Namespace, user_id: str, text:
     return raw
 
 
+def dingtalk_normalize_short_command(args: argparse.Namespace, text: str) -> str:
+    raw = str(text or "").strip()
+    compact = " ".join(raw.split()).lower()
+    if not compact:
+        return raw
+    aliases = {
+        "s": "/setting",
+        "st": "/ai status",
+        "a1": "/ai on",
+        "a0": "/ai off",
+        "n1": "/ai auto on",
+        "n0": "/ai auto off",
+        "q1": "/ai schedule on",
+        "q0": "/ai schedule off",
+    }
+    if compact in aliases:
+        return aliases[compact]
+
+    def parse_short_count(prefix: str, default: int) -> int | None:
+        match = re.fullmatch(rf"{re.escape(prefix)}(?:\s*(\d{{1,3}}))?", compact)
+        if not match:
+            return None
+        if match.group(1):
+            return max(1, min(int(match.group(1)), 500))
+        return default
+
+    default_uid = str(getattr(args, "default_author_id", DEFAULT_AUTHOR_ID) or DEFAULT_AUTHOR_ID)
+    default_tid = str(getattr(args, "default_tid", DEFAULT_TID) or DEFAULT_TID)
+    hr_count = parse_short_count("hr", DEFAULT_REPLY_COUNT)
+    if hr_count is not None:
+        return f"/history_r {default_uid} {hr_count}"
+    pr_count = parse_short_count("pr", 20)
+    if pr_count is not None:
+        return f"/pack_r {default_uid} {pr_count}"
+    ht_count = parse_short_count("ht", DEFAULT_THREAD_COUNT)
+    if ht_count is not None:
+        return f"/history_t {default_tid} {ht_count}"
+    pt_count = parse_short_count("pt", 50)
+    if pt_count is not None:
+        return f"/pack_t {default_tid} {pt_count}"
+    if compact in {"1", "2", "3", "4", "5"}:
+        return {
+            "1": f"/history_r {default_uid} {DEFAULT_REPLY_COUNT}",
+            "2": f"/pack_r {default_uid} 20",
+            "3": f"/history_t {default_tid} {DEFAULT_THREAD_COUNT}",
+            "4": f"/pack_t {default_tid} 50",
+            "5": "/setting",
+        }[compact]
+    return raw
+
+
 def push_feishu_card(args: argparse.Namespace, card: dict[str, Any]) -> None:
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     if not (app_id and app_secret and receive_id):
@@ -5018,6 +5236,16 @@ def channel_route_key(args: argparse.Namespace) -> tuple[str, str, str, str, str
             str(getattr(args, "email_to", "") or ""),
             str(getattr(args, "email_smtp_host", "") or ""),
         )
+    if is_dingtalk_channel(args):
+        secret = str(getattr(args, "dingtalk_client_secret", "") or "")
+        secret_hash = hashlib.sha1(secret.encode("utf-8")).hexdigest()[:12] if secret else ""
+        return (
+            "dingtalk",
+            str(getattr(args, "dingtalk_account_id", "") or ""),
+            str(getattr(args, "dingtalk_client_id", "") or ""),
+            secret_hash,
+            str(getattr(args, "dingtalk_target_user_ids", "") or ""),
+        )
     return feishu_route_key(args)
 
 
@@ -5032,22 +5260,22 @@ def settings_card_for_args(args: argparse.Namespace, manager: ai_analysis.AIMana
 
 def run_bot_command(args: argparse.Namespace, command: BotCommand) -> None:
     if command.action == "start":
-        if is_wechat_channel(args):
+        if is_wechat_channel(args) or is_dingtalk_channel(args):
             target_user = str(getattr(args, "wechat_bot_target_user_id", "") or "").strip()
             if target_user:
                 wechat_bot.WeChatMenuState(wechat_client_for_args(args).config.state_dir).set(target_user, "start")
             author_targets = watch_author_targets(args)
             thread_targets = preset_thread_targets(args)
-            active_uid, active_tid = wechat_active_target_ids(args, target_user, author_targets, thread_targets)
+            active_uid, active_tid = wechat_active_target_ids(args, target_user, author_targets, thread_targets) if is_wechat_channel(args) else (args.default_author_id, args.default_tid)
             push_channel_raw_text(args, wechat_start_text(args.default_author_id, args.default_tid, author_targets, thread_targets, active_uid, active_tid))
             return
         push_feishu_card(args, start_form_card(args.default_author_id, args.default_tid))
         return
     if command.action == "setting":
         manager = ai_manager_for_args(args)
-        if is_wechat_channel(args):
+        if is_wechat_channel(args) or is_dingtalk_channel(args):
             target_user = str(getattr(args, "wechat_bot_target_user_id", "") or "").strip()
-            if target_user:
+            if target_user and is_wechat_channel(args):
                 wechat_bot.WeChatMenuState(wechat_client_for_args(args).config.state_dir).set(target_user, "setting")
             push_channel_raw_text(args, wechat_settings_text(args, manager))
             return
@@ -5078,7 +5306,7 @@ def run_bot_command(args: argparse.Namespace, command: BotCommand) -> None:
         file_name = command_pack_file_name(command, len(posts))
         push_channel_file(args, file_name, posts_to_txt(posts, title))
     else:
-        if not is_wechat_channel(args) and args.message_format == "card" and len(posts) > 20:
+        if bot_channel(args) == "feishu" and args.message_format == "card" and len(posts) > 20:
             creds = feishu_credentials(args)
             for start in range(0, len(posts), 20):
                 chunk = posts[start : start + 20]
@@ -5220,6 +5448,15 @@ def command_channel_args(args: argparse.Namespace) -> list[argparse.Namespace]:
         if key not in seen:
             seen.add(key)
             channels.append(cloned)
+    for profile in dingtalk_bot_profiles(args):
+        if not (profile.client_id and profile.client_secret):
+            continue
+        cloned = args_for_configured_route(args, route_channel="dingtalk", route_profile_id=profile.id)
+        cloned.ws_no_watch = True
+        key = ("dingtalk", profile.client_id)
+        if key not in seen:
+            seen.add(key)
+            channels.append(cloned)
     return channels
 
 
@@ -5249,6 +5486,9 @@ def start_multi_channel(args: argparse.Namespace) -> None:
     for scoped_args in command_channel_args(args):
         if is_wechat_channel(scoped_args):
             threading.Thread(target=start_wechat_poll, args=(scoped_args,), daemon=True).start()
+            started += 1
+        elif is_dingtalk_channel(scoped_args):
+            threading.Thread(target=start_dingtalk_stream, args=(scoped_args,), daemon=True).start()
             started += 1
         else:
             threading.Thread(target=start_ws, args=(scoped_args,), daemon=True).start()
@@ -5466,6 +5706,10 @@ def send_test_message(args: argparse.Namespace) -> None:
         push_channel_posts(args, [post], "NGA Wolf Watcher test message")
         print("Test message sent.")
         return
+    if is_dingtalk_channel(args):
+        push_channel_posts(args, [post], "NGA Wolf Watcher test message")
+        print("Test message sent.")
+        return
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     if app_id and app_secret and receive_id:
         push_feishu_app_posts(
@@ -5488,6 +5732,10 @@ def push_deferred_summary_direct(args: argparse.Namespace, posts: list[NgaPost],
     if not posts:
         return
     if is_wechat_channel(args):
+        title = f"Quiet-hours summary ({len(posts)} posts)"
+        push_channel_posts(args, posts, title)
+        return
+    if is_dingtalk_channel(args):
         title = f"Quiet-hours summary ({len(posts)} posts)"
         push_channel_posts(args, posts, title)
         return
@@ -5548,6 +5796,9 @@ def push_deferred_summary(args: argparse.Namespace, posts: list[NgaPost]) -> Non
 def push_single_channel_post(args: argparse.Namespace, post: NgaPost, mention_user_id: str = "") -> None:
     if is_wechat_channel(args):
         push_channel_raw_text(args, wechat_posts_text([post], new_reply_title(post)))
+        return
+    if is_dingtalk_channel(args):
+        push_channel_posts(args, [post], new_reply_title(post))
         return
     if is_email_channel(args):
         push_channel_posts(args, [post], new_reply_title(post))
@@ -6232,6 +6483,113 @@ def handle_wechat_commands(args: argparse.Namespace) -> bool:
     return changed
 
 
+def dingtalk_handled_state_path(args: argparse.Namespace) -> Path:
+    return dingtalk_client_for_args(args).config.state_dir / "handled_messages.json"
+
+
+def dingtalk_is_handled(args: argparse.Namespace, message_id: str) -> bool:
+    data = read_json(dingtalk_handled_state_path(args), {"handled": []})
+    handled = data.get("handled", []) if isinstance(data, dict) else []
+    return str(message_id) in {str(item) for item in handled}
+
+
+def dingtalk_mark_handled(args: argparse.Namespace, message_id: str) -> None:
+    path = dingtalk_handled_state_path(args)
+    data = read_json(path, {"handled": []})
+    if not isinstance(data, dict):
+        data = {"handled": []}
+    handled = [str(item) for item in data.get("handled", []) if str(item)]
+    if str(message_id) not in handled:
+        handled.append(str(message_id))
+    data["handled"] = handled[-500:]
+    data["updated_at"] = int(time.time())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(path, data)
+
+
+def handle_dingtalk_message(args: argparse.Namespace, message: dingtalk_bot.DingTalkMessage) -> None:
+    if args.disable_commands or dingtalk_is_handled(args, message.message_id):
+        return
+    scoped_args = args_for_dingtalk_user(args, message.sender_id, message.session_webhook)
+    text = dingtalk_normalize_short_command(scoped_args, message.text)
+    sender_id = message.sender_id
+    try:
+        if ai_analysis.parse_ai_command(text) is not None:
+            enqueue_ai_direct_job(
+                scoped_args,
+                f"DingTalk message:{message.message_id} /ai",
+                lambda scoped_args=scoped_args, text=text, sender_id=sender_id: run_ai_command(
+                    scoped_args,
+                    text,
+                    sender_id,
+                    [],
+                    [],
+                ),
+            )
+        else:
+            author_targets = watch_author_targets(scoped_args)
+            thread_targets = preset_thread_targets(scoped_args)
+            command = parse_bot_command(text, args.default_author_id, args.default_tid, author_targets, thread_targets, args.default_author_id, args.default_tid)
+            if command is not None:
+                run_command_background(scoped_args, command, f"DingTalk message:{message.message_id}")
+            elif should_forward_plain_text_to_ai(scoped_args, text, sender_id, [], []):
+                manager = ai_manager_for_args(scoped_args)
+                if manager.effective_enabled() and manager.is_authorized(sender_id):
+                    enqueue_ai_direct_job(
+                        scoped_args,
+                        f"DingTalk message:{message.message_id} AI conversation",
+                        lambda scoped_args=scoped_args, text=text, sender_id=sender_id: run_ai_plain_text(
+                            scoped_args,
+                            text,
+                            sender_id,
+                            [],
+                            [],
+                        ),
+                    )
+    except Exception as exc:
+        print(f"DingTalk message handling failed {message.message_id}: {exc}", file=sys.stderr)
+        try:
+            push_channel_text(scoped_args, "DingTalk command failed", str(exc))
+        except Exception as nested:
+            print(f"Failed to send DingTalk error message: {nested}", file=sys.stderr)
+    finally:
+        dingtalk_mark_handled(args, message.message_id)
+
+
+def start_dingtalk_stream(args: argparse.Namespace) -> None:
+    if not getattr(args, "ws_no_watch", False):
+        def watch_loop() -> None:
+            service_unavailable_failures = 0
+            while True:
+                round_error: Exception | None = None
+                try:
+                    run_once(args)
+                    maybe_run_ai_schedule(args)
+                    service_unavailable_failures = 0
+                except Exception as exc:
+                    round_error = exc
+                    if is_nga_service_unavailable(exc):
+                        service_unavailable_failures += 1
+                    else:
+                        service_unavailable_failures = 0
+                    print(f"NGA watch loop failed: {exc}", file=sys.stderr)
+                sleep_for = watch_sleep_seconds(args, round_error, service_unavailable_failures)
+                if round_error is not None and is_nga_service_unavailable(round_error):
+                    print(f"NGA 503 backoff: next watch round in {sleep_for:.1f}s", file=sys.stderr)
+                time.sleep(sleep_for)
+
+        threading.Thread(target=watch_loop, daemon=True).start()
+
+    while True:
+        try:
+            client = dingtalk_client_for_args(args)
+            client.start_stream(lambda message: handle_dingtalk_message(args, message))
+            print("DingTalk Stream client exited, reconnecting in 5 seconds.", file=sys.stderr)
+        except Exception as exc:
+            print(f"DingTalk Stream client failed, reconnecting in 5 seconds: {exc}", file=sys.stderr)
+        time.sleep(5)
+
+
 def run_once(args: argparse.Namespace) -> int:
     cookie = args.cookie or os.getenv("NGA_COOKIE", "")
     if not cookie:
@@ -6465,8 +6823,8 @@ def run_once(args: argparse.Namespace) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Watch an NGA user's replies and push new ones to Feishu, WeChat, or email.")
-    parser.add_argument("--bot-channel", choices=["feishu", "wechat", "email"], default=os.getenv("NGA_BOT_CHANNEL", "feishu"))
+    parser = argparse.ArgumentParser(description="Watch an NGA user's replies and push new ones to Feishu, WeChat, DingTalk, or email.")
+    parser.add_argument("--bot-channel", choices=["feishu", "wechat", "dingtalk", "email"], default=os.getenv("NGA_BOT_CHANNEL", "feishu"))
     parser.add_argument("--author-id", default=os.getenv("NGA_AUTHOR_ID", DEFAULT_AUTHOR_ID))
     parser.add_argument("--author-ids", default=os.getenv("NGA_AUTHOR_IDS", ""), help="Comma or newline separated NGA user IDs to watch. Supports id=label.")
     parser.add_argument("--watch-mode", choices=["author", "thread_author", "both"], default=os.getenv("NGA_WATCH_MODE", "author"))
@@ -6534,6 +6892,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wechat-bot-state-dir", default=os.getenv("WECHAT_BOT_STATE_DIR", ""))
     parser.add_argument("--wechat-bot-profiles", default=os.getenv("WECHAT_BOT_PROFILES", ""))
     parser.add_argument("--wechat-poll", action="store_true", help="使用微信 ilink 长轮询接收消息。bot_channel=wechat 时会自动启用。")
+    parser.add_argument("--dingtalk-client-id", default=os.getenv("DINGTALK_CLIENT_ID", ""), help="DingTalk Stream client id / app key.")
+    parser.add_argument("--dingtalk-client-secret", default=os.getenv("DINGTALK_CLIENT_SECRET", ""), help="DingTalk Stream client secret / app secret.")
+    parser.add_argument("--dingtalk-robot-code", default=os.getenv("DINGTALK_ROBOT_CODE", ""), help="DingTalk robotCode for proactive one-to-one robot messages.")
+    parser.add_argument("--dingtalk-target-user-ids", default=os.getenv("DINGTALK_TARGET_USER_IDS", ""), help="Comma separated DingTalk user ids for proactive pushes.")
+    parser.add_argument("--dingtalk-allowed-user-ids", default=os.getenv("DINGTALK_ALLOWED_USER_IDS", ""), help="Comma separated DingTalk sender ids allowed to use commands. Empty allows all.")
+    parser.add_argument("--dingtalk-account-id", default=os.getenv("DINGTALK_ACCOUNT_ID", "default"))
+    parser.add_argument("--dingtalk-state-dir", default=os.getenv("DINGTALK_STATE_DIR", ""))
+    parser.add_argument("--dingtalk-session-webhook", default="")
+    parser.add_argument("--dingtalk-bot-profiles", default=os.getenv("DINGTALK_BOT_PROFILES", ""))
     parser.add_argument("--email-smtp-profiles", default=os.getenv("EMAIL_SMTP_PROFILES", "") or os.getenv("GMAIL_SMTP_PROFILES", ""))
     parser.add_argument("--email-smtp-host", default=os.getenv("EMAIL_SMTP_HOST", email_channel.DEFAULT_SMTP_HOST))
     parser.add_argument("--email-smtp-port", type=int, default=int(os.getenv("EMAIL_SMTP_PORT", str(email_channel.DEFAULT_SMTP_PORT))))
@@ -6626,6 +6993,9 @@ def main() -> None:
     if is_wechat_channel(args) and not args.once:
         start_wechat_poll(args)
         return
+    if is_dingtalk_channel(args) and not args.once:
+        start_dingtalk_stream(args)
+        return
 
     service_unavailable_failures = 0
     while True:
@@ -6636,6 +7006,8 @@ def main() -> None:
             try:
                 if is_wechat_channel(args):
                     changed = handle_wechat_commands(args)
+                elif is_dingtalk_channel(args):
+                    changed = False
                 elif is_email_channel(args):
                     changed = False
                 else:
