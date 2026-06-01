@@ -218,6 +218,12 @@ def parse_stream_message(raw: dict[str, Any]) -> DingTalkMessage | None:
     if not text and isinstance(raw.get("content"), dict):
         content = raw["content"]
         text = str(content.get("text") or content.get("content") or "").strip()
+        if not text and isinstance(content.get("markdown"), dict):
+            markdown = content["markdown"]
+            text = str(markdown.get("text") or markdown.get("content") or "").strip()
+        if not text and isinstance(content.get("richText"), dict):
+            rich_text = content["richText"]
+            text = str(rich_text.get("text") or rich_text.get("content") or "").strip()
     sender_id = str(raw.get("senderStaffId") or raw.get("senderId") or raw.get("senderNick") or "").strip()
     return DingTalkMessage(
         message_id=str(raw.get("msgId") or raw.get("msg_id") or raw.get("messageId") or f"dingtalk-{int(time.time() * 1000)}"),
