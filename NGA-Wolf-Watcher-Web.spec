@@ -30,7 +30,7 @@ datas = [
 binaries = []
 hiddenimports = ['Crypto.Cipher.AES']
 
-for package in ('lark_oapi', 'customtkinter', 'webview', 'pystray', 'PIL'):
+for package in ('lark_oapi', 'customtkinter', 'webview', 'pystray', 'PIL', 'dingtalk_stream'):
     tmp_ret = collect_all(package)
     datas += tmp_ret[0]
     binaries += tmp_ret[1]

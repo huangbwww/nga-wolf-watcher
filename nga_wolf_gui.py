@@ -53,6 +53,8 @@ ROUTE_CHANNEL_LABELS = {
     "inherit": "继承默认",
     "feishu": "飞书",
     "wechat": "微信",
+    "dingtalk": "钉钉",
+    "email": "邮箱",
 }
 ROUTE_CHANNEL_VALUES = {label: value for value, label in ROUTE_CHANNEL_LABELS.items()}
 
@@ -91,6 +93,14 @@ DEFAULT_CONFIG = {
     "wechat_bot_route_tag": "",
     "wechat_bot_account_id": "default",
     "wechat_bot_profiles": "[]",
+    "dingtalk_client_id": "",
+    "dingtalk_client_secret": "",
+    "dingtalk_robot_code": "",
+    "dingtalk_target_user_ids": "",
+    "dingtalk_allowed_user_ids": "",
+    "dingtalk_account_id": "default",
+    "dingtalk_state_dir": "",
+    "dingtalk_bot_profiles": "[]",
     "email_smtp_host": "smtp.gmail.com",
     "email_smtp_port": "587",
     "email_smtp_security": "starttls",
@@ -337,6 +347,8 @@ def ensure_profile_id(prefix: str, profile: dict[str, Any]) -> str:
         return nga_feishu_watch.stable_profile_id("feishu", str(profile.get("app_id") or ""), str(profile.get("label") or ""))
     if prefix == "email":
         return nga_feishu_watch.stable_profile_id("email", str(profile.get("username") or ""), str(profile.get("from_email") or ""), str(profile.get("label") or ""))
+    if prefix == "dingtalk":
+        return nga_feishu_watch.stable_profile_id("dingtalk", str(profile.get("account_id") or "default"), str(profile.get("client_id") or ""), str(profile.get("label") or ""))
     return nga_feishu_watch.stable_profile_id("wechat", str(profile.get("account_id") or "default"), str(profile.get("token") or "")[:16])
 
 
@@ -401,6 +413,38 @@ def load_wechat_profiles(config: dict[str, object]) -> list[dict[str, Any]]:
     ]
 
 
+def load_dingtalk_profiles(config: dict[str, object]) -> list[dict[str, Any]]:
+    profiles = json_list_config(config, "dingtalk_bot_profiles")
+    for profile in profiles:
+        profile["id"] = ensure_profile_id("dingtalk", profile)
+        profile.setdefault("label", "")
+        profile.setdefault("client_id", "")
+        profile.setdefault("client_secret", "")
+        profile.setdefault("robot_code", "")
+        profile.setdefault("target_user_ids", "")
+        profile.setdefault("allowed_user_ids", "")
+        profile.setdefault("account_id", "default")
+    if profiles:
+        return profiles
+    client_id = str(config.get("dingtalk_client_id") or "").strip()
+    client_secret = str(config.get("dingtalk_client_secret") or "").strip()
+    robot_code = str(config.get("dingtalk_robot_code") or "").strip()
+    if not (client_id or client_secret or robot_code):
+        return []
+    return [
+        {
+            "id": "default",
+            "label": "默认钉钉",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "robot_code": robot_code,
+            "target_user_ids": str(config.get("dingtalk_target_user_ids") or "").strip(),
+            "allowed_user_ids": str(config.get("dingtalk_allowed_user_ids") or "").strip(),
+            "account_id": str(config.get("dingtalk_account_id") or "default").strip() or "default",
+        }
+    ]
+
+
 def load_email_profiles(config: dict[str, object]) -> list[dict[str, Any]]:
     profiles = json_list_config(config, "email_smtp_profiles")
     for profile in profiles:
@@ -441,6 +485,7 @@ def load_push_targets(
     config: dict[str, object],
     feishu_profiles: list[dict[str, Any]],
     wechat_profiles: list[dict[str, Any]],
+    dingtalk_profiles: list[dict[str, Any]] | None = None,
     email_profiles: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     targets = json_list_config(config, "push_targets")
@@ -479,6 +524,20 @@ def load_push_targets(
                 "channel": "wechat",
                 "profile_id": str(wechat_profiles[0].get("id") or "default"),
                 "receive_id": target_user,
+                "id_type": "user_id",
+                "default_author_id": str(config.get("default_author_id") or ""),
+                "default_tid": str(config.get("default_tid") or ""),
+            }
+        )
+    dingtalk_targets = str(config.get("dingtalk_target_user_ids") or "").strip()
+    if dingtalk_profiles and dingtalk_targets:
+        fallback.append(
+            {
+                "id": "default_dingtalk",
+                "label": "默认钉钉",
+                "channel": "dingtalk",
+                "profile_id": str(dingtalk_profiles[0].get("id") or "default"),
+                "receive_id": dingtalk_targets,
                 "id_type": "user_id",
                 "default_author_id": str(config.get("default_author_id") or ""),
                 "default_tid": str(config.get("default_tid") or ""),
@@ -647,6 +706,15 @@ def build_args(
         wechat_bot_account_id=str(config.get("wechat_bot_account_id") or "default").strip(),
         wechat_bot_state_dir="",
         wechat_bot_profiles=str(config.get("wechat_bot_profiles") or "").strip(),
+        dingtalk_client_id=str(config.get("dingtalk_client_id") or "").strip(),
+        dingtalk_client_secret=str(config.get("dingtalk_client_secret") or "").strip(),
+        dingtalk_robot_code=str(config.get("dingtalk_robot_code") or "").strip(),
+        dingtalk_target_user_ids=str(config.get("dingtalk_target_user_ids") or "").strip(),
+        dingtalk_allowed_user_ids=str(config.get("dingtalk_allowed_user_ids") or "").strip(),
+        dingtalk_account_id=str(config.get("dingtalk_account_id") or "default").strip(),
+        dingtalk_state_dir=str(config.get("dingtalk_state_dir") or "").strip(),
+        dingtalk_session_webhook="",
+        dingtalk_bot_profiles=str(config.get("dingtalk_bot_profiles") or "").strip(),
         email_smtp_profiles=str(config.get("email_smtp_profiles") or "").strip(),
         email_smtp_host=str(config.get("email_smtp_host") or "smtp.gmail.com").strip(),
         email_smtp_port=int_value(config, "email_smtp_port", 587),
@@ -721,14 +789,16 @@ def validate_config(
     require_cookie: bool = True,
 ) -> list[str]:
     channel = str(config.get("bot_channel") or "feishu").strip()
-    if channel not in {"feishu", "wechat", "email"}:
+    if channel not in {"feishu", "wechat", "dingtalk", "email"}:
         channel = "feishu"
     required: list[tuple[str, str]] = []
     feishu_profiles = load_feishu_profiles(config)
     wechat_profiles = load_wechat_profiles(config)
+    dingtalk_profiles = load_dingtalk_profiles(config)
     email_profiles = load_email_profiles(config)
     has_feishu_profile = any(str(profile.get("app_id") or "").strip() and str(profile.get("app_secret") or "").strip() for profile in feishu_profiles)
     has_wechat_profile = any(str(profile.get("token") or "").strip() for profile in wechat_profiles)
+    has_dingtalk_profile = any(str(profile.get("client_id") or "").strip() and str(profile.get("client_secret") or "").strip() for profile in dingtalk_profiles)
     has_email_profile = any(str(profile.get("username") or "").strip() and str(profile.get("password") or "").strip() for profile in email_profiles)
     push_targets = nga_feishu_watch.parse_push_targets(config.get("push_targets"))
     listen_rules = nga_feishu_watch.parse_listen_rules(config.get("listen_rules"))
@@ -749,6 +819,18 @@ def validate_config(
             required.append(("wechat_bot_target_user_id", "微信目标用户 ID"))
     if has_wechat_profile:
         required = [(key, label) for key, label in required if key not in {"wechat_bot_token", "wechat_bot_target_user_id"}]
+    if not has_structured_routes and channel == "dingtalk":
+        if not has_dingtalk_profile:
+            required.extend(
+                [
+                    ("dingtalk_client_id", "钉钉 Client ID/App Key"),
+                    ("dingtalk_client_secret", "钉钉 Client Secret/App Secret"),
+                ]
+            )
+        if require_receive_id:
+            required.append(("dingtalk_target_user_ids", "钉钉目标用户 ID"))
+    if has_dingtalk_profile:
+        required = [(key, label) for key, label in required if key not in {"dingtalk_client_id", "dingtalk_client_secret"}]
     if not has_structured_routes and channel == "email":
         if not has_email_profile:
             required.extend(
@@ -790,6 +872,14 @@ def validate_config(
                 errors.append(f"发送目标 {target.label or target.id} 未选择有效微信机器人")
             elif not str(profile.get("token") or "").strip():
                 errors.append(f"发送目标 {target.label or target.id} 的微信机器人缺少 Token")
+        elif target.channel == "dingtalk":
+            profile = next((item for item in dingtalk_profiles if str(item.get("id") or "") == target.profile_id), None)
+            if not profile:
+                errors.append(f"推送目标 {target.label or target.id} 没有可用的钉钉机器人配置")
+            elif not (str(profile.get("client_id") or "").strip() and str(profile.get("client_secret") or "").strip()):
+                errors.append(f"推送目标 {target.label or target.id} 的钉钉机器人缺少 Client ID 或 Client Secret")
+            if not target.receive_id:
+                errors.append(f"推送目标 {target.label or target.id} 缺少钉钉目标用户 ID")
         if target.channel == "email":
             profile = next((item for item in email_profiles if str(item.get("id") or "") == target.profile_id), None)
             if not profile:
@@ -967,7 +1057,7 @@ def run_watcher_from_config(path: Path, *, ws_no_watch: bool = False) -> None:
         sys.stderr = log_handle
     try:
         channel = str(config.get("bot_channel") or "feishu").strip()
-        args = build_args(config, ws=(channel != "wechat"), ws_no_watch=ws_no_watch)
+        args = build_args(config, ws=(channel == "feishu"), ws_no_watch=ws_no_watch)
         if nga_feishu_watch.uses_structured_routes(args) and not ws_no_watch:
             print("正在启动结构化多通道监听进程。")
             nga_feishu_watch.start_multi_channel(args)
@@ -975,6 +1065,27 @@ def run_watcher_from_config(path: Path, *, ws_no_watch: bool = False) -> None:
         if channel == "wechat":
             print("正在启动微信 Bot 长轮询监听进程。")
             nga_feishu_watch.start_wechat_poll(args)
+        elif channel == "dingtalk":
+            print("正在启动钉钉 Stream 监听进程。")
+            nga_feishu_watch.start_dingtalk_stream(args)
+        elif channel == "email":
+            print("正在启动邮箱通道监听进程。")
+            service_unavailable_failures = 0
+            while True:
+                round_error: Exception | None = None
+                try:
+                    nga_feishu_watch.run_once(args)
+                    nga_feishu_watch.maybe_run_ai_schedule(args)
+                    service_unavailable_failures = 0
+                except Exception as exc:
+                    round_error = exc
+                    if nga_feishu_watch.is_nga_service_unavailable(exc):
+                        service_unavailable_failures += 1
+                    else:
+                        service_unavailable_failures = 0
+                    print(f"邮箱通道监听循环失败: {exc}", file=sys.stderr)
+                sleep_for = nga_feishu_watch.watch_sleep_seconds(args, round_error, service_unavailable_failures)
+                time.sleep(sleep_for)
         else:
             print("正在启动飞书 WebSocket 监听进程。")
             nga_feishu_watch.start_ws(args)
@@ -1015,6 +1126,13 @@ class App:
                 "wechat_bot_poll_timeout_ms",
                 "wechat_bot_route_tag",
                 "wechat_bot_account_id",
+                "dingtalk_client_id",
+                "dingtalk_client_secret",
+                "dingtalk_robot_code",
+                "dingtalk_target_user_ids",
+                "dingtalk_allowed_user_ids",
+                "dingtalk_account_id",
+                "dingtalk_state_dir",
                 "default_author_id",
                 "default_tid",
                 "watch_mode",
@@ -1053,7 +1171,7 @@ class App:
         }
         if not self.vars["feishu_id_type"].get():
             self.vars["feishu_id_type"].set("chat_id")
-        if self.vars["bot_channel"].get() not in {"feishu", "wechat"}:
+        if self.vars["bot_channel"].get() not in {"feishu", "wechat", "dingtalk", "email"}:
             self.vars["bot_channel"].set("feishu")
         if not self.vars["wechat_bot_base_url"].get():
             self.vars["wechat_bot_base_url"].set("https://ilinkai.weixin.qq.com")
@@ -1063,6 +1181,8 @@ class App:
             self.vars["wechat_bot_poll_timeout_ms"].set("35000")
         if not self.vars["wechat_bot_account_id"].get():
             self.vars["wechat_bot_account_id"].set("default")
+        if not self.vars["dingtalk_account_id"].get():
+            self.vars["dingtalk_account_id"].set("default")
         self.channel_label_var = StringVar(value=route_channel_label(self.vars["bot_channel"].get()))
 
         self.auto_init_var = BooleanVar(value=bool(self.config.get("auto_mark_seen_first_start", True)))
@@ -1102,11 +1222,13 @@ class App:
         self.selected_target_indices: dict[str, int] = {}
         self.feishu_profiles = load_feishu_profiles(self.config)
         self.wechat_profiles = load_wechat_profiles(self.config)
+        self.dingtalk_profiles = load_dingtalk_profiles(self.config)
         self.email_profiles = load_email_profiles(self.config)
-        self.push_targets = load_push_targets(self.config, self.feishu_profiles, self.wechat_profiles, self.email_profiles)
+        self.push_targets = load_push_targets(self.config, self.feishu_profiles, self.wechat_profiles, self.dingtalk_profiles, self.email_profiles)
         self.listen_rules = load_listen_rules(self.config)
         self.feishu_profile_listboxes: list[Listbox] = []
         self.wechat_profile_listboxes: list[Listbox] = []
+        self.dingtalk_profile_listboxes: list[Listbox] = []
         self.push_target_listboxes: list[Listbox] = []
         self.listen_rule_listboxes: list[Listbox] = []
         self.ai_schedule_target_frames: list[ctk.CTkFrame] = []
@@ -1295,7 +1417,7 @@ class App:
 
         ctk.CTkLabel(
             sidebar,
-            text="NGA Wolf Watcher\nv1.1.7",
+            text="NGA Wolf Watcher\nv1.2.0",
             justify="left",
             anchor="w",
             font=ctk.CTkFont(size=11),
@@ -4021,6 +4143,7 @@ class App:
             config[key] = self.target_list_config_text(key)
         config["feishu_bot_profiles"] = json.dumps(self.feishu_profiles, ensure_ascii=False, indent=2)
         config["wechat_bot_profiles"] = json.dumps(self.wechat_profiles, ensure_ascii=False, indent=2)
+        config["dingtalk_bot_profiles"] = json.dumps(getattr(self, "dingtalk_profiles", []), ensure_ascii=False, indent=2)
         config["email_smtp_profiles"] = json.dumps(getattr(self, "email_profiles", []), ensure_ascii=False, indent=2)
         config["push_targets"] = json.dumps(self.push_targets, ensure_ascii=False, indent=2)
         config["listen_rules"] = json.dumps(self.listen_rules, ensure_ascii=False, indent=2)

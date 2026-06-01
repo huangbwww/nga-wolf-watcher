@@ -2,12 +2,12 @@
 
 [English](README.md) | 中文说明
 
-监听指定 NGA 用户的回复，推送新回复到飞书、微信或邮箱，并支持通过群内命令/飞书卡片查询历史或打包成 `.txt` 文件。
+监听指定 NGA 用户的回复，推送新回复到飞书、微信、钉钉或邮箱，并支持通过群内命令/飞书卡片查询历史或打包成 `.txt` 文件。
 
 ## 功能提示
 
-- 持续监听：点击 `启动监听` 后，程序会按监听规则检查用户主页回复，或在指定帖子里筛选目标作者的新回复，并推送到选定的飞书群/微信账号。
-- 手动查询：在飞书群或微信里可以使用命令；飞书还支持卡片按钮，查询用户回复、查询帖子回复，或把结果打包成 `.txt` 文件。
+- 持续监听：点击 `启动监听` 后，程序会按监听规则检查用户主页回复，或在指定帖子里筛选目标作者的新回复，并推送到选定的飞书群、微信账号、钉钉用户或邮箱。
+- 手动查询：在飞书群、微信或钉钉里可以使用命令；飞书还支持卡片按钮，查询用户回复、查询帖子回复，或把结果打包成 `.txt` 文件。
 - 免打扰时段：可以设置一个连续的每周免打扰区间，例如周五 18:00 到周一 08:00，期间的新回复可以选择忽略，或在免打扰结束后汇总推送。
 - 可选本地 AI Agent 增强：默认关闭。开启后可保存狼大发言、调用本机 Codex / Claude Code / CodeWhale / custom 命令、在飞书群响应 `/ai` 命令，并支持盘中定时分析。
 
@@ -62,13 +62,13 @@ GUI 会把本地密钥保存到 `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`。
 
 新版推荐客户端把配置拆成几个更清晰的区域，旧配置仍会自动兼容：
 
-- `消息通道配置组`：只保存机器人账号。飞书配置组保存 App ID / App Secret，并且群组查询结果只缓存到这一组里；微信配置组保存 ilink Token、目标用户和账号标识；邮箱配置组保存用于发信的 SMTP 配置。这里配置的是“发信邮箱”，可以注册一个小号专门当发信机器人。
+- `消息通道配置组`：只保存机器人账号。飞书配置组保存 App ID / App Secret，并且群组查询结果只缓存到这一组里；微信配置组保存 ilink Token、目标用户和账号标识；钉钉配置组保存 Stream 机器人凭证和主动推送目标用户；邮箱配置组保存用于发信的 SMTP 配置。这里配置的是“发信邮箱”，可以注册一个小号专门当发信机器人。
 - `目标` / `NGA 资源库`：保存可被监听和手动查询的用户 ID、帖子 ID，飞书卡片和微信短命令会从这里取默认可选项。
-- `监听规则`：选择监听方式（用户主页监听，或固定帖子内筛选用户），再直接选择发送位置。飞书发送位置由“飞书配置组 + 群组”组成，微信发送位置选择对应微信配置组，邮箱发送位置由“邮箱发信配置组 + 收件邮箱地址”组成；真正接收提醒的邮箱在这里填写。同一条规则可以同时推送到多个目标。
+- `监听规则`：选择监听方式（用户主页监听，或固定帖子内筛选用户），再直接选择发送位置。飞书发送位置由“飞书配置组 + 群组”组成，微信发送位置选择对应微信配置组，钉钉发送位置选择对应钉钉配置组，邮箱发送位置由“邮箱发信配置组 + 收件邮箱地址”组成；真正接收提醒的邮箱在这里填写。同一条规则可以同时推送到多个目标。
 
-这样一个飞书群、一个微信账号、多个机器人、多个 NGA 用户/帖子不再混在同一个表单里。手动查询不受监听规则限制：飞书和微信里的 `/history_r`、`/pack_r`、`/history_t`、`/pack_t` 都可以查询资源库里的所有用户和帖子；短命令默认使用当前入口对应的默认用户和默认帖子。
+这样一个飞书群、一个微信账号、一个钉钉机器人、多个机器人、多个 NGA 用户/帖子不再混在同一个表单里。手动查询不受监听规则限制：飞书、微信和钉钉里的 `/history_r`、`/pack_r`、`/history_t`、`/pack_t` 都可以查询资源库里的所有用户和帖子；短命令默认使用当前入口对应的默认用户和默认帖子。
 
-AI 配置仍然是全局一份，多个飞书/微信入口会使用同一个 AI 工作目录和同一个本地 agent 队列。自动新帖分析会跟随触发的监听规则发到对应发送位置；定时分析只跑一次，然后复制发送到勾选的定时分析目标。
+AI 配置仍然是全局一份，多个飞书/微信/钉钉入口会使用同一个 AI 工作目录和同一个本地 agent 队列。自动新帖分析会跟随触发的监听规则发到对应发送位置；定时分析只跑一次，然后复制发送到勾选的定时分析目标。
 
 微信通道使用 cc-connect 同类的个人微信 ilink 网关，不是普通微信官方机器人，也不会控制桌面微信。首次使用时，需要先让目标微信账号给机器人发一条消息，程序收到消息后会缓存 `context_token`，之后才能主动推送 NGA 新回复。微信没有飞书卡片，`/setting` 会返回文本菜单和可复制命令。
 
@@ -86,6 +86,26 @@ WECHAT_BOT_ACCOUNT_ID=default
 ```
 
 微信个人号通道可能受 ilink 网关、登录状态、接口变化和账号风控影响；请自行评估平台规则和账号风险。
+
+钉钉通道使用官方 DingTalk Stream 机器人连接，不是桌面钉钉自动化。源码运行时如需接收钉钉消息，需要先安装可选依赖：
+
+```powershell
+python -m pip install dingtalk-stream
+```
+
+钉钉通道需要这些配置：
+
+```text
+NGA_BOT_CHANNEL=dingtalk
+DINGTALK_CLIENT_ID=<钉钉机器人 Client ID / App Key>
+DINGTALK_CLIENT_SECRET=<钉钉机器人 Client Secret / App Secret>
+DINGTALK_ROBOT_CODE=<主动推送用 robotCode，可为空则使用 Client ID>
+DINGTALK_TARGET_USER_IDS=<主动推送目标用户 ID，多个用逗号分隔>
+DINGTALK_ALLOWED_USER_IDS=<留空表示不限制，或逗号分隔用户 ID>
+DINGTALK_ACCOUNT_ID=default
+```
+
+钉钉里给机器人发 `/start`、`/setting`、`/history_r`、`/pack_r`、普通 AI 对话消息等，会通过 Stream 会话直接回复；NGA 新回复、免打扰汇总和定时 AI 分析属于主动推送，需要填写 `DINGTALK_TARGET_USER_IDS`，并确保钉钉应用有对应机器人主动发送权限。
 
 GUI 里可以直接点击微信配置卡片的 `扫码绑定`。程序会向 ilink 网关申请二维码，打开二维码链接并后台等待手机确认；确认成功后会自动回填 `WECHAT_BOT_TOKEN`、`WECHAT_BOT_TARGET_USER_ID`、`WECHAT_BOT_ALLOWED_USER_IDS` 和 `WECHAT_BOT_ACCOUNT_ID`。回填后点击 `保存配置` 再启动监听。
 
@@ -501,6 +521,12 @@ WECHAT_BOT_ALLOWED_USER_IDS=
 WECHAT_BOT_POLL_TIMEOUT_MS=35000
 WECHAT_BOT_ROUTE_TAG=
 WECHAT_BOT_ACCOUNT_ID=default
+DINGTALK_CLIENT_ID=
+DINGTALK_CLIENT_SECRET=
+DINGTALK_ROBOT_CODE=
+DINGTALK_TARGET_USER_IDS=
+DINGTALK_ALLOWED_USER_IDS=
+DINGTALK_ACCOUNT_ID=default
 AI_ENABLED=false
 AI_PROVIDER=codex
 AI_WORK_DIR=.ai_agent_workspace

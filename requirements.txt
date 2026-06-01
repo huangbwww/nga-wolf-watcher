@@ -4,3 +4,4 @@ pywebview
 pystray
 Pillow
 pycryptodome
+dingtalk-stream

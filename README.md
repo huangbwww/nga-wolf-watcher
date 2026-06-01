@@ -2,12 +2,12 @@
 
 English | [中文说明](README.zh-CN.md)
 
-Watch specified NGA replies, push new replies to Feishu, WeChat, or email, and use group commands / Feishu cards to fetch history or pack results into `.txt` files.
+Watch specified NGA replies, push new replies to Feishu, WeChat, DingTalk, or email, and use chat commands / Feishu cards to fetch history or pack results into `.txt` files.
 
 ## Features
 
-- Continuous monitoring: after you click `启动监听` / `Start Watcher`, the app checks author reply pages or filters target authors inside fixed threads, then pushes newly found replies to selected Feishu chats or WeChat accounts.
-- Manual actions: in Feishu or WeChat you can use commands; Feishu also supports card buttons to fetch recent user replies, fetch thread replies, or pack results into `.txt` files.
+- Continuous monitoring: after you click `启动监听` / `Start Watcher`, the app checks author reply pages or filters target authors inside fixed threads, then pushes newly found replies to selected Feishu chats, WeChat accounts, DingTalk users, or email recipients.
+- Manual actions: in Feishu, WeChat, or DingTalk you can use commands; Feishu also supports card buttons to fetch recent user replies, fetch thread replies, or pack results into `.txt` files.
 - Do-not-disturb hours: automatic monitoring can be muted for a continuous weekly range, such as Friday 18:00 to Monday 08:00. Muted replies can either be ignored or summarized after the quiet period ends.
 - Optional local AI Agent enhancement: disabled by default. When enabled, it can save wolf posts, call local Codex / Claude Code / CodeWhale / custom commands, reply to `/ai` commands in Feishu, and run scheduled intraday reviews.
 
@@ -62,13 +62,13 @@ The GUI saves local secrets under `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`.
 
 The recommended client separates configuration into clearer sections while keeping old configs compatible:
 
-- `Message channel profiles`: bot accounts only. A Feishu profile stores App ID / App Secret and caches the chat list inside that profile; a WeChat profile stores the ilink token, target user, and account id; an email profile stores SMTP settings for outbound mail. This is the sender mailbox; using a separate small mailbox as the sending bot is recommended.
+- `Message channel profiles`: bot accounts only. A Feishu profile stores App ID / App Secret and caches the chat list inside that profile; a WeChat profile stores the ilink token, target user, and account id; a DingTalk profile stores the Stream robot credentials and proactive target users; an email profile stores SMTP settings for outbound mail. This is the sender mailbox; using a separate small mailbox as the sending bot is recommended.
 - `Targets` / `NGA resources`: reusable user IDs and thread IDs for monitoring and manual fetches.
-- `Listen rules`: choose the watch source, either an author reply page or a fixed thread filtered by author, then directly select send destinations. A Feishu destination is a Feishu profile plus one chat; a WeChat destination is a WeChat profile; an email destination is an email sender profile plus recipient address. The real receiving mailbox is configured here. One rule can push to multiple destinations at the same time.
+- `Listen rules`: choose the watch source, either an author reply page or a fixed thread filtered by author, then directly select send destinations. A Feishu destination is a Feishu profile plus one chat; a WeChat destination is a WeChat profile; a DingTalk destination is a DingTalk profile; an email destination is an email sender profile plus recipient address. The real receiving mailbox is configured here. One rule can push to multiple destinations at the same time.
 
-Manual fetches are not limited by listen rules. Feishu and WeChat commands such as `/history_r`, `/pack_r`, `/history_t`, and `/pack_t` can fetch any configured user or thread. Short commands use the current entry's default user/thread when available.
+Manual fetches are not limited by listen rules. Feishu, WeChat, and DingTalk commands such as `/history_r`, `/pack_r`, `/history_t`, and `/pack_t` can fetch any configured user or thread. Short commands use the current entry's default user/thread when available.
 
-AI settings remain global. Feishu and WeChat entries share the same AI work directory and local agent queue. New-post auto analysis follows the triggering listen rule's send destinations. Scheduled analysis runs once per interval, then copies the result to the selected scheduled-analysis targets.
+AI settings remain global. Feishu, WeChat, and DingTalk entries share the same AI work directory and local agent queue. New-post auto analysis follows the triggering listen rule's send destinations. Scheduled analysis runs once per interval, then copies the result to the selected scheduled-analysis targets.
 
 The WeChat channel uses the same kind of personal-WeChat ilink gateway as cc-connect. It is not a normal official WeChat bot and it does not automate the desktop WeChat client. On first use, the target WeChat account must send one message to the bot so the watcher can cache its `context_token`; proactive NGA pushes can only be sent after that. WeChat has no Feishu cards, so `/setting` returns a plain-text menu and copyable commands.
 
@@ -86,6 +86,26 @@ WECHAT_BOT_ACCOUNT_ID=default
 ```
 
 Personal-WeChat bot access can be affected by the ilink gateway, login expiry, API changes, and account-risk controls. Check platform rules and account risk before using it.
+
+DingTalk uses the official DingTalk Stream chatbot connection. It is not desktop DingTalk automation. Source/BAT users need the optional dependency before receiving DingTalk messages:
+
+```powershell
+python -m pip install dingtalk-stream
+```
+
+DingTalk channel variables:
+
+```text
+NGA_BOT_CHANNEL=dingtalk
+DINGTALK_CLIENT_ID=<DingTalk chatbot Client ID / App Key>
+DINGTALK_CLIENT_SECRET=<DingTalk chatbot Client Secret / App Secret>
+DINGTALK_ROBOT_CODE=<robotCode for proactive sends; empty falls back to Client ID>
+DINGTALK_TARGET_USER_IDS=<target user IDs for proactive pushes, comma-separated>
+DINGTALK_ALLOWED_USER_IDS=<empty means all, or comma-separated user IDs>
+DINGTALK_ACCOUNT_ID=default
+```
+
+Messages sent to the DingTalk bot, such as `/start`, `/setting`, `/history_r`, `/pack_r`, and normal AI chat messages, are replied to through the Stream session. Proactive pushes, including new NGA replies, do-not-disturb summaries, and scheduled AI analysis, use `DINGTALK_TARGET_USER_IDS` and require the DingTalk app's robot proactive-send permission. DingTalk currently sends text/markdown rather than Feishu-style cards.
 
 In the GUI, click `扫码绑定` in the WeChat config card. The watcher requests a QR code from the ilink gateway, opens the QR link, and waits for confirmation from your phone. After confirmation, it fills `WECHAT_BOT_TOKEN`, `WECHAT_BOT_TARGET_USER_ID`, `WECHAT_BOT_ALLOWED_USER_IDS`, and `WECHAT_BOT_ACCOUNT_ID`. Save the config before starting the watcher.
 
@@ -499,6 +519,12 @@ WECHAT_BOT_ALLOWED_USER_IDS=
 WECHAT_BOT_POLL_TIMEOUT_MS=35000
 WECHAT_BOT_ROUTE_TAG=
 WECHAT_BOT_ACCOUNT_ID=default
+DINGTALK_CLIENT_ID=
+DINGTALK_CLIENT_SECRET=
+DINGTALK_ROBOT_CODE=
+DINGTALK_TARGET_USER_IDS=
+DINGTALK_ALLOWED_USER_IDS=
+DINGTALK_ACCOUNT_ID=default
 AI_ENABLED=false
 AI_PROVIDER=codex
 AI_WORK_DIR=.ai_agent_workspace

@@ -235,17 +235,19 @@ def read_json_config(path: Path) -> dict[str, Any]:
 def webui_preflight_errors(config: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     channel = str(config.get("bot_channel") or "feishu").strip().lower()
-    if channel not in {"feishu", "wechat", "email"}:
+    if channel not in {"feishu", "wechat", "dingtalk", "email"}:
         channel = "feishu"
 
     feishu_profiles = legacy.load_feishu_profiles(config)
     wechat_profiles = legacy.load_wechat_profiles(config)
+    dingtalk_profiles = legacy.load_dingtalk_profiles(config)
     email_profiles = legacy.load_email_profiles(config)
     has_feishu = any(
         str(profile.get("app_id") or "").strip() and str(profile.get("app_secret") or "").strip()
         for profile in feishu_profiles
     )
     has_wechat = any(str(profile.get("token") or "").strip() for profile in wechat_profiles)
+    has_dingtalk = any(str(profile.get("client_id") or "").strip() and str(profile.get("client_secret") or "").strip() for profile in dingtalk_profiles)
     has_email = any(
         str(profile.get("username") or "").strip() and str(profile.get("password") or "").strip()
         for profile in email_profiles
@@ -253,6 +255,9 @@ def webui_preflight_errors(config: dict[str, Any]) -> list[str]:
     if channel == "wechat":
         if not has_wechat:
             errors.append("请先配置一个微信Bot配置")
+    elif channel == "dingtalk":
+        if not has_dingtalk:
+            errors.append("请先配置一个钉钉机器人配置")
     elif channel == "email":
         if not has_email:
             errors.append("请先配置一个邮箱发信配置")
