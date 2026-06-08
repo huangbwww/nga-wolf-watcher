@@ -105,6 +105,33 @@ class DingTalkChannelTests(unittest.TestCase):
         self.assertEqual(channels[0].dingtalk_client_id, "cid")
         self.assertEqual(channels[0].dingtalk_target_user_ids, "user-1")
 
+    def test_unreferenced_dingtalk_profile_does_not_start_in_structured_routes(self) -> None:
+        args = Namespace(
+            bot_channel="feishu",
+            feishu_bot_profiles='[{"id":"fs","app_id":"app","app_secret":"secret","id_type":"chat_id"}]',
+            wechat_bot_profiles="",
+            dingtalk_bot_profiles='[{"id":"dt","client_id":"cid","client_secret":"secret","target_user_ids":"u1"}]',
+            push_targets='[{"id":"fs-target","channel":"feishu","profile_id":"fs","receive_id":"oc_xxx"}]',
+            listen_rules='[{"id":"r","mode":"thread_author","tid":"45974302","author_id":"150058","target_ids":["fs-target"]}]',
+            feishu_app_id="",
+            feishu_app_secret="",
+            feishu_receive_id="",
+            feishu_id_type="chat_id",
+            wechat_bot_token="",
+            dingtalk_client_id="",
+            dingtalk_client_secret="",
+            dingtalk_robot_code="",
+            dingtalk_target_user_ids="",
+            dingtalk_allowed_user_ids="",
+            dingtalk_account_id="default",
+            dingtalk_state_dir="",
+            email_profiles="",
+        )
+
+        channels = nga_feishu_watch.command_channel_args(args)
+
+        self.assertEqual([channel.bot_channel for channel in channels], ["feishu"])
+
     def test_dingtalk_short_commands(self) -> None:
         args = Namespace(default_author_id="150058", default_tid="45974302")
 

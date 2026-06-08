@@ -954,6 +954,20 @@ def find_push_target(args: argparse.Namespace, target_id: str) -> PushTarget | N
     return None
 
 
+def command_channel_profile_filter(args: argparse.Namespace) -> dict[str, set[str]] | None:
+    rules = configured_listen_rules(args)
+    if not rules:
+        return None
+    active: dict[str, set[str]] = {"feishu": set(), "wechat": set(), "dingtalk": set(), "email": set()}
+    for rule in rules:
+        for target_id in rule.target_ids:
+            target = find_push_target(args, target_id)
+            if target is None:
+                continue
+            active.setdefault(target.channel, set()).add(target.profile_id)
+    return active
+
+
 def push_target_for_channel_receive(args: argparse.Namespace, channel: str, receive_id: str) -> PushTarget | None:
     wanted_channel = normalize_channel(channel)
     wanted_receive = str(receive_id or "").strip()
@@ -1502,16 +1516,28 @@ def fetch_nga_thread_page(
     timeout: int,
     request_min_interval: float = DEFAULT_NGA_REQUEST_MIN_INTERVAL,
     cache_ttl: float = DEFAULT_NGA_CACHE_TTL,
+    author_id: str = "",
 ) -> dict[str, Any]:
-    query = urllib.parse.urlencode({"tid": tid, "page": str(page), "__output": "8"})
-    referer = f"https://bbs.nga.cn/read.php?tid={urllib.parse.quote(str(tid), safe='')}"
+    params = {"tid": tid, "page": str(page), "__output": "8"}
+    author_id = str(author_id or "").strip()
+    if author_id and author_id != "0":
+        params["authorid"] = author_id
+    query = urllib.parse.urlencode(params)
+    referer_params = {"tid": str(tid)}
+    if author_id and author_id != "0":
+        referer_params["authorid"] = author_id
+    referer = f"{NGA_READ_ENDPOINT}?{urllib.parse.urlencode(referer_params)}"
+    url = f"{NGA_READ_ENDPOINT}?{query}"
+    label = f"帖子 {tid} 作者 {author_id} 第 {page} 页" if author_id else f"帖子 {tid} 第 {page} 页"
+    if author_id and ai_analysis.env_bool("NGA_LOG_REQUEST_URLS", False):
+        print(f"NGA 请求 URL: {url}")
     try:
-        return fetch_nga_json(f"{NGA_READ_ENDPOINT}?{query}", cookie, timeout, f"帖子 {tid} 第 {page} 页", request_min_interval, cache_ttl, referer)
+        return fetch_nga_json(url, cookie, timeout, label, request_min_interval, cache_ttl, referer)
     except NgaTemporaryUnavailable as exc:
         if not is_truncated_nga_response_error(exc):
             raise
-        print(f"NGA 帖子 {tid} 第 {page} 页结构化响应被截断，改用 HTML 页面兜底解析。", file=sys.stderr)
-        return fetch_nga_thread_html_page(tid, page, cookie, timeout, referer)
+        print(f"NGA {label}结构化响应被截断，改用 HTML 页面兜底解析。", file=sys.stderr)
+        return fetch_nga_thread_html_page(tid, page, cookie, timeout, referer, author_id)
 
 
 def nga_json_cache_key(url: str, cookie: str) -> str:
@@ -1598,8 +1624,12 @@ def is_truncated_nga_response_error(exc: BaseException | None) -> bool:
     return False
 
 
-def fetch_nga_thread_html_page(tid: str, page: int, cookie: str, timeout: int, referer: str = "https://bbs.nga.cn/") -> dict[str, Any]:
-    query = urllib.parse.urlencode({"tid": tid, "page": str(page)})
+def fetch_nga_thread_html_page(tid: str, page: int, cookie: str, timeout: int, referer: str = "https://bbs.nga.cn/", author_id: str = "") -> dict[str, Any]:
+    params = {"tid": tid, "page": str(page)}
+    author_id = str(author_id or "").strip()
+    if author_id and author_id != "0":
+        params["authorid"] = author_id
+    query = urllib.parse.urlencode(params)
     req = urllib.request.Request(
         f"{NGA_READ_ENDPOINT}?{query}",
         headers={
@@ -2098,6 +2128,13 @@ def thread_page_count(payload: dict[str, Any]) -> int:
         return max(1, int(data.get("__PAGE", 1) or 1))
     except (TypeError, ValueError):
         return 1
+
+
+def filter_posts_by_author(posts: list[NgaPost], author_id: str) -> list[NgaPost]:
+    author_id = str(author_id or "").strip()
+    if not author_id or author_id == "0":
+        return posts
+    return [post for post in posts if str(post.author_id) == author_id]
 
 
 def feishu_sign(secret: str, timestamp: str) -> str:
@@ -4002,6 +4039,20 @@ def collect_author_seed_posts_for_ai(args: argparse.Namespace, author_id: str, l
         return []
 
 
+def collect_thread_author_seed_posts_for_ai(args: argparse.Namespace, watch: ThreadAuthorWatch) -> list[NgaPost]:
+    try:
+        posts = collect_thread_tail_with_retries(
+            args,
+            watch.tid,
+            max(1, int(getattr(args, "thread_watch_tail_count", DEFAULT_THREAD_WATCH_TAIL_COUNT) or DEFAULT_THREAD_WATCH_TAIL_COUNT)),
+            watch.author_id,
+        )
+        return [add_thread_author_source(post, watch) for post in posts]
+    except Exception as exc:
+        print(f"AI 历史初始化拉取帖内作者 {thread_author_display_name(watch)} 回复失败: {exc}", file=sys.stderr)
+        return []
+
+
 def maybe_run_ai_schedule(args: argparse.Namespace) -> None:
     try:
         recipients = ai_schedule_recipient_args(args)
@@ -5049,6 +5100,54 @@ def command_target_label(target_type: str, target_id: str, author_targets: list[
     return target_id or "未知目标"
 
 
+def thread_author_command_label(tid: str, author_id: str, author_targets: list[WatchTarget], thread_targets: list[WatchTarget]) -> str:
+    return f"{command_target_label('thread', tid, author_targets, thread_targets)} / {command_target_label('reply', author_id, author_targets, thread_targets)}"
+
+
+def configured_thread_author_tids_for_author(args: argparse.Namespace, author_id: str) -> set[str]:
+    author_id = str(author_id or "").strip()
+    tids: set[str] = set()
+    if not author_id or author_id == "0":
+        return tids
+    for rule in configured_listen_rules(args):
+        if rule.mode == "thread_author" and rule.author_id == author_id and rule.tid:
+            tids.add(rule.tid)
+    for watch in thread_author_watches(args):
+        if watch.author_id == author_id and watch.tid:
+            tids.add(watch.tid)
+    return tids
+
+
+def active_thread_id_for_command(args: argparse.Namespace) -> str:
+    try:
+        author_targets = watch_author_targets(args)
+        thread_targets = preset_thread_targets(args)
+        if is_wechat_channel(args):
+            user_id = str(getattr(args, "wechat_bot_target_user_id", "") or "").strip()
+            return wechat_active_target_ids(args, user_id, author_targets, thread_targets)[1]
+        if is_dingtalk_channel(args):
+            user_id = str(getattr(args, "dingtalk_target_user_ids", "") or "").strip()
+            return dingtalk_active_target_ids(args, user_id, author_targets, thread_targets)[1]
+    except Exception:
+        pass
+    return str(getattr(args, "default_tid", DEFAULT_TID) or "").strip()
+
+
+def thread_author_tid_for_reply_command(args: argparse.Namespace, author_id: str) -> str:
+    tids = configured_thread_author_tids_for_author(args, author_id)
+    if not tids:
+        return ""
+    active_tid = active_thread_id_for_command(args)
+    if active_tid in tids:
+        return active_tid
+    if len(tids) == 1:
+        return next(iter(tids))
+    default_tid = str(getattr(args, "default_tid", DEFAULT_TID) or "").strip()
+    if default_tid in tids:
+        return default_tid
+    return ""
+
+
 def command_range_title(command: BotCommand, post_count: int) -> str:
     if not command.days:
         return f"最新 {post_count} 条"
@@ -5656,11 +5755,19 @@ def run_bot_command(args: argparse.Namespace, command: BotCommand) -> None:
     author_targets = watch_author_targets(args)
     thread_targets = preset_thread_targets(args)
     if command.target_type == "reply":
-        if command.action == "pack" and command.days:
-            posts = collect_replies_in_days_with_retries(args, command.target_id, command.days)
+        thread_author_tid = thread_author_tid_for_reply_command(args, command.target_id)
+        if thread_author_tid:
+            if command.action == "pack" and command.days:
+                posts = collect_thread_in_days_with_retries(args, thread_author_tid, command.days, command.target_id)
+            else:
+                posts = collect_thread_tail_with_retries(args, thread_author_tid, command.count, command.target_id)
+            label = thread_author_command_label(thread_author_tid, command.target_id, author_targets, thread_targets)
         else:
-            posts = collect_replies_with_retries(args, command.target_id, command.count)
-        label = command_target_label(command.target_type, command.target_id, author_targets, thread_targets)
+            if command.action == "pack" and command.days:
+                posts = collect_replies_in_days_with_retries(args, command.target_id, command.days)
+            else:
+                posts = collect_replies_with_retries(args, command.target_id, command.count)
+            label = command_target_label(command.target_type, command.target_id, author_targets, thread_targets)
     elif command.target_type == "thread":
         if command.action == "pack" and command.days:
             posts = collect_thread_in_days_with_retries(args, command.target_id, command.days)
@@ -5800,8 +5907,20 @@ def prepare_lark_ws_thread_loop(lark_ws_client: Any) -> None:
 def command_channel_args(args: argparse.Namespace) -> list[argparse.Namespace]:
     channels: list[argparse.Namespace] = []
     seen: set[tuple[str, str]] = set()
+    profile_filter = command_channel_profile_filter(args)
+    primary_channel = bot_channel(args)
+
+    def should_start_profile(channel: str, profile_id: str) -> bool:
+        if channel == primary_channel:
+            return True
+        if profile_filter is None:
+            return True
+        return profile_id in profile_filter.get(channel, set())
+
     for profile in feishu_bot_profiles(args):
         if not (profile.app_id and profile.app_secret):
+            continue
+        if not should_start_profile("feishu", profile.id):
             continue
         cloned = copy.copy(args)
         cloned.bot_channel = "feishu"
@@ -5816,6 +5935,8 @@ def command_channel_args(args: argparse.Namespace) -> list[argparse.Namespace]:
     for profile in wechat_bot_profiles(args):
         if not profile.token:
             continue
+        if not should_start_profile("wechat", profile.id):
+            continue
         cloned = args_for_configured_route(args, route_channel="wechat", route_profile_id=profile.id)
         cloned.ws_no_watch = True
         key = ("wechat", profile.token)
@@ -5824,6 +5945,8 @@ def command_channel_args(args: argparse.Namespace) -> list[argparse.Namespace]:
             channels.append(cloned)
     for profile in dingtalk_bot_profiles(args):
         if not (profile.client_id and profile.client_secret):
+            continue
+        if not should_start_profile("dingtalk", profile.id):
             continue
         cloned = args_for_configured_route(args, route_channel="dingtalk", route_profile_id=profile.id)
         cloned.ws_no_watch = True
@@ -6331,24 +6454,30 @@ def collect_thread_tail(
     request_min_interval: float = DEFAULT_NGA_REQUEST_MIN_INTERVAL,
     cache_ttl: float = DEFAULT_NGA_CACHE_TTL,
     allow_partial: bool = False,
+    author_id: str = "",
 ) -> list[NgaPost]:
-    first_payload = with_retries(
+    author_id = str(author_id or "").strip()
+    label_prefix = f"NGA 帖子 {tid} 作者 {author_id}" if author_id else f"NGA 帖子 {tid}"
+    page_count_payload = with_retries(
         f"NGA 帖子 {tid} 页数",
         attempts,
         retry_initial_delay,
         retry_delay,
         lambda: fetch_nga_thread_page(tid, 1, cookie, timeout, request_min_interval, cache_ttl),
     )
-    last_page = thread_page_count(first_payload)
-    if last_page > 1:
+    last_page = thread_page_count(page_count_payload)
+    if author_id or last_page > 1:
         first_payload = with_retries(
-            f"NGA 帖子 {tid} 最新页",
+            f"{label_prefix} 最新页",
             attempts,
             retry_initial_delay,
             retry_delay,
-            lambda: fetch_nga_thread_page(tid, last_page, cookie, timeout, request_min_interval, cache_ttl),
+            lambda: fetch_nga_thread_page(tid, last_page, cookie, timeout, request_min_interval, cache_ttl, author_id),
         )
+    else:
+        first_payload = page_count_payload
     first_posts, _ = extract_thread_posts(first_payload)
+    first_posts = filter_posts_by_author(first_posts, author_id)
 
     posts_by_page: list[NgaPost] = list(first_posts)
     page = last_page - 1
@@ -6356,11 +6485,11 @@ def collect_thread_tail(
         sleep_between_nga_pages(page_delay)
         try:
             payload = with_retries(
-                f"NGA 帖子 {tid} 第 {page} 页",
+                f"{label_prefix} 第 {page} 页",
                 attempts,
                 retry_initial_delay,
                 retry_delay,
-                lambda page=page: fetch_nga_thread_page(tid, page, cookie, timeout, request_min_interval, cache_ttl),
+                lambda page=page: fetch_nga_thread_page(tid, page, cookie, timeout, request_min_interval, cache_ttl, author_id),
             )
         except Exception as exc:
             if allow_partial and posts_by_page and is_nga_temporary_unavailable(exc):
@@ -6368,6 +6497,7 @@ def collect_thread_tail(
                 break
             raise
         page_posts, _ = extract_thread_posts(payload)
+        page_posts = filter_posts_by_author(page_posts, author_id)
         posts_by_page = page_posts + posts_by_page
         page -= 1
     return posts_by_page[-count:]
@@ -6386,15 +6516,18 @@ def collect_thread_in_natural_days(
     cache_ttl: float = DEFAULT_NGA_CACHE_TTL,
     allow_partial: bool = False,
     max_pages: int = DEFAULT_DAILY_PACK_MAX_PAGES,
+    author_id: str = "",
 ) -> list[NgaPost]:
-    first_payload = with_retries(
+    author_id = str(author_id or "").strip()
+    label_prefix = f"NGA 帖子 {tid} 作者 {author_id}" if author_id else f"NGA 帖子 {tid}"
+    page_count_payload = with_retries(
         f"NGA 帖子 {tid} 页数",
         attempts,
         retry_initial_delay,
         retry_delay,
         lambda: fetch_nga_thread_page(tid, 1, cookie, timeout, request_min_interval, cache_ttl),
     )
-    last_page = thread_page_count(first_payload)
+    last_page = thread_page_count(page_count_payload)
     posts: list[NgaPost] = []
     max_pages = max(1, int(max_pages))
     checked_pages = 0
@@ -6402,18 +6535,18 @@ def collect_thread_in_natural_days(
         if checked_pages >= max_pages:
             break
         checked_pages += 1
-        if page == 1:
-            payload = first_payload
+        if page == 1 and not author_id:
+            payload = page_count_payload
         else:
             if checked_pages > 1:
                 sleep_between_nga_pages(page_delay)
             try:
                 payload = with_retries(
-                    f"NGA 帖子 {tid} 第 {page} 页",
+                    f"{label_prefix} 第 {page} 页",
                     attempts,
                     retry_initial_delay,
                     retry_delay,
-                    lambda page=page: fetch_nga_thread_page(tid, page, cookie, timeout, request_min_interval, cache_ttl),
+                    lambda page=page: fetch_nga_thread_page(tid, page, cookie, timeout, request_min_interval, cache_ttl, author_id),
                 )
             except Exception as exc:
                 if allow_partial and posts and is_nga_temporary_unavailable(exc):
@@ -6421,6 +6554,7 @@ def collect_thread_in_natural_days(
                     break
                 raise
         page_posts, _ = extract_thread_posts(payload)
+        page_posts = filter_posts_by_author(page_posts, author_id)
         matched = posts_in_natural_days(page_posts, days)
         posts = matched + posts
         print(f"日打包帖子 {tid} 第 {page}/{last_page} 页：命中 {len(matched)}/{len(page_posts)} 条，累计 {len(posts)} 条。")
@@ -6560,7 +6694,7 @@ def collect_replies_in_days_with_retries(args: argparse.Namespace, author_id: st
     )
 
 
-def collect_thread_tail_with_retries(args: argparse.Namespace, tid: str, count: int) -> list[NgaPost]:
+def collect_thread_tail_with_retries(args: argparse.Namespace, tid: str, count: int, author_id: str = "") -> list[NgaPost]:
     cookie = args.cookie or os.getenv("NGA_COOKIE", "")
     if not cookie:
         raise SystemExit("缺少 NGA_COOKIE。请从已登录 bbs.nga.cn 的浏览器会话复制 Cookie。")
@@ -6576,10 +6710,11 @@ def collect_thread_tail_with_retries(args: argparse.Namespace, tid: str, count: 
         getattr(args, "nga_request_min_interval", DEFAULT_NGA_REQUEST_MIN_INTERVAL),
         getattr(args, "nga_cache_ttl", DEFAULT_NGA_CACHE_TTL),
         True,
+        author_id,
     )
 
 
-def collect_thread_in_days_with_retries(args: argparse.Namespace, tid: str, days: int) -> list[NgaPost]:
+def collect_thread_in_days_with_retries(args: argparse.Namespace, tid: str, days: int, author_id: str = "") -> list[NgaPost]:
     cookie = args.cookie or os.getenv("NGA_COOKIE", "")
     if not cookie:
         raise SystemExit("缺少 NGA_COOKIE。请从已登录 bbs.nga.cn 的浏览器会话复制 Cookie。")
@@ -6597,6 +6732,7 @@ def collect_thread_in_days_with_retries(args: argparse.Namespace, tid: str, days
         getattr(args, "nga_cache_ttl", DEFAULT_NGA_CACHE_TTL),
         True,
         max_pages,
+        author_id,
     )
 
 
@@ -6606,17 +6742,17 @@ def collect_thread_author_watch_posts(args: argparse.Namespace, watches: list[Th
     if not watches:
         return posts, counts
     tail_count = max(1, int(getattr(args, "thread_watch_tail_count", DEFAULT_THREAD_WATCH_TAIL_COUNT) or DEFAULT_THREAD_WATCH_TAIL_COUNT))
-    by_tid: dict[str, list[ThreadAuthorWatch]] = {}
+    by_thread_author: dict[tuple[str, str], list[ThreadAuthorWatch]] = {}
     for watch in watches:
-        by_tid.setdefault(watch.tid, []).append(watch)
-    tids = list(by_tid)
-    for tid_index, tid in enumerate(tids):
-        thread_posts = collect_thread_tail_with_retries(args, tid, tail_count)
-        for watch in by_tid[tid]:
+        by_thread_author.setdefault((watch.tid, watch.author_id), []).append(watch)
+    thread_authors = list(by_thread_author)
+    for watch_index, (tid, author_id) in enumerate(thread_authors):
+        thread_posts = collect_thread_tail_with_retries(args, tid, tail_count, author_id)
+        for watch in by_thread_author[(tid, author_id)]:
             matched = [add_thread_author_source(post, watch) for post in thread_posts if str(post.author_id) == str(watch.author_id)]
             posts.extend(matched)
             counts.append((thread_author_display_name(watch), len(matched)))
-        sleep_between_watch_targets(args, tid_index, len(tids))
+        sleep_between_watch_targets(args, watch_index, len(thread_authors))
     return posts, counts
 
 
@@ -6625,25 +6761,25 @@ def collect_thread_author_startup_catchup_posts(args: argparse.Namespace, watche
     counts: list[tuple[str, int]] = []
     if not watches:
         return posts, counts
-    by_author: dict[str, list[ThreadAuthorWatch]] = {}
+    tail_count = max(1, int(getattr(args, "thread_watch_tail_count", DEFAULT_THREAD_WATCH_TAIL_COUNT) or DEFAULT_THREAD_WATCH_TAIL_COUNT))
+    by_thread_author: dict[tuple[str, str], list[ThreadAuthorWatch]] = {}
     for watch in watches:
-        by_author.setdefault(watch.author_id, []).append(watch)
-    author_ids = list(by_author)
-    for author_index, author_id in enumerate(author_ids):
+        by_thread_author.setdefault((watch.tid, watch.author_id), []).append(watch)
+    thread_authors = list(by_thread_author)
+    for watch_index, (tid, author_id) in enumerate(thread_authors):
         try:
-            author_posts = collect_posts_for_author_with_retries(args, author_id)
+            author_posts = collect_thread_tail_with_retries(args, tid, tail_count, author_id)
         except Exception as exc:
-            print(f"NGA startup catchup skipped user {author_id}; thread-author scan will continue: {exc}", file=sys.stderr)
-            for watch in by_author[author_id]:
+            print(f"NGA startup catchup skipped thread-author {tid}:{author_id}; thread-author scan will continue: {exc}", file=sys.stderr)
+            for watch in by_thread_author[(tid, author_id)]:
                 counts.append((f"{thread_author_display_name(watch)} startup catchup", 0))
-            sleep_between_watch_targets(args, author_index, len(author_ids))
+            sleep_between_watch_targets(args, watch_index, len(thread_authors))
             continue
-        watches_for_author = by_author[author_id]
-        for watch in watches_for_author:
-            matched = [add_thread_author_source(post, watch) for post in author_posts if post_tid(post) == watch.tid]
+        for watch in by_thread_author[(tid, author_id)]:
+            matched = [add_thread_author_source(post, watch) for post in author_posts if str(post.author_id) == str(watch.author_id)]
             posts.extend(matched)
             counts.append((f"{thread_author_display_name(watch)} 启动补抓", len(matched)))
-        sleep_between_watch_targets(args, author_index, len(author_ids))
+        sleep_between_watch_targets(args, watch_index, len(thread_authors))
     return posts, counts
 
 
@@ -7093,7 +7229,7 @@ def run_once(args: argparse.Namespace) -> int:
     if author_due:
         state["last_author_watch_at"] = int(time.time())
 
-    seeded_thread_author_ids: set[str] = set()
+    seeded_thread_author_keys: set[str] = set()
     if thread_watches:
         startup_catchup_done = bool(getattr(args, "_thread_author_startup_catchup_done", False))
         if not startup_catchup_done and not args.mark_seen:
@@ -7135,16 +7271,16 @@ def run_once(args: argparse.Namespace) -> int:
                 for post in watch_posts:
                     mark_post_seen(seen, post)
                 initialized_ai_posts.extend(watch_posts)
-                if watch.author_id not in seeded_thread_author_ids:
-                    initialized_ai_posts.extend(collect_author_seed_posts_for_ai(args, watch.author_id, watch.label))
-                    seeded_thread_author_ids.add(watch.author_id)
+                if watch.key not in seeded_thread_author_keys:
+                    initialized_ai_posts.extend(collect_thread_author_seed_posts_for_ai(args, watch))
+                    seeded_thread_author_keys.add(watch.key)
                 initialized_thread_author_keys.add(watch.key)
                 initialized_this_run += len(watch_posts)
                 print(f"首次监听帖内作者 {thread_author_display_name(watch)}，已把当前抓到的 {len(watch_posts)} 条回复标记为已读。")
                 continue
-            if watch.author_id not in seeded_thread_author_ids and ai_source_history_needs_backfill(args, WatchTarget(watch.author_id, watch.label)):
-                ai_backfill_posts.extend(collect_author_seed_posts_for_ai(args, watch.author_id, watch.label))
-                seeded_thread_author_ids.add(watch.author_id)
+            if watch.key not in seeded_thread_author_keys and ai_source_history_needs_backfill(args, WatchTarget(watch.author_id, watch.label)):
+                ai_backfill_posts.extend(collect_thread_author_seed_posts_for_ai(args, watch))
+                seeded_thread_author_keys.add(watch.key)
             for sourced in watch_posts:
                 identity = post_identity_key(sourced)
                 if identity in seen_in_fetch:
