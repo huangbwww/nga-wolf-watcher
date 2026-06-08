@@ -220,9 +220,11 @@ tid:uid1,uid2=label
 - Adding `receive_id=oc_xxx` reuses the main Feishu bot but pushes that thread-author combo to another group.
 - Adding `app_id/app_secret/receive_id` gives that combo its own Feishu bot.
 - `both` enables both the old user-reply watcher and the new thread-author watcher; if the same original reply is seen through both paths, it is deduplicated before pushing.
-- If you use the recommended client, listen rules can directly select multiple Feishu chats or WeChat users. The text format above is mainly kept for old configs and source users.
+- If you use the recommended client, a new listen rule can select multiple users and multiple thread presets at once, and can also select multiple Feishu chats, WeChat users, DingTalk users, or email recipients. When both users and threads are multi-selected, the client expands them as "watch each selected user in each selected thread" and saves multiple compatible low-level listen rules.
 
-Thread-author watch defaults to scanning the latest 20 thread replies every 10 seconds, while author-page watch still uses `NGA_INTERVAL`. AI history is merged by author uid: for example, `45974302:150058` and `150058=wolf` both write to `events/by_source/author_150058.jsonl`, with the thread title and listen-rule source kept in each event.
+Thread-author watch defaults to scanning the selected author's latest replies in the thread every 10 seconds. It prefers `read.php?tid=...&authorid=...`, while author-page watch still uses `NGA_INTERVAL`. AI history is merged by author uid: for example, `45974302:150058` and `150058=wolf` both write to `events/by_source/author_150058.jsonl`, with the thread title and listen-rule source kept in each event.
+
+To confirm the actual NGA URL during debugging, set `NGA_LOG_REQUEST_URLS=true` before starting the watcher. The log then prints thread-author `read.php?tid=...&authorid=...` requests. Keep it off for normal long-running use to avoid noisy logs.
 
 ### Mention Alerts
 

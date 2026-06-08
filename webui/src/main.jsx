@@ -1239,28 +1239,127 @@ function ListenRuleEditor({ rows, setRows, authorRows, threadRows, pushTargets, 
   const [targetDraft, setTargetDraft] = useState(null);
   const emptyRule = () => ({
     id: ensureId("rule", {}),
+    group_id: ensureId("rule_group", {}),
     label: "",
     mode: "thread_author",
     author_id: authorRows[0]?.id || "",
+    author_ids: authorRows[0]?.id ? [authorRows[0].id] : [],
     tid: threadRows[0]?.id || "",
+    tids: threadRows[0]?.id ? [threadRows[0].id] : [],
     target_ids: pushTargets[0]?.id ? [pushTargets[0].id] : [],
   });
-  const openAdd = () => setRuleDraft({ index: -1, row: emptyRule(), error: "" });
-  const openEdit = (index) => setRuleDraft({ index, row: { ...rows[index], target_ids: selectedTargets(rows[index]) }, error: "" });
-  const updateRow = (index, patch) => setRows(rows.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)));
+  const openAdd = () => setRuleDraft({ indices: [], row: emptyRule(), error: "" });
   const updateRuleDraft = (patch) => setRuleDraft((current) => ({ ...current, row: { ...current.row, ...patch }, error: "" }));
-  const deleteRow = (index) => {
-    if (!confirmRemove(rows[index]?.label || ruleSource(rows[index] || {}) || "这个监听规则")) return;
-    setRows(rows.filter((_, rowIndex) => rowIndex !== index));
-  };
   const selectedTargets = (row) => (Array.isArray(row.target_ids) ? row.target_ids : []).filter(Boolean);
+  const selectedAuthors = (row) => {
+    if (Array.isArray(row.author_ids)) return row.author_ids.map((authorId) => String(authorId || "").trim()).filter(Boolean);
+    const authorId = String(row.author_id || "").trim();
+    return authorId ? [authorId] : [];
+  };
+  const selectedThreads = (row) => {
+    if (row.mode === "author") return [];
+    if (Array.isArray(row.tids)) return row.tids.map((tid) => String(tid || "").trim()).filter(Boolean);
+    const tid = String(row.tid || "").trim();
+    return tid ? [tid] : [];
+  };
+  const ruleIdentity = (row) => row.mode === "author" ? `author:${row.author_id || ""}` : `thread_author:${row.tid || ""}:${row.author_id || ""}`;
+  const authorName = (authorId) => {
+    const author = authorRows.find((item) => item.id === authorId);
+    return author ? (author.label ? `${author.label} (${author.id})` : author.id) : authorId;
+  };
+  const threadName = (threadId) => {
+    const thread = threadRows.find((item) => item.id === threadId);
+    return thread ? (thread.label ? `${thread.label} (${thread.id})` : thread.id) : threadId;
+  };
+  const toggleDraftAuthor = (authorId) => {
+    if (!ruleDraft) return;
+    const currentIds = selectedAuthors(ruleDraft.row);
+    const nextIds = currentIds.includes(authorId) ? currentIds.filter((item) => item !== authorId) : [...currentIds, authorId];
+    updateRuleDraft({ author_ids: nextIds, author_id: nextIds[0] || "" });
+  };
+  const toggleDraftThread = (threadId) => {
+    if (!ruleDraft) return;
+    const currentIds = selectedThreads(ruleDraft.row);
+    const nextIds = currentIds.includes(threadId) ? currentIds.filter((item) => item !== threadId) : [...currentIds, threadId];
+    updateRuleDraft({ tids: nextIds, tid: nextIds[0] || "" });
+  };
   const targetName = (targetId) => {
     const target = pushTargets.find((item) => item.id === targetId);
     return target ? targetLabel(target) : targetId;
   };
-  const ruleSource = (row) => row.mode === "author"
-    ? `用户主页 ${row.author_id || "-"}`
-    : `帖子 ${row.tid || "-"} / 用户 ${row.author_id || "-"}`;
+  const ruleGroups = (() => {
+    const groups = [];
+    const byKey = new Map();
+    rows.forEach((row, index) => {
+      const groupId = String(row.group_id || "").trim();
+      const key = groupId ? `group:${groupId}` : `row:${index}`;
+      let group = byKey.get(key);
+      if (!group) {
+        group = {
+          key,
+          group_id: groupId,
+          mode: row.mode || "thread_author",
+          label: row.label || "",
+          indices: [],
+          rows: [],
+          author_ids: [],
+          tids: [],
+          target_ids: [],
+        };
+        byKey.set(key, group);
+        groups.push(group);
+      }
+      group.indices.push(index);
+      group.rows.push(row);
+      if (row.label && !group.label) group.label = row.label;
+      for (const authorId of selectedAuthors(row)) {
+        if (!group.author_ids.includes(authorId)) group.author_ids.push(authorId);
+      }
+      for (const tid of selectedThreads(row)) {
+        if (!group.tids.includes(tid)) group.tids.push(tid);
+      }
+      for (const targetId of selectedTargets(row)) {
+        if (!group.target_ids.includes(targetId)) group.target_ids.push(targetId);
+      }
+    });
+    return groups;
+  })();
+  const groupSource = (group) => group.mode === "author"
+    ? `${group.author_ids.length || 0} 个用户`
+    : `${group.author_ids.length || 0} 个用户 × ${group.tids.length || 0} 个帖子`;
+  const groupTitle = (group) => {
+    if (group.label) return group.label;
+    if (group.mode === "author") {
+      return group.author_ids.length === 1 ? `用户主页 ${authorName(group.author_ids[0])}` : `${group.author_ids.length || 0} 个用户主页`;
+    }
+    if (group.author_ids.length === 1 && group.tids.length === 1) {
+      return `帖子 ${threadName(group.tids[0])} / 用户 ${authorName(group.author_ids[0])}`;
+    }
+    return groupSource(group);
+  };
+  const openEditGroup = (group) => {
+    const first = group.rows[0] || {};
+    setRuleDraft({
+      indices: group.indices,
+      row: {
+        ...first,
+        group_id: group.group_id || ensureId("rule_group", {}),
+        label: group.label || "",
+        mode: group.mode || "thread_author",
+        author_id: group.author_ids[0] || "",
+        author_ids: group.author_ids,
+        tid: group.tids[0] || "",
+        tids: group.tids,
+        target_ids: group.target_ids,
+      },
+      error: "",
+    });
+  };
+  const deleteGroup = (group) => {
+    if (!confirmRemove(groupTitle(group) || "这个监听规则")) return;
+    const indexes = new Set(group.indices);
+    setRows(rows.filter((_, rowIndex) => !indexes.has(rowIndex)));
+  };
   const openTargetDraft = () => {
     const channel = feishuProfiles.length ? "feishu" : wechatProfiles.length ? "wechat" : dingtalkProfiles.length ? "dingtalk" : "email";
     const profile = channel === "wechat" ? wechatProfiles[0] : channel === "dingtalk" ? dingtalkProfiles[0] : channel === "email" ? emailProfiles[0] : feishuProfiles[0];
@@ -1292,10 +1391,12 @@ function ListenRuleEditor({ rows, setRows, authorRows, threadRows, pushTargets, 
   const confirmRuleDraft = () => {
     if (!ruleDraft) return;
     const row = { ...ruleDraft.row };
-    row.author_id = String(row.author_id || "").trim();
-    row.tid = row.mode === "author" ? "" : String(row.tid || "").trim();
+    const authorIds = selectedAuthors(row);
+    const threadIds = row.mode === "author" ? [] : selectedThreads(row);
+    row.author_id = String(authorIds[0] || row.author_id || "").trim();
+    row.tid = row.mode === "author" ? "" : String(threadIds[0] || row.tid || "").trim();
     row.target_ids = selectedTargets(row);
-    if (!row.author_id || (row.mode !== "author" && !row.tid)) {
+    if (!authorIds.length || (row.mode !== "author" && !threadIds.length)) {
       setRuleDraft((current) => ({ ...current, error: "请填写用户和帖子。" }));
       return;
     }
@@ -1303,9 +1404,56 @@ function ListenRuleEditor({ rows, setRows, authorRows, threadRows, pushTargets, 
       setRuleDraft((current) => ({ ...current, error: "请至少添加一个发送目标。" }));
       return;
     }
-    row.id = row.id || (row.mode === "author" ? `author:${row.author_id}` : `thread_author:${row.tid}:${row.author_id}`);
-    if (ruleDraft.index >= 0) updateRow(ruleDraft.index, row);
-    else setRows([...rows, row]);
+    const groupId = String(row.group_id || "").trim() || ensureId("rule_group", {});
+    const sourcePairs = row.mode === "author"
+      ? authorIds.map((authorId) => ({ authorId, tid: "" }))
+      : threadIds.flatMap((tid) => authorIds.map((authorId) => ({ authorId, tid })));
+    const generatedRules = sourcePairs.map(({ authorId, tid }) => {
+      const nextRow = {
+        ...row,
+        id: row.mode === "author" ? `author:${authorId}` : `thread_author:${tid}:${authorId}`,
+        group_id: groupId,
+        author_id: authorId,
+        tid,
+      };
+      delete nextRow.author_ids;
+      delete nextRow.tids;
+      return nextRow;
+    });
+    const uniqueRules = [];
+    const generatedKeys = new Set();
+    for (const generated of generatedRules) {
+      const key = ruleIdentity(generated);
+      if (generatedKeys.has(key)) continue;
+      generatedKeys.add(key);
+      uniqueRules.push(generated);
+    }
+    const oldIndices = new Set(ruleDraft.indices || []);
+    if (!oldIndices.size) {
+      const existingKeys = new Set(rows.map(ruleIdentity));
+      const newRules = uniqueRules.filter((item) => !existingKeys.has(ruleIdentity(item)));
+      if (!newRules.length) {
+        setRuleDraft((current) => ({ ...current, error: "所选用户和帖子已经有相同监听规则。" }));
+        return;
+      }
+      setRows([...rows, ...newRules]);
+    } else {
+      const nextRows = [];
+      let inserted = false;
+      rows.forEach((existing, index) => {
+        if (oldIndices.has(index)) {
+          if (!inserted) {
+            nextRows.push(...uniqueRules);
+            inserted = true;
+          }
+          return;
+        }
+        if (generatedKeys.has(ruleIdentity(existing))) return;
+        nextRows.push(existing);
+      });
+      if (!inserted) nextRows.push(...uniqueRules);
+      setRows(nextRows);
+    }
     setRuleDraft(null);
   };
   return (
@@ -1319,14 +1467,14 @@ function ListenRuleEditor({ rows, setRows, authorRows, threadRows, pushTargets, 
         <IconButton icon={Plus} label="新增监听规则" kind="primary" onClick={openAdd} />
       </div>
       <div className="row-list">
-        {rows.length ? rows.map((row, index) => (
-          <div className="list-row rule-list-row" key={row.id || index}>
+        {ruleGroups.length ? ruleGroups.map((group) => (
+          <div className="list-row rule-list-row" key={group.key}>
             <div>
-              <strong>{row.label || ruleSource(row)}</strong>
-              <span>{row.mode === "author" ? "用户主页监听" : "固定帖子筛选用户"} · {ruleSource(row)} · {selectedTargets(row).length} 个发送目标</span>
+              <strong>{groupTitle(group)}</strong>
+              <span>{group.mode === "author" ? "用户主页监听" : "固定帖子筛选用户"} · {groupSource(group)} · {group.target_ids.length} 个发送目标 · {group.rows.length} 条底层规则</span>
             </div>
-            <IconButton icon={Edit3} label="编辑" kind="ghost" onClick={() => openEdit(index)} />
-            <IconButton icon={Trash2} label="删除" kind="danger" onClick={() => deleteRow(index)} />
+            <IconButton icon={Edit3} label="编辑" kind="ghost" onClick={() => openEditGroup(group)} />
+            <IconButton icon={Trash2} label="删除" kind="danger" onClick={() => deleteGroup(group)} />
           </div>
         )) : <div className="empty-row">暂无监听规则。点击 + 添加监听内容和发送目标。</div>}
       </div>
@@ -1335,7 +1483,7 @@ function ListenRuleEditor({ rows, setRows, authorRows, threadRows, pushTargets, 
           <div className="modal-card">
             <div className="editor-header">
               <div>
-                <h3>{ruleDraft.index >= 0 ? "编辑监听规则" : "新增监听规则"}</h3>
+                <h3>{(ruleDraft.indices || []).length ? "编辑监听规则" : "新增监听规则"}</h3>
                 <p>监听固定帖子筛选用户时，启动首轮会先用用户回复补抓，再进入帖子尾部扫描。</p>
               </div>
               <IconButton icon={X} label="关闭" onClick={() => setRuleDraft(null)} />
@@ -1349,14 +1497,39 @@ function ListenRuleEditor({ rows, setRows, authorRows, threadRows, pushTargets, 
                 </select>
               </label>
               <label className="field"><span>备注（非必填）</span><input value={ruleDraft.row.label || ""} onChange={(event) => updateRuleDraft({ label: event.target.value })} /></label>
-              <label className="field"><span>用户</span><select value={ruleDraft.row.author_id || ""} onChange={(event) => updateRuleDraft({ author_id: event.target.value })}>{authorRows.map((item) => <option key={item.id} value={item.id}>{item.label ? `${item.label} (${item.id})` : item.id}</option>)}</select></label>
-              <label className="field"><span>帖子</span><select disabled={ruleDraft.row.mode === "author"} value={ruleDraft.row.tid || ""} onChange={(event) => updateRuleDraft({ tid: event.target.value })}>{threadRows.map((item) => <option key={item.id} value={item.id}>{item.label ? `${item.label} (${item.id})` : item.id}</option>)}</select></label>
+              <div className="field field-wide">
+                <span>用户</span>
+                <div className="rule-thread-picker">
+                  {authorRows.length ? authorRows.map((item) => (
+                    <label key={item.id} className="check-row">
+                      <input type="checkbox" checked={selectedAuthors(ruleDraft.row).includes(item.id)} onChange={() => toggleDraftAuthor(item.id)} />
+                      <span>{authorName(item.id)}</span>
+                    </label>
+                  )) : <div className="empty-inline">暂无用户预设，请先在目标里添加用户。</div>}
+                </div>
+              </div>
+              <div className="field field-wide">
+                <span>帖子</span>
+                {ruleDraft.row.mode === "author" ? (
+                  <div className="empty-inline">用户主页监听不需要选择帖子。</div>
+                ) : (
+                  <div className="rule-thread-picker">
+                    {threadRows.length ? threadRows.map((item) => (
+                      <label key={item.id} className="check-row">
+                        <input type="checkbox" checked={selectedThreads(ruleDraft.row).includes(item.id)} onChange={() => toggleDraftThread(item.id)} />
+                        <span>{threadName(item.id)}</span>
+                      </label>
+                    )) : <div className="empty-inline">暂无帖子预设，请先在目标里添加帖子。</div>}
+                  </div>
+                )}
+              </div>
+              {ruleDraft.row.mode !== "author" ? <p className="rule-picker-note">用户和帖子都支持多选。保存时会按“每个帖子监听每个用户”的方式展开。</p> : null}
             </div>
             <div className="modal-subsection">
               <div className="editor-header compact">
                 <div>
                   <h3>发送目标</h3>
-                  <p>可以添加多个飞书群、微信账号或收件邮箱。</p>
+                  <p>可以添加多个飞书群、微信账号、钉钉用户或收件邮箱。</p>
                 </div>
                 <IconButton icon={Plus} label="添加发送目标" kind="primary" onClick={openTargetDraft} />
               </div>
