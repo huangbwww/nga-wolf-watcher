@@ -261,6 +261,36 @@ cd D:\nga-wolf
 python -m pip install lark-oapi customtkinter
 ```
 
+Linux 服务器推荐使用交互式 CLI 配置，不需要启动桌面 GUI 或 Web 管理台：
+
+```bash
+python ngawolf_cli.py init
+```
+
+之后需要修改配置时运行：
+
+```bash
+python ngawolf_cli.py config
+```
+
+常用检查和运行命令：
+
+```bash
+python ngawolf_cli.py check
+python ngawolf_cli.py mark-seen
+python ngawolf_cli.py test-send
+python ngawolf_cli.py run
+python ngawolf_cli.py run --once
+```
+
+默认配置文件是 `~/.config/ngawolf/config.json`，默认运行状态和日志目录是 `~/.local/state/ngawolf/`。部署到 systemd、Docker 或其他进程管理器时，建议使用前台运行：
+
+```bash
+python ngawolf_cli.py --config /etc/ngawolf/config.json --data-dir /var/lib/ngawolf run
+```
+
+相对状态路径会解析到 `--data-dir` 下。`init` 用于首次创建配置，`config` 会读取已有配置并逐项提示修改；留空会保留当前值，方便后续改 Cookie、监听规则或推送目标。
+
 设置必填环境变量：
 
 ```powershell

@@ -259,6 +259,36 @@ cd D:\nga-wolf
 python -m pip install lark-oapi customtkinter
 ```
 
+On a Linux server, use the interactive CLI instead of starting the desktop GUI or web manager:
+
+```bash
+python ngawolf_cli.py init
+```
+
+To update an existing config later:
+
+```bash
+python ngawolf_cli.py config
+```
+
+Common checks and runtime commands:
+
+```bash
+python ngawolf_cli.py check
+python ngawolf_cli.py mark-seen
+python ngawolf_cli.py test-send
+python ngawolf_cli.py run
+python ngawolf_cli.py run --once
+```
+
+The default config file is `~/.config/ngawolf/config.json`; default runtime state and logs live under `~/.local/state/ngawolf/`. For systemd, Docker, or another process manager, keep the watcher in foreground mode:
+
+```bash
+python ngawolf_cli.py --config /etc/ngawolf/config.json --data-dir /var/lib/ngawolf run
+```
+
+Relative state paths are resolved under `--data-dir`. Use `init` for the first config, then `config` for guided edits; pressing Enter keeps the current value, which makes Cookie, listen rule, and target updates easier later.
+
 Set required environment variables:
 
 ```powershell
