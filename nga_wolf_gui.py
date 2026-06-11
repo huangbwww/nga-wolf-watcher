@@ -19,16 +19,17 @@ import customtkinter as ctk
 
 import ai_analysis
 import nga_feishu_watch
+import nga_wolf_config
 import wechat_bot
 
 
 APP_TITLE = "NGA Wolf Watcher"
-APP_DIR_NAME = "NGA Wolf Watcher"
-CONFIG_FILE = "config.json"
-RUNTIME_CONFIG_FILE = "runtime_config.json"
-LOG_FILE = "watcher.log"
+APP_DIR_NAME = nga_wolf_config.APP_DIR_NAME
+CONFIG_FILE = nga_wolf_config.CONFIG_FILE
+RUNTIME_CONFIG_FILE = nga_wolf_config.RUNTIME_CONFIG_FILE
+LOG_FILE = nga_wolf_config.LOG_FILE
 ICON_FILE = "app_icon.ico"
-WATCHER_PID_FILE = "watcher.pid"
+WATCHER_PID_FILE = nga_wolf_config.WATCHER_PID_FILE
 LOG_POLL_MS = 1000
 MAX_LOG_LINES_PER_POLL = 200
 
@@ -290,66 +291,23 @@ def migrate_old_config() -> None:
 
 def load_config() -> dict[str, object]:
     migrate_old_config()
-    path = config_path()
-    if not path.exists():
-        return dict(DEFAULT_CONFIG)
-    try:
-        with path.open("r", encoding="utf-8-sig") as f:
-            loaded = json.load(f)
-    except Exception:
-        return dict(DEFAULT_CONFIG)
-    config = dict(DEFAULT_CONFIG)
-    if isinstance(loaded, dict):
-        config.update(loaded)
-    return config
+    return nga_wolf_config.load_config(config_path(), defaults=DEFAULT_CONFIG)
 
 
 def write_json(path: Path, value: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump(value, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    last_exc: PermissionError | None = None
-    for attempt in range(1, 8):
-        try:
-            tmp.replace(path)
-            return
-        except PermissionError as exc:
-            last_exc = exc
-            time.sleep(0.08 * attempt)
-    if last_exc is not None:
-        raise last_exc
+    nga_wolf_config.write_json(path, value)
 
 
 def save_config(config: dict[str, object]) -> None:
-    write_json(config_path(), config)
+    nga_wolf_config.save_config(config, config_path())
 
 
 def json_list_config(config: dict[str, object], key: str) -> list[dict[str, Any]]:
-    raw = config.get(key)
-    if isinstance(raw, list):
-        items = raw
-    else:
-        try:
-            value = json.loads(str(raw or "[]"))
-        except json.JSONDecodeError:
-            value = []
-        items = value if isinstance(value, list) else []
-    return [dict(item) for item in items if isinstance(item, dict)]
+    return nga_wolf_config.json_list_config(config, key)
 
 
 def ensure_profile_id(prefix: str, profile: dict[str, Any]) -> str:
-    current = str(profile.get("id") or "").strip()
-    if current:
-        return current
-    if prefix == "feishu":
-        return nga_feishu_watch.stable_profile_id("feishu", str(profile.get("app_id") or ""), str(profile.get("label") or ""))
-    if prefix == "email":
-        return nga_feishu_watch.stable_profile_id("email", str(profile.get("username") or ""), str(profile.get("from_email") or ""), str(profile.get("label") or ""))
-    if prefix == "dingtalk":
-        return nga_feishu_watch.stable_profile_id("dingtalk", str(profile.get("account_id") or "default"), str(profile.get("client_id") or ""), str(profile.get("label") or ""))
-    return nga_feishu_watch.stable_profile_id("wechat", str(profile.get("account_id") or "default"), str(profile.get("token") or "")[:16])
+    return nga_wolf_config.ensure_profile_id(prefix, profile)
 
 
 def load_feishu_profiles(config: dict[str, object]) -> list[dict[str, Any]]:
@@ -1088,6 +1046,95 @@ def run_watcher_from_config(path: Path, *, ws_no_watch: bool = False) -> None:
                 time.sleep(sleep_for)
         else:
             print("正在启动飞书 WebSocket 监听进程。")
+            nga_feishu_watch.start_ws(args)
+    except BaseException:
+        traceback.print_exc()
+        raise
+
+load_feishu_profiles = nga_wolf_config.load_feishu_profiles
+load_wechat_profiles = nga_wolf_config.load_wechat_profiles
+load_dingtalk_profiles = nga_wolf_config.load_dingtalk_profiles
+load_email_profiles = nga_wolf_config.load_email_profiles
+load_push_targets = nga_wolf_config.load_push_targets
+load_listen_rules = nga_wolf_config.load_listen_rules
+int_value = nga_wolf_config.int_value
+float_value = nga_wolf_config.float_value
+
+
+def resolved_state_path(config: dict[str, object]) -> Path:
+    return nga_wolf_config.resolved_state_path(config, data_dir=data_dir())
+
+
+def build_args(
+    config: dict[str, object],
+    *,
+    mark_seen: bool = False,
+    ws: bool = False,
+    ws_no_watch: bool = False,
+) -> Namespace:
+    return nga_wolf_config.build_args(
+        config,
+        data_dir=data_dir(),
+        mark_seen=mark_seen,
+        ws=ws,
+        ws_no_watch=ws_no_watch,
+    )
+
+
+def validate_config(
+    config: dict[str, object],
+    *,
+    require_receive_id: bool = True,
+    require_cookie: bool = True,
+) -> list[str]:
+    return nga_wolf_config.validate_config(
+        config,
+        require_receive_id=require_receive_id,
+        require_cookie=require_cookie,
+    )
+
+
+def run_watcher_from_config(path: Path, *, ws_no_watch: bool = False) -> None:
+    with path.open("r", encoding="utf-8-sig") as f:
+        config = json.load(f)
+    log_file = str(config.get("_log_path") or "")
+    if log_file:
+        log_handle = open(log_file, "a", encoding="utf-8", buffering=1)
+        sys.stdout = log_handle
+        sys.stderr = log_handle
+    try:
+        channel = str(config.get("bot_channel") or "feishu").strip()
+        args = build_args(config, ws=(channel == "feishu"), ws_no_watch=ws_no_watch)
+        if nga_feishu_watch.uses_structured_routes(args) and not ws_no_watch:
+            print("姝ｅ湪鍚姩缁撴瀯鍖栧閫氶亾鐩戝惉杩涚▼銆?")
+            nga_feishu_watch.start_multi_channel(args)
+            return
+        if channel == "wechat":
+            print("姝ｅ湪鍚姩寰俊 Bot 闀胯疆璇㈢洃鍚繘绋嬨€?")
+            nga_feishu_watch.start_wechat_poll(args)
+        elif channel == "dingtalk":
+            print("姝ｅ湪鍚姩閽夐拤 Stream 鐩戝惉杩涚▼銆?")
+            nga_feishu_watch.start_dingtalk_stream(args)
+        elif channel == "email":
+            print("姝ｅ湪鍚姩閭閫氶亾鐩戝惉杩涚▼銆?")
+            service_unavailable_failures = 0
+            while True:
+                round_error: Exception | None = None
+                try:
+                    nga_feishu_watch.run_once(args)
+                    nga_feishu_watch.maybe_run_ai_schedule(args)
+                    service_unavailable_failures = 0
+                except Exception as exc:
+                    round_error = exc
+                    if nga_feishu_watch.is_nga_service_unavailable(exc):
+                        service_unavailable_failures += 1
+                    else:
+                        service_unavailable_failures = 0
+                    print(f"閭閫氶亾鐩戝惉寰幆澶辫触: {exc}", file=sys.stderr)
+                sleep_for = nga_feishu_watch.watch_sleep_seconds(args, round_error, service_unavailable_failures)
+                time.sleep(sleep_for)
+        else:
+            print("姝ｅ湪鍚姩椋炰功 WebSocket 鐩戝惉杩涚▼銆?")
             nga_feishu_watch.start_ws(args)
     except BaseException:
         traceback.print_exc()
