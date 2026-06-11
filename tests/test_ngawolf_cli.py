@@ -224,6 +224,71 @@ def test_command_mark_seen_accepts_minimal_config_without_delivery_credentials(t
     run_once.assert_called_once_with(args)
 
 
+def test_command_mark_seen_rejects_malformed_author_selector(tmp_path: Path) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+    config = {
+        "bot_channel": "email",
+        "nga_cookie": "cookie",
+        "watch_mode": "author",
+        "watch_author_ids": "=",
+    }
+
+    with patch.object(ngawolf_cli, "load_service_config", return_value=config), patch.object(
+        ngawolf_cli.nga_feishu_watch, "run_once"
+    ) as run_once:
+        assert ngawolf_cli.command_mark_seen(paths) != 0
+
+    run_once.assert_not_called()
+
+
+def test_command_mark_seen_rejects_thread_author_mode_without_selectors(tmp_path: Path) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+    config = {
+        "bot_channel": "email",
+        "nga_cookie": "cookie",
+        "watch_mode": "thread_author",
+        "thread_author_watches": "",
+    }
+
+    with patch.object(ngawolf_cli, "load_service_config", return_value=config), patch.object(
+        ngawolf_cli.nga_feishu_watch, "run_once"
+    ) as run_once:
+        assert ngawolf_cli.command_mark_seen(paths) != 0
+
+    run_once.assert_not_called()
+
+
+def test_command_mark_seen_accepts_thread_author_watch_without_delivery_credentials(tmp_path: Path) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+    config = {
+        "bot_channel": "email",
+        "nga_cookie": "cookie",
+        "watch_mode": "thread_author",
+        "thread_author_watches": "45974302:150058",
+    }
+    args = argparse.Namespace()
+
+    with patch.object(ngawolf_cli, "load_service_config", return_value=config), patch.object(
+        ngawolf_cli, "build_service_args", return_value=args
+    ) as build_service_args, patch.object(ngawolf_cli.nga_feishu_watch, "run_once", return_value=1) as run_once:
+        assert ngawolf_cli.command_mark_seen(paths) == 0
+
+    build_service_args.assert_called_once_with(paths, config, mark_seen=True)
+    run_once.assert_called_once_with(args)
+
+
 def test_command_test_send_validates_without_cookie_and_sends_test_message(tmp_path: Path) -> None:
     paths = ngawolf_cli.CliPaths(
         config_path=tmp_path / "config.json",

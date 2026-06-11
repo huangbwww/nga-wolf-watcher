@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import getpass
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -120,16 +121,52 @@ def validate_mark_seen_config(config: dict[str, object]) -> list[str]:
     if watch_mode not in {"author", "thread_author", "both"}:
         errors.append("Watch mode must be author, thread_author, or both")
 
-    for key, label, fallback in [
-        ("watch_author_ids", "Watch author IDs", str(config.get("default_author_id") or "150058").strip() or "150058"),
-        ("preset_thread_ids", "Preset thread IDs", str(config.get("default_tid") or "45974302").strip() or "45974302"),
-    ]:
-        raw = str(config.get(key) or "").strip()
+    def validate_author_selectors() -> None:
+        raw = str(config.get("watch_author_ids") or "").strip()
+        default_author_id = str(config.get("default_author_id") or "150058").strip()
         if not raw:
-            continue
-        for target in nga_feishu_watch.parse_target_list(raw, fallback):
-            if not target.id.isdigit():
-                errors.append(f"{label} contains non-numeric ID: {target.id}")
+            if not default_author_id.isdigit():
+                errors.append("Default author ID must be numeric")
+            return
+        parsed_any = False
+        for item in re.split(r"[\r\n]+", raw):
+            for token in [part.strip() for part in re.split(r"[,，;；\s]+", item) if part.strip()]:
+                main = token.split("|", 1)[0].strip()
+                if "=" in main:
+                    raw_id = main.split("=", 1)[0].strip()
+                elif ":" in main:
+                    raw_id = main.split(":", 1)[0].strip()
+                else:
+                    raw_id = main
+                if raw_id.isdigit():
+                    parsed_any = True
+                    continue
+                errors.append(f"Watch author IDs contains non-numeric ID: {raw_id or token}")
+        if not parsed_any:
+            errors.append("Watch author IDs must contain at least one numeric ID")
+
+    def validate_thread_author_selectors() -> None:
+        raw_thread_watches = str(config.get("thread_author_watches") or "").strip()
+        raw_listen_rules = str(config.get("listen_rules") or "").strip()
+        parsed_watches = nga_feishu_watch.parse_thread_author_watches(raw_thread_watches)
+        parsed_rules = [rule for rule in nga_feishu_watch.parse_listen_rules(raw_listen_rules) if rule.mode == "thread_author"]
+        if not raw_thread_watches and not parsed_rules:
+            if watch_mode == "thread_author":
+                errors.append("Thread author watches must contain at least one valid tid:author_id rule")
+            return
+        if raw_thread_watches and not parsed_watches:
+            errors.append("Thread author watches must contain at least one valid tid:author_id rule")
+        for watch in parsed_watches:
+            if not watch.tid.isdigit() or not watch.author_id.isdigit():
+                errors.append(f"Thread author watches contains non-numeric tid:author_id pair: {watch.tid}:{watch.author_id}")
+        for rule in parsed_rules:
+            if not rule.tid.isdigit() or not rule.author_id.isdigit():
+                errors.append(f"Listen rules contains non-numeric tid:author_id pair: {rule.tid}:{rule.author_id}")
+
+    if watch_mode in {"author", "both"}:
+        validate_author_selectors()
+    if watch_mode in {"thread_author", "both"}:
+        validate_thread_author_selectors()
 
     return errors
 
