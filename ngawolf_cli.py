@@ -7,6 +7,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import nga_feishu_watch
 import nga_wolf_config
 
 
@@ -96,6 +97,20 @@ def load_existing_config_for_edit(path: Path) -> dict[str, object] | None:
     return config
 
 
+def load_service_config(paths: CliPaths) -> dict[str, object]:
+    return nga_wolf_config.load_config(paths.config_path, nga_wolf_config.DEFAULT_CONFIG)
+
+
+def build_service_args(paths: CliPaths, config: dict[str, object], mark_seen: bool = False):
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    return nga_wolf_config.build_args(config, data_dir=paths.data_dir, mark_seen=mark_seen)
+
+
+def print_validation_errors(errors: list[str]) -> None:
+    for error in errors:
+        print(error, file=sys.stderr)
+
+
 def command_init(paths: CliPaths) -> int:
     if paths.config_path.exists():
         print(f"Config already exists: {paths.config_path}", file=sys.stderr)
@@ -125,6 +140,56 @@ def command_config(paths: CliPaths) -> int:
         return 2
     nga_wolf_config.save_config(updated, paths.config_path)
     print(paths.config_path)
+    return 0
+
+
+def command_check(paths: CliPaths) -> int:
+    config = load_service_config(paths)
+    errors = nga_wolf_config.validate_config(config, require_cookie=True)
+    if errors:
+        print_validation_errors(errors)
+        return 2
+    return 0
+
+
+def command_mark_seen(paths: CliPaths) -> int:
+    config = load_service_config(paths)
+    errors = nga_wolf_config.validate_config(config, require_cookie=True)
+    if errors:
+        print_validation_errors(errors)
+        return 2
+    args = build_service_args(paths, config, mark_seen=True)
+    nga_feishu_watch.run_once(args)
+    return 0
+
+
+def command_test_send(paths: CliPaths) -> int:
+    config = load_service_config(paths)
+    errors = nga_wolf_config.validate_config(config, require_cookie=False)
+    if errors:
+        print_validation_errors(errors)
+        return 2
+    args = build_service_args(paths, config, mark_seen=False)
+    nga_feishu_watch.send_test_message(args)
+    return 0
+
+
+def command_run(paths: CliPaths, once: bool = False) -> int:
+    config = load_service_config(paths)
+    errors = nga_wolf_config.validate_config(config, require_cookie=True)
+    if errors:
+        print_validation_errors(errors)
+        return 2
+    if once:
+        args = build_service_args(paths, config, mark_seen=False)
+        setattr(args, "once", True)
+        nga_feishu_watch.run_once(args)
+        return 0
+    try:
+        nga_wolf_config.run_watcher_from_config(paths.config_path, data_dir=paths.data_dir)
+    except KeyboardInterrupt:
+        print("Watcher stopped.", file=sys.stderr)
+        return 130
     return 0
 
 
@@ -176,6 +241,14 @@ def main(argv: list[str] | None = None) -> int:
         return command_init(paths)
     if args.command == "config":
         return command_config(paths)
+    if args.command == "check":
+        return command_check(paths)
+    if args.command == "mark-seen":
+        return command_mark_seen(paths)
+    if args.command == "test-send":
+        return command_test_send(paths)
+    if args.command == "run":
+        return command_run(paths, once=getattr(args, "once", False))
     print(f"{args.command} is not implemented yet.", file=sys.stderr)
     return 2
 

@@ -1,11 +1,26 @@
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 from unittest.mock import patch
 
 import ngawolf_cli
 import nga_wolf_config
+
+
+def _valid_email_config() -> dict[str, object]:
+    config = dict(nga_wolf_config.DEFAULT_CONFIG)
+    config.update(
+        {
+            "bot_channel": "email",
+            "nga_cookie": "cookie",
+            "email_to": "receiver@example.com",
+            "email_username": "sender@example.com",
+            "email_password": "secret",
+        }
+    )
+    return config
 
 
 def test_parse_args_accepts_supported_commands() -> None:
@@ -80,6 +95,198 @@ def test_run_once_flag_is_set() -> None:
 
     assert args.command == "run"
     assert args.once is True
+
+
+def test_load_service_config_uses_shared_loader(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+    paths = ngawolf_cli.CliPaths(
+        config_path=config_path,
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+
+    with patch.object(nga_wolf_config, "load_config", return_value={"bot_channel": "email"}) as load_config:
+        assert ngawolf_cli.load_service_config(paths) == {"bot_channel": "email"}
+
+    load_config.assert_called_once_with(config_path, nga_wolf_config.DEFAULT_CONFIG)
+
+
+def test_build_service_args_creates_data_dir_and_uses_shared_builder(tmp_path: Path) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+    config = _valid_email_config()
+
+    with patch.object(nga_wolf_config, "build_args", return_value={"args": True}) as build_args:
+        result = ngawolf_cli.build_service_args(paths, config, mark_seen=True)
+
+    assert paths.data_dir.exists()
+    assert result == {"args": True}
+    build_args.assert_called_once_with(config, data_dir=paths.data_dir, mark_seen=True)
+
+
+def test_print_validation_errors_prints_each_error(capsys) -> None:
+    ngawolf_cli.print_validation_errors(["first", "second"])
+
+    captured = capsys.readouterr()
+    assert captured.err == "first\nsecond\n"
+    assert captured.out == ""
+
+
+def test_command_check_returns_non_zero_for_invalid_config(tmp_path: Path) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+
+    with patch.object(ngawolf_cli, "load_service_config", return_value=dict(nga_wolf_config.DEFAULT_CONFIG)), patch.object(
+        ngawolf_cli.nga_wolf_config, "validate_config", return_value=["missing target"]
+    ) as validate_config, patch.object(ngawolf_cli, "print_validation_errors") as print_validation_errors:
+        assert ngawolf_cli.command_check(paths) == 2
+
+    validate_config.assert_called_once_with(dict(nga_wolf_config.DEFAULT_CONFIG), require_cookie=True)
+    print_validation_errors.assert_called_once_with(["missing target"])
+
+
+def test_command_check_returns_zero_for_valid_config(tmp_path: Path) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+    config = _valid_email_config()
+
+    with patch.object(ngawolf_cli, "load_service_config", return_value=config), patch.object(
+        ngawolf_cli.nga_wolf_config, "validate_config", return_value=[]
+    ) as validate_config, patch.object(ngawolf_cli, "print_validation_errors") as print_validation_errors:
+        assert ngawolf_cli.command_check(paths) == 0
+
+    validate_config.assert_called_once_with(config, require_cookie=True)
+    print_validation_errors.assert_not_called()
+
+
+def test_command_mark_seen_validates_and_runs_once(tmp_path: Path) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+    config = _valid_email_config()
+    args = argparse.Namespace()
+
+    with patch.object(ngawolf_cli, "load_service_config", return_value=config), patch.object(
+        ngawolf_cli.nga_wolf_config, "validate_config", return_value=[]
+    ) as validate_config, patch.object(ngawolf_cli, "build_service_args", return_value=args) as build_service_args, patch.object(
+        ngawolf_cli.nga_feishu_watch, "run_once", return_value=1
+    ) as run_once:
+        assert ngawolf_cli.command_mark_seen(paths) == 0
+
+    validate_config.assert_called_once_with(config, require_cookie=True)
+    build_service_args.assert_called_once_with(paths, config, mark_seen=True)
+    run_once.assert_called_once_with(args)
+
+
+def test_command_test_send_validates_without_cookie_and_sends_test_message(tmp_path: Path) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+    config = _valid_email_config()
+    config["nga_cookie"] = ""
+    args = argparse.Namespace()
+
+    with patch.object(ngawolf_cli, "load_service_config", return_value=config), patch.object(
+        ngawolf_cli.nga_wolf_config, "validate_config", return_value=[]
+    ) as validate_config, patch.object(ngawolf_cli, "build_service_args", return_value=args) as build_service_args, patch.object(
+        ngawolf_cli.nga_feishu_watch, "send_test_message", return_value=None
+    ) as send_test_message:
+        assert ngawolf_cli.command_test_send(paths) == 0
+
+    validate_config.assert_called_once_with(config, require_cookie=False)
+    build_service_args.assert_called_once_with(paths, config, mark_seen=False)
+    send_test_message.assert_called_once_with(args)
+
+
+def test_command_run_once_validates_and_runs_once(tmp_path: Path) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+    config = _valid_email_config()
+    args = argparse.Namespace()
+
+    with patch.object(ngawolf_cli, "load_service_config", return_value=config), patch.object(
+        ngawolf_cli.nga_wolf_config, "validate_config", return_value=[]
+    ) as validate_config, patch.object(ngawolf_cli, "build_service_args", return_value=args) as build_service_args, patch.object(
+        ngawolf_cli.nga_feishu_watch, "run_once", return_value=1
+    ) as run_once:
+        assert ngawolf_cli.command_run(paths, once=True) == 0
+
+    validate_config.assert_called_once_with(config, require_cookie=True)
+    build_service_args.assert_called_once_with(paths, config, mark_seen=False)
+    run_once.assert_called_once_with(args)
+
+
+def test_command_run_long_running_delegates_to_shared_watcher(tmp_path: Path) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+    config = _valid_email_config()
+
+    with patch.object(ngawolf_cli, "load_service_config", return_value=config), patch.object(
+        ngawolf_cli.nga_wolf_config, "validate_config", return_value=[]
+    ) as validate_config, patch.object(ngawolf_cli.nga_wolf_config, "run_watcher_from_config", return_value=None) as run_watcher_from_config:
+        assert ngawolf_cli.command_run(paths, once=False) == 0
+
+    validate_config.assert_called_once_with(config, require_cookie=True)
+    run_watcher_from_config.assert_called_once_with(paths.config_path, data_dir=paths.data_dir)
+
+
+def test_command_run_long_running_handles_keyboard_interrupt(tmp_path: Path, capsys) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+    config = _valid_email_config()
+
+    with patch.object(ngawolf_cli, "load_service_config", return_value=config), patch.object(
+        ngawolf_cli.nga_wolf_config, "validate_config", return_value=[]
+    ), patch.object(ngawolf_cli.nga_wolf_config, "run_watcher_from_config", side_effect=KeyboardInterrupt):
+        assert ngawolf_cli.command_run(paths, once=False) == 130
+
+    captured = capsys.readouterr()
+    assert "stopped" in captured.err.lower()
+
+
+def test_main_dispatches_runtime_commands(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    data_dir = tmp_path / "state"
+    log_file = tmp_path / "watcher.log"
+
+    cases = [
+        ("check", "command_check"),
+        ("mark-seen", "command_mark_seen"),
+        ("test-send", "command_test_send"),
+        ("run", "command_run"),
+    ]
+    for command, handler_name in cases:
+        with patch.object(ngawolf_cli, "parse_args", return_value=argparse.Namespace(command=command, config=config_path, data_dir=data_dir, log_file=log_file)) as parse_args, patch.object(
+            ngawolf_cli, "resolve_cli_paths", return_value=ngawolf_cli.CliPaths(config_path=config_path, data_dir=data_dir, log_file=log_file)
+        ) as resolve_cli_paths, patch.object(ngawolf_cli, handler_name, return_value=0) as handler:
+            assert ngawolf_cli.main([command]) == 0
+
+        parse_args.assert_called_once_with([command])
+        resolve_cli_paths.assert_called_once()
+        handler.assert_called_once()
 
 
 def test_prompt_basic_config_keeps_existing_values_when_user_presses_enter() -> None:
