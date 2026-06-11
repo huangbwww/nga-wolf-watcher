@@ -105,7 +105,7 @@ def test_prompt_basic_config_keeps_existing_values_when_user_presses_enter() -> 
         "state_path": "state.json",
     }
 
-    with patch("builtins.input", side_effect=[""] * 19):
+    with patch("builtins.input", side_effect=[""] * 11):
         updated = ngawolf_cli.prompt_basic_config(config)
 
     assert updated == config
@@ -117,17 +117,8 @@ def test_prompt_basic_config_updates_values_when_user_enters_replacements() -> N
     inputs = [
         "wechat",
         "new-cookie",
-        "receiver@example.com",
-        "new-user@example.com",
-        "new-password",
-        "new-app-id",
-        "new-app-secret",
-        "new-chat-id",
         "new-token",
         "new-user-id",
-        "new-client-id",
-        "new-client-secret",
-        "user-1;user-2",
         "thread_author",
         "10=alpha",
         "20=beta",
@@ -141,23 +132,68 @@ def test_prompt_basic_config_updates_values_when_user_enters_replacements() -> N
 
     assert updated["bot_channel"] == "wechat"
     assert updated["nga_cookie"] == "new-cookie"
-    assert updated["email_to"] == "receiver@example.com"
-    assert updated["email_username"] == "new-user@example.com"
-    assert updated["email_password"] == "new-password"
-    assert updated["feishu_app_id"] == "new-app-id"
-    assert updated["feishu_app_secret"] == "new-app-secret"
-    assert updated["feishu_receive_id"] == "new-chat-id"
     assert updated["wechat_bot_token"] == "new-token"
     assert updated["wechat_bot_target_user_id"] == "new-user-id"
-    assert updated["dingtalk_client_id"] == "new-client-id"
-    assert updated["dingtalk_client_secret"] == "new-client-secret"
-    assert updated["dingtalk_target_user_ids"] == "user-1;user-2"
     assert updated["watch_mode"] == "thread_author"
     assert updated["watch_author_ids"] == "10=alpha"
     assert updated["preset_thread_ids"] == "20=beta"
     assert updated["interval"] == "45"
     assert updated["jitter"] == "9"
     assert updated["state_path"] == "runtime/state.json"
+
+
+def test_prompt_basic_config_prompts_only_email_fields_for_email_channel() -> None:
+    config = dict(nga_wolf_config.DEFAULT_CONFIG)
+    config.update(
+        {
+            "bot_channel": "email",
+            "nga_cookie": "cookie",
+            "email_to": "receiver@example.com",
+            "email_username": "sender@example.com",
+            "email_password": "secret",
+        }
+    )
+    prompts: list[str] = []
+
+    def record_prompt(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return ""
+
+    with patch("builtins.input", side_effect=record_prompt):
+        updated = ngawolf_cli.prompt_basic_config(config)
+
+    watch_author_default = str(nga_wolf_config.DEFAULT_CONFIG["watch_author_ids"])
+    preset_thread_default = str(nga_wolf_config.DEFAULT_CONFIG["preset_thread_ids"])
+    assert prompts == [
+        "Bot channel [email]: ",
+        "NGA cookie [hidden]: ",
+        "Email to [receiver@example.com]: ",
+        "Email username [sender@example.com]: ",
+        "Email password [hidden]: ",
+        "Watch mode [author]: ",
+        f"Watch author IDs [{watch_author_default}]: ",
+        f"Preset thread IDs [{preset_thread_default}]: ",
+        "Interval [30]: ",
+        "Jitter [20]: ",
+        "State path [.nga_seen.json]: ",
+    ]
+    assert updated["email_to"] == "receiver@example.com"
+    assert updated["email_username"] == "sender@example.com"
+    assert updated["email_password"] == "secret"
+    assert len(prompts) == 11
+
+
+def test_prompt_text_masks_existing_secret_value_in_prompt() -> None:
+    prompts: list[str] = []
+
+    def record_prompt(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return ""
+
+    with patch("builtins.input", side_effect=record_prompt):
+        assert ngawolf_cli.prompt_text("Token", "secret-value", secret=True) == "secret-value"
+
+    assert prompts == ["Token [hidden]: "]
 
 
 def test_command_init_refuses_to_overwrite_existing_config(tmp_path: Path) -> None:
@@ -209,3 +245,20 @@ def test_command_config_updates_existing_config(tmp_path: Path) -> None:
         assert ngawolf_cli.command_config(paths) == 0
 
     assert json.loads(config_path.read_text(encoding="utf-8")) == updated_config
+
+
+def test_command_config_rejects_malformed_json_without_overwriting(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    original_text = "{not valid json"
+    config_path.write_text(original_text, encoding="utf-8")
+    paths = ngawolf_cli.CliPaths(
+        config_path=config_path,
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+
+    with patch.object(ngawolf_cli, "prompt_basic_config") as prompt_basic_config:
+        assert ngawolf_cli.command_config(paths) == 2
+
+    prompt_basic_config.assert_not_called()
+    assert config_path.read_text(encoding="utf-8") == original_text
