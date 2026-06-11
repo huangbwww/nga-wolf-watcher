@@ -406,7 +406,7 @@ def load_listen_rules(config: dict[str, object]) -> list[dict[str, Any]]:
         rule.setdefault("tid", "")
         target_ids = rule.get("target_ids")
         if isinstance(target_ids, str):
-            rule["target_ids"] = [part.strip() for part in re.split(r"[,，、\s]+", target_ids) if part.strip()]
+            rule["target_ids"] = [part.strip() for part in re.split(r"[,，;；、\s]+", target_ids) if part.strip()]
         elif isinstance(target_ids, list):
             rule["target_ids"] = [str(part).strip() for part in target_ids if str(part).strip()]
         else:

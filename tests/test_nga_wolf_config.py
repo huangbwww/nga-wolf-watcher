@@ -157,6 +157,26 @@ def test_gui_and_shared_validate_config_match_original_messages() -> None:
     assert "收件邮箱" in shared_errors
 
 
+def test_load_listen_rules_splits_semicolon_separated_target_ids() -> None:
+    config = {
+        "listen_rules": json.dumps(
+            [
+                {
+                    "id": "rule-1",
+                    "mode": "thread_author",
+                    "tid": "45974302",
+                    "author_id": "150058",
+                    "target_ids": "a;b；c",
+                }
+            ]
+        )
+    }
+
+    rules = nga_wolf_config.load_listen_rules(config)
+
+    assert rules[0]["target_ids"] == ["a", "b", "c"]
+
+
 def test_gui_validate_config_delegates_to_shared_module(monkeypatch) -> None:
     sys.modules.setdefault("customtkinter", types.SimpleNamespace())
     nga_wolf_gui = importlib.import_module("nga_wolf_gui")
