@@ -58,8 +58,8 @@ DEFAULT_CONFIG = {
     "default_author_id": "150058",
     "default_tid": "45974302",
     "watch_mode": "author",
-    "watch_author_ids": "150058=鐙煎ぇ",
-    "preset_thread_ids": "45974302=鑷珛鑷己锛岀瀛︽妧鏈墦澶撮樀",
+    "watch_author_ids": "150058=狼大",
+    "preset_thread_ids": "45974302=自立自强，科学技术打头阵",
     "thread_author_watches": "",
     "push_targets": "[]",
     "listen_rules": "[]",
@@ -90,7 +90,7 @@ DEFAULT_CONFIG = {
     "ai_provider": "codex",
     "ai_work_dir": ".ai_agent_workspace",
     "ai_auto_analyze_new_post": False,
-    "ai_auto_analysis_prompt": "鏍规嵁鏈€鏂扮殑 NGA 鍥炲鍘嗗彶銆佹垜鐩墠鐨勬寔浠撲俊鎭拰瑙傚療鍒楄〃锛屽苟瀹炴椂鏌ヨ鍏紑 A 鑲¤鎯呬俊鎭紝鍒嗘瀽鐩橀潰鍙樺寲銆佹満浼氫笌椋庨櫓锛岀粰鍑烘帴涓嬫潵闇€瑕侀噸鐐硅瀵熺殑鏂瑰悜鍜屾搷浣滃缓璁€?",
+    "ai_auto_analysis_prompt": "根据最新的 NGA 回复历史、我目前的持仓信息和观察列表，并实时查询公开 A 股行情信息，分析盘面变化、机会与风险，给出接下来需要重点观察的方向和操作建议。",
     "ai_prompt_file": "",
     "ai_timeout": "300",
     "ai_codex_command": "codex",
@@ -102,7 +102,7 @@ DEFAULT_CONFIG = {
     "ai_ignore_codex_user_config": False,
     "ai_schedule_enabled": False,
     "ai_schedule_interval_minutes": "5",
-    "ai_schedule_prompt": "鏍规嵁鏈€鏂扮殑 NGA 鍥炲鍘嗗彶銆佹垜鐩墠鐨勬寔浠撲俊鎭拰瑙傚療鍒楄〃锛屽苟瀹炴椂鏌ヨ鍏紑 A 鑲¤鎯呬俊鎭紝鍒嗘瀽鐩橀潰鍙樺寲銆佹満浼氫笌椋庨櫓锛岀粰鍑烘帴涓嬫潵闇€瑕侀噸鐐硅瀵熺殑鏂瑰悜鍜屾搷浣滃缓璁€?",
+    "ai_schedule_prompt": "根据最新的 NGA 回复历史、我目前的持仓信息和观察列表，并实时查询公开 A 股行情信息，分析盘面变化、机会与风险，给出接下来需要重点观察的方向和操作建议。",
     "ai_schedule_target_ids": "",
     "ai_schedule_window_mode": "a_share",
     "ai_schedule_windows": "weekday:09:30-11:30,13:00-15:00",
@@ -587,107 +587,111 @@ def validate_config(
     channel = str(config.get("bot_channel") or "feishu").strip()
     if channel not in {"feishu", "wechat", "dingtalk", "email"}:
         channel = "feishu"
-
     required: list[tuple[str, str]] = []
     feishu_profiles = load_feishu_profiles(config)
     wechat_profiles = load_wechat_profiles(config)
     dingtalk_profiles = load_dingtalk_profiles(config)
     email_profiles = load_email_profiles(config)
-
-    has_feishu_profile = any(str(p.get("app_id") or "").strip() and str(p.get("app_secret") or "").strip() for p in feishu_profiles)
-    has_wechat_profile = any(str(p.get("token") or "").strip() for p in wechat_profiles)
-    has_dingtalk_profile = any(str(p.get("client_id") or "").strip() and str(p.get("client_secret") or "").strip() for p in dingtalk_profiles)
-    has_email_profile = any(str(p.get("username") or "").strip() and str(p.get("password") or "").strip() for p in email_profiles)
-
+    has_feishu_profile = any(str(profile.get("app_id") or "").strip() and str(profile.get("app_secret") or "").strip() for profile in feishu_profiles)
+    has_wechat_profile = any(str(profile.get("token") or "").strip() for profile in wechat_profiles)
+    has_dingtalk_profile = any(str(profile.get("client_id") or "").strip() and str(profile.get("client_secret") or "").strip() for profile in dingtalk_profiles)
+    has_email_profile = any(str(profile.get("username") or "").strip() and str(profile.get("password") or "").strip() for profile in email_profiles)
     push_targets = nga_feishu_watch.parse_push_targets(config.get("push_targets"))
     listen_rules = nga_feishu_watch.parse_listen_rules(config.get("listen_rules"))
     has_structured_routes = bool(push_targets or listen_rules)
-
     if not has_structured_routes and channel == "feishu":
         if not has_feishu_profile:
-            required.extend([("feishu_app_id", "Feishu App ID"), ("feishu_app_secret", "Feishu App Secret")])
+            required.extend(
+                [
+                    ("feishu_app_id", "Feishu App ID"),
+                    ("feishu_app_secret", "Feishu App Secret"),
+                ]
+            )
         if require_receive_id and not has_feishu_profile:
             required.append(("feishu_receive_id", "Receive ID"))
     elif not has_structured_routes and channel == "wechat":
-        required.append(("wechat_bot_token", "WeChat Bot Token"))
+        required.append(("wechat_bot_token", "微信 Bot Token"))
         if require_receive_id:
-            required.append(("wechat_bot_target_user_id", "WeChat target user ID"))
-    elif not has_structured_routes and channel == "dingtalk":
-        if not has_dingtalk_profile:
-            required.extend([("dingtalk_client_id", "DingTalk Client ID"), ("dingtalk_client_secret", "DingTalk Client Secret")])
-        if require_receive_id:
-            required.append(("dingtalk_target_user_ids", "DingTalk target user IDs"))
-    elif not has_structured_routes and channel == "email":
-        if not has_email_profile:
-            required.extend([("email_username", "email username"), ("email_password", "email password")])
-        if require_receive_id:
-            required.append(("email_to", "email recipient"))
-
+            required.append(("wechat_bot_target_user_id", "微信目标用户 ID"))
     if has_wechat_profile:
         required = [(key, label) for key, label in required if key not in {"wechat_bot_token", "wechat_bot_target_user_id"}]
+    if not has_structured_routes and channel == "dingtalk":
+        if not has_dingtalk_profile:
+            required.extend(
+                [
+                    ("dingtalk_client_id", "钉钉 Client ID/App Key"),
+                    ("dingtalk_client_secret", "钉钉 Client Secret/App Secret"),
+                ]
+            )
+        if require_receive_id:
+            required.append(("dingtalk_target_user_ids", "钉钉目标用户 ID"))
     if has_dingtalk_profile:
         required = [(key, label) for key, label in required if key not in {"dingtalk_client_id", "dingtalk_client_secret"}]
+    if not has_structured_routes and channel == "email":
+        if not has_email_profile:
+            required.extend(
+                [
+                    ("email_username", "邮箱登录账号"),
+                    ("email_password", "邮箱密码或授权码"),
+                ]
+            )
+        if require_receive_id:
+            required.append(("email_to", "收件邮箱"))
     if has_email_profile:
         required = [(key, label) for key, label in required if key not in {"email_username", "email_password"}]
     if require_cookie:
         required.append(("nga_cookie", "NGA Cookie"))
-
     errors = [label for key, label in required if not str(config.get(key) or "").strip()]
-
-    watch_mode = str(config.get("watch_mode") or "author").strip()
-    if watch_mode not in {"author", "thread_author", "both"}:
-        errors.append("watch_mode must be author, thread_author, or both")
-
     for key, label, fallback in [
-        ("watch_author_ids", "watch_author_ids", str(config.get("default_author_id") or "150058").strip()),
-        ("preset_thread_ids", "preset_thread_ids", str(config.get("default_tid") or "45974302").strip()),
+        ("watch_author_ids", "监听用户 ID 列表", str(config.get("default_author_id") or "150058").strip()),
+        ("preset_thread_ids", "帖子预设 ID 列表", str(config.get("default_tid") or "45974302").strip()),
     ]:
         for target in nga_feishu_watch.parse_target_list(config.get(key), fallback):
             if not target.id.isdigit():
-                errors.append(f"{label} contains non-numeric ID: {target.id}")
-
+                errors.append(f"{label} 包含非数字 ID：{target.id}")
+    watch_mode = str(config.get("watch_mode") or "author").strip()
+    if watch_mode not in {"author", "thread_author", "both"}:
+        errors.append("监听模式必须是 author、thread_author 或 both")
     push_target_ids = {target.id for target in push_targets}
     for target in push_targets:
         if target.channel == "feishu":
             profile = next((item for item in feishu_profiles if str(item.get("id") or "") == target.profile_id), None)
             if not profile:
-                errors.append(f"push target {target.label or target.id} is missing a valid Feishu profile")
+                errors.append(f"发送目标 {target.label or target.id} 未选择有效飞书机器人")
             elif not (str(profile.get("app_id") or "").strip() and str(profile.get("app_secret") or "").strip()):
-                errors.append(f"push target {target.label or target.id} has incomplete Feishu credentials")
+                errors.append(f"发送目标 {target.label or target.id} 的飞书机器人缺少 App ID 或 App Secret")
             if not target.receive_id:
-                errors.append(f"push target {target.label or target.id} is missing Feishu receive_id")
+                errors.append(f"发送目标 {target.label or target.id} 缺少飞书群 chat_id")
         elif target.channel == "wechat":
             profile = next((item for item in wechat_profiles if str(item.get("id") or "") == target.profile_id), None)
             if not profile:
-                errors.append(f"push target {target.label or target.id} is missing a valid WeChat profile")
+                errors.append(f"发送目标 {target.label or target.id} 未选择有效微信机器人")
             elif not str(profile.get("token") or "").strip():
-                errors.append(f"push target {target.label or target.id} has incomplete WeChat token")
+                errors.append(f"发送目标 {target.label or target.id} 的微信机器人缺少 Token")
         elif target.channel == "dingtalk":
             profile = next((item for item in dingtalk_profiles if str(item.get("id") or "") == target.profile_id), None)
             if not profile:
-                errors.append(f"push target {target.label or target.id} is missing a valid DingTalk profile")
+                errors.append(f"推送目标 {target.label or target.id} 没有可用的钉钉机器人配置")
             elif not (str(profile.get("client_id") or "").strip() and str(profile.get("client_secret") or "").strip()):
-                errors.append(f"push target {target.label or target.id} has incomplete DingTalk credentials")
+                errors.append(f"推送目标 {target.label or target.id} 的钉钉机器人缺少 Client ID 或 Client Secret")
             if not target.receive_id:
-                errors.append(f"push target {target.label or target.id} is missing DingTalk recipient")
-        elif target.channel == "email":
+                errors.append(f"推送目标 {target.label or target.id} 缺少钉钉目标用户 ID")
+        if target.channel == "email":
             profile = next((item for item in email_profiles if str(item.get("id") or "") == target.profile_id), None)
             if not profile:
-                errors.append(f"push target {target.label or target.id} is missing a valid email profile")
+                errors.append(f"推送目标 {target.label or target.id} 没有可用的邮箱发信配置")
             elif not (str(profile.get("username") or "").strip() and str(profile.get("password") or "").strip()):
-                errors.append(f"push target {target.label or target.id} has incomplete email credentials")
+                errors.append(f"推送目标 {target.label or target.id} 的邮箱发信配置缺少登录账号或密码/授权码")
             if not target.receive_id:
-                errors.append(f"push target {target.label or target.id} is missing email recipient")
-
+                errors.append(f"推送目标 {target.label or target.id} 缺少收件邮箱")
     for rule in listen_rules:
         if not rule.author_id.isdigit() or (rule.mode == "thread_author" and not rule.tid.isdigit()):
-            errors.append(f"listen rule {rule.label or rule.id} contains non-numeric NGA IDs")
+            errors.append(f"监听规则 {rule.label or rule.id} 包含非数字 NGA ID")
         if not rule.target_ids:
-            errors.append(f"listen rule {rule.label or rule.id} must reference at least one push target")
+            errors.append(f"监听规则 {rule.label or rule.id} 至少需要选择一个发送目标")
         for target_id in rule.target_ids:
             if target_id not in push_target_ids:
-                errors.append(f"listen rule {rule.label or rule.id} references missing push target {target_id}")
-
+                errors.append(f"监听规则 {rule.label or rule.id} 选择了不存在的发送目标：{target_id}")
     if not listen_rules and channel == "feishu" and require_receive_id and has_feishu_profile and not str(config.get("feishu_receive_id") or "").strip():
         routed_author_targets = nga_feishu_watch.parse_target_list(config.get("watch_author_ids"), str(config.get("default_author_id") or "150058").strip())
         routed_thread_watches = nga_feishu_watch.parse_thread_author_watches(config.get("thread_author_watches"))
@@ -697,69 +701,65 @@ def validate_config(
         if watch_mode in {"thread_author", "both"}:
             needs_default_route = needs_default_route or any(not watch.route_channel for watch in routed_thread_watches)
         if needs_default_route:
-            errors.append("default Feishu receive_id is required for unrouted watches")
-
+            errors.append("存在未单独选择通道的监听项，请填写默认飞书 Receive ID，或给这些监听项选择具体通道。")
     if not listen_rules and watch_mode in {"thread_author", "both"}:
         watches = nga_feishu_watch.parse_thread_author_watches(config.get("thread_author_watches"))
         if not watches:
-            errors.append("thread_author mode requires at least one tid:uid rule")
+            errors.append("帖内作者监听模式需要至少一条 tid:uid 规则")
         for watch in watches:
             if not watch.tid.isdigit() or not watch.author_id.isdigit():
-                errors.append(f"thread_author watch contains non-numeric IDs: {watch.tid}:{watch.author_id}")
+                errors.append(f"帖内作者规则包含非数字 ID：{watch.tid}:{watch.author_id}")
             if (watch.feishu_app_id or watch.feishu_app_secret) and not (watch.feishu_app_id and watch.feishu_app_secret and watch.feishu_receive_id):
-                errors.append(f"thread_author watch {watch.key} requires app_id, app_secret, and receive_id together")
-
+                errors.append(f"帖内作者规则 {watch.key} 使用单独飞书机器人时必须同时填写 app_id、app_secret 和 receive_id")
     for key, label in [
-        ("interval", "interval"),
-        ("jitter", "jitter"),
-        ("retries", "retries"),
-        ("retry_initial_delay", "retry_initial_delay"),
-        ("retry_delay", "retry_delay"),
-        ("nga_request_min_interval", "nga_request_min_interval"),
-        ("nga_cache_ttl", "nga_cache_ttl"),
-        ("thread_watch_tail_count", "thread_watch_tail_count"),
-        ("thread_watch_interval", "thread_watch_interval"),
-        ("timeout", "timeout"),
-        ("ai_timeout", "ai_timeout"),
-        ("ai_schedule_interval_minutes", "ai_schedule_interval_minutes"),
-        ("ai_max_feishu_chars", "ai_max_feishu_chars"),
-        ("wechat_bot_poll_timeout_ms", "wechat_bot_poll_timeout_ms"),
+        ("interval", "轮询间隔"),
+        ("jitter", "用户回复随机抖动"),
+        ("retries", "重试次数"),
+        ("retry_initial_delay", "重试初始等待"),
+        ("retry_delay", "重试延迟"),
+        ("nga_request_min_interval", "NGA 请求最小间隔"),
+        ("nga_cache_ttl", "NGA 短缓存"),
+        ("thread_watch_tail_count", "帖内扫描条数"),
+        ("thread_watch_interval", "帖内扫描间隔"),
+        ("timeout", "请求超时"),
+        ("ai_timeout", "AI 超时"),
+        ("ai_schedule_interval_minutes", "AI 定时间隔"),
+        ("ai_max_feishu_chars", "AI 飞书最大字符"),
+        ("wechat_bot_poll_timeout_ms", "微信长轮询超时"),
     ]:
         try:
             float_value(config, key, 0)
         except ValueError:
-            errors.append(f"{label} must be numeric")
-
+            errors.append(f"{label}必须是数字")
     if bool(config.get("quiet_hours_enabled", False)):
         try:
             nga_feishu_watch.parse_weekday(config.get("quiet_start_day"), 5)
         except ValueError:
-            errors.append("quiet_start_day is invalid")
+            errors.append("免打扰开始星期无效")
         try:
             nga_feishu_watch.parse_weekday(config.get("quiet_end_day"), 0)
         except ValueError:
-            errors.append("quiet_end_day is invalid")
+            errors.append("免打扰结束星期无效")
         try:
             nga_feishu_watch.parse_hhmm(str(config.get("quiet_start_time") or ""))
         except ValueError:
-            errors.append("quiet_start_time must be HH:MM")
+            errors.append("免打扰开始时间必须是 HH:MM")
         try:
             nga_feishu_watch.parse_hhmm(str(config.get("quiet_end_time") or ""))
         except ValueError:
-            errors.append("quiet_end_time must be HH:MM")
+            errors.append("免打扰结束时间必须是 HH:MM")
         if str(config.get("quiet_policy") or "") not in {"ignore", "defer"}:
-            errors.append("quiet_policy is invalid")
-
+            errors.append("免打扰处理方式无效")
     provider = str(config.get("ai_provider") or "codex")
     if provider not in {"codex", "claude", "codewhale", "custom"}:
-        errors.append("AI Provider must be codex, claude, codewhale, or custom")
+        errors.append("AI Provider 必须是 codex、claude、codewhale 或 custom")
     effort = str(config.get("ai_reasoning_effort") or "").strip().lower()
     if provider != "custom" and effort and not ai_analysis.is_valid_reasoning_effort(effort, provider):
-        values = ", ".join(ai_analysis.reasoning_effort_options(provider))
-        errors.append(f"AI reasoning effort must be one of: {values}")
-    if bool(config.get("ai_enabled", False)) and provider == "custom" and not str(config.get("ai_custom_command") or "").strip():
-        errors.append("custom AI provider requires ai_custom_command")
-
+        values = "、".join(ai_analysis.reasoning_effort_options(provider))
+        errors.append(f"AI 思考强度必须是 {values}")
+    if bool(config.get("ai_enabled", False)) and provider == "custom":
+        if not str(config.get("ai_custom_command") or "").strip():
+            errors.append("启用 custom AI provider 时必须填写 Custom 命令模板")
     return errors
 
 

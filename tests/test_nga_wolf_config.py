@@ -127,6 +127,36 @@ def test_validate_config_reports_missing_cookie_and_invalid_email_requirements()
     assert len(errors) >= 4
 
 
+def test_gui_and_shared_default_config_are_same_object() -> None:
+    sys.modules.setdefault("customtkinter", types.SimpleNamespace())
+    nga_wolf_gui = importlib.import_module("nga_wolf_gui")
+
+    assert nga_wolf_gui.DEFAULT_CONFIG is nga_wolf_config.DEFAULT_CONFIG
+    assert nga_wolf_config.DEFAULT_CONFIG["watch_author_ids"] == "150058=狼大"
+    assert nga_wolf_config.DEFAULT_CONFIG["preset_thread_ids"] == "45974302=自立自强，科学技术打头阵"
+    assert (
+        nga_wolf_config.DEFAULT_CONFIG["ai_auto_analysis_prompt"]
+        == "根据最新的 NGA 回复历史、我目前的持仓信息和观察列表，并实时查询公开 A 股行情信息，分析盘面变化、机会与风险，给出接下来需要重点观察的方向和操作建议。"
+    )
+    assert nga_wolf_config.DEFAULT_CONFIG["ai_schedule_prompt"] == nga_wolf_config.DEFAULT_CONFIG["ai_auto_analysis_prompt"]
+
+
+def test_gui_and_shared_validate_config_match_original_messages() -> None:
+    sys.modules.setdefault("customtkinter", types.SimpleNamespace())
+    nga_wolf_gui = importlib.import_module("nga_wolf_gui")
+    config = dict(nga_wolf_config.DEFAULT_CONFIG)
+    config.update({"bot_channel": "email", "nga_cookie": "", "email_to": "", "email_username": "", "email_password": ""})
+
+    gui_errors = nga_wolf_gui.validate_config(config)
+    shared_errors = nga_wolf_config.validate_config(config)
+
+    assert gui_errors == shared_errors
+    assert "NGA Cookie" in shared_errors
+    assert "邮箱登录账号" in shared_errors
+    assert "邮箱密码或授权码" in shared_errors
+    assert "收件邮箱" in shared_errors
+
+
 def test_gui_validate_config_delegates_to_shared_module(monkeypatch) -> None:
     sys.modules.setdefault("customtkinter", types.SimpleNamespace())
     nga_wolf_gui = importlib.import_module("nga_wolf_gui")
