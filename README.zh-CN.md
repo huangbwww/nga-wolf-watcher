@@ -252,6 +252,50 @@ tid:uid1,uid2=备注
 
 BAT 会自动安装 `lark-oapi`。第一次运行时，如果没有 `.nga_seen.json`，它会先执行 `--mark-seen`，避免历史回复刷屏。
 
+### Linux 一行安装
+
+Linux 服务器可以直接安装为 `ngawolf` 命令，不需要克隆源码：
+
+```bash
+curl -fsSL https://github.com/huangbwww/nga-wolf-watcher/releases/latest/download/install-linux.sh | sudo bash
+```
+
+安装脚本会把程序放到 `/opt/ngawolf`，把配置放到 `/etc/ngawolf/config.json`，把运行状态放到 `/var/lib/ngawolf`，并生成 `/usr/local/bin/ngawolf`。首次配置：
+
+```bash
+sudo ngawolf init
+sudo ngawolf check
+sudo ngawolf mark-seen
+sudo ngawolf test-send
+```
+
+前台运行：
+
+```bash
+sudo ngawolf run
+```
+
+如果服务器使用 systemd，安装脚本会写入 `ngawolf.service`。配置和初始化已读确认无误后启动服务：
+
+```bash
+sudo systemctl enable --now ngawolf
+sudo systemctl status ngawolf
+```
+
+之后需要修改配置：
+
+```bash
+sudo ngawolf config
+sudo systemctl restart ngawolf
+```
+
+如需安装指定版本或从本地目录调试安装，可以设置环境变量：
+
+```bash
+curl -fsSL https://github.com/huangbwww/nga-wolf-watcher/releases/latest/download/install-linux.sh | sudo NGAWOLF_VERSION=v1.2.3 bash
+sudo NGAWOLF_SOURCE_DIR=/path/to/nga-wolf bash tools/install-linux.sh
+```
+
 ### 直接运行源码
 
 安装依赖：

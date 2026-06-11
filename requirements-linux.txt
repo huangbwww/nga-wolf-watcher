@@ -1,0 +1,3 @@
+lark-oapi
+pycryptodome
+dingtalk-stream

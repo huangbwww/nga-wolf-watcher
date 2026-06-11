@@ -250,6 +250,50 @@ Copy `start_local.example.bat` to `start_local.bat`, fill the empty `NGA_COOKIE`
 
 The BAT installs `lark-oapi` automatically. On the first run, if `.nga_seen.json` does not exist, it runs `--mark-seen` before starting the watcher to avoid pushing old replies.
 
+### One-Command Linux Install
+
+On a Linux server, install the `ngawolf` command without cloning the repository:
+
+```bash
+curl -fsSL https://github.com/huangbwww/nga-wolf-watcher/releases/latest/download/install-linux.sh | sudo bash
+```
+
+The installer puts the app under `/opt/ngawolf`, stores config at `/etc/ngawolf/config.json`, stores runtime state under `/var/lib/ngawolf`, and creates `/usr/local/bin/ngawolf`. First-time setup:
+
+```bash
+sudo ngawolf init
+sudo ngawolf check
+sudo ngawolf mark-seen
+sudo ngawolf test-send
+```
+
+Run in foreground:
+
+```bash
+sudo ngawolf run
+```
+
+If the server uses systemd, the installer writes `ngawolf.service`. After config and `mark-seen` look correct, start the service:
+
+```bash
+sudo systemctl enable --now ngawolf
+sudo systemctl status ngawolf
+```
+
+To edit config later:
+
+```bash
+sudo ngawolf config
+sudo systemctl restart ngawolf
+```
+
+For a pinned release or local installer test, set environment variables:
+
+```bash
+curl -fsSL https://github.com/huangbwww/nga-wolf-watcher/releases/latest/download/install-linux.sh | sudo NGAWOLF_VERSION=v1.2.3 bash
+sudo NGAWOLF_SOURCE_DIR=/path/to/nga-wolf bash tools/install-linux.sh
+```
+
 ### Run From Source
 
 Install dependencies:
