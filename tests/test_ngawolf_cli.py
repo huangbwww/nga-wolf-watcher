@@ -441,6 +441,20 @@ def test_prompt_basic_config_keeps_existing_values_when_user_presses_enter() -> 
         "feishu_app_id": "app",
         "feishu_app_secret": "secret",
         "feishu_receive_id": "chat",
+        "feishu_id_type": "chat_id",
+        "feishu_bot_profiles": json.dumps(
+            [
+                {
+                    "id": "default",
+                    "label": "Default Feishu bot",
+                    "app_id": "app",
+                    "app_secret": "secret",
+                    "id_type": "chat_id",
+                    "chats": [],
+                }
+            ],
+            ensure_ascii=False,
+        ),
         "wechat_bot_token": "token",
         "wechat_bot_target_user_id": "user",
         "dingtalk_client_id": "client",
@@ -449,12 +463,13 @@ def test_prompt_basic_config_keeps_existing_values_when_user_presses_enter() -> 
         "watch_mode": "both",
         "watch_author_ids": "1=alpha",
         "preset_thread_ids": "2=beta",
+        "thread_author_watches": "2:1=beta",
         "interval": "15",
         "jitter": "3",
         "state_path": "state.json",
     }
 
-    with patch("builtins.input", side_effect=[""] * 9), patch("getpass.getpass", side_effect=["", ""]):
+    with patch("builtins.input", side_effect=[""] * 10), patch("getpass.getpass", side_effect=["", ""]):
         updated = ngawolf_cli.prompt_basic_config(config)
 
     assert updated == config
@@ -469,6 +484,7 @@ def test_prompt_basic_config_updates_values_when_user_enters_replacements() -> N
         "thread_author",
         "10=alpha",
         "20=beta",
+        "20:10=alpha in thread",
         "45",
         "9",
         "runtime/state.json",
@@ -484,6 +500,7 @@ def test_prompt_basic_config_updates_values_when_user_enters_replacements() -> N
     assert updated["watch_mode"] == "thread_author"
     assert updated["watch_author_ids"] == "10=alpha"
     assert updated["preset_thread_ids"] == "20=beta"
+    assert updated["thread_author_watches"] == "20:10=alpha in thread"
     assert updated["interval"] == "45"
     assert updated["jitter"] == "9"
     assert updated["state_path"] == "runtime/state.json"
@@ -574,6 +591,109 @@ def test_prompt_basic_config_normalizes_bot_channel_and_prompts_wechat_fields() 
     assert getpass_mock.call_args_list[1].args == ("WeChat bot token [hidden]: ",)
 
 
+def test_prompt_multi_select_supports_all_and_confirm() -> None:
+    options = [
+        {"value": "oc_1", "label": "Alpha"},
+        {"value": "oc_2", "label": "Beta"},
+    ]
+
+    with patch("builtins.input", side_effect=["a", ""]):
+        selected = ngawolf_cli.prompt_multi_select("Feishu groups", options)
+
+    assert selected == options
+
+
+def test_prompt_choice_reprompts_after_invalid_selection() -> None:
+    with patch("builtins.input", side_effect=["invalid", "2"]):
+        selected = ngawolf_cli.prompt_choice("Bot channel", [("feishu", "Feishu"), ("email", "Email")], "feishu")
+
+    assert selected == "email"
+
+
+def test_prompt_basic_config_lists_feishu_chats_and_builds_routes() -> None:
+    config = dict(nga_wolf_config.DEFAULT_CONFIG)
+    inputs = [
+        "",
+        "cli_xxx",
+        "a",
+        "",
+        "",
+        "150058=wolf",
+        "45974302=wolf",
+        "",
+        "",
+        "",
+    ]
+    chats = [
+        {"chat_id": "oc_1", "name": "Alpha"},
+        {"chat_id": "oc_2", "name": "Beta"},
+    ]
+    normalized_chats = [
+        {"chat_id": "oc_1", "name": "Alpha", "chat_type": "", "description": ""},
+        {"chat_id": "oc_2", "name": "Beta", "chat_type": "", "description": ""},
+    ]
+
+    with patch("builtins.input", side_effect=inputs), patch("getpass.getpass", side_effect=["cookie", "secret"]), patch.object(
+        ngawolf_cli.nga_feishu_watch, "list_feishu_chats", return_value=chats
+    ) as list_feishu_chats:
+        updated = ngawolf_cli.prompt_basic_config(config)
+
+    list_feishu_chats.assert_called_once_with("cli_xxx", "secret", 10)
+    assert updated["bot_channel"] == "feishu"
+    assert updated["nga_cookie"] == "cookie"
+    assert updated["feishu_app_id"] == "cli_xxx"
+    assert updated["feishu_app_secret"] == "secret"
+    assert updated["feishu_receive_id"] == "oc_1"
+
+    profiles = json.loads(str(updated["feishu_bot_profiles"]))
+    assert profiles == [
+        {
+            "id": "default",
+            "label": "Default Feishu bot",
+            "app_id": "cli_xxx",
+            "app_secret": "secret",
+            "id_type": "chat_id",
+            "chats": normalized_chats,
+        }
+    ]
+
+    targets = json.loads(str(updated["push_targets"]))
+    assert targets == [
+        {
+            "id": "feishu_1",
+            "label": "Alpha",
+            "channel": "feishu",
+            "profile_id": "default",
+            "receive_id": "oc_1",
+            "id_type": "chat_id",
+            "default_author_id": "150058",
+            "default_tid": "45974302",
+        },
+        {
+            "id": "feishu_2",
+            "label": "Beta",
+            "channel": "feishu",
+            "profile_id": "default",
+            "receive_id": "oc_2",
+            "id_type": "chat_id",
+            "default_author_id": "150058",
+            "default_tid": "45974302",
+        },
+    ]
+
+    rules = json.loads(str(updated["listen_rules"]))
+    assert rules == [
+        {
+            "id": "author:150058",
+            "label": "wolf",
+            "mode": "author",
+            "author_id": "150058",
+            "tid": "",
+            "target_ids": ["feishu_1", "feishu_2"],
+        }
+    ]
+
+
 def test_command_init_refuses_to_overwrite_existing_config(tmp_path: Path) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text("{}", encoding="utf-8")
@@ -650,7 +770,7 @@ def test_command_init_rejects_invalid_bot_channel_without_saving(tmp_path: Path)
         log_file=tmp_path / "watcher.log",
     )
 
-    with patch("builtins.input", side_effect=["invalid"]), patch("getpass.getpass", return_value="cookie"):
+    with patch.object(ngawolf_cli, "prompt_basic_config", side_effect=ValueError("bad config")):
         assert ngawolf_cli.command_init(paths) == 2
 
     assert not config_path.exists()
@@ -667,7 +787,7 @@ def test_command_config_rejects_invalid_bot_channel_without_overwriting(tmp_path
         log_file=tmp_path / "watcher.log",
     )
 
-    with patch("builtins.input", side_effect=["invalid"]), patch("getpass.getpass", return_value="cookie"):
+    with patch.object(ngawolf_cli, "prompt_basic_config", side_effect=ValueError("bad config")):
         assert ngawolf_cli.command_config(paths) == 2
 
     assert config_path.read_text(encoding="utf-8") == original_text

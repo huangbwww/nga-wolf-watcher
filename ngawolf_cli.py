@@ -37,6 +37,74 @@ def prompt_text(label: str, current: object = "", *, secret: bool = False) -> st
     return current_text if value == "" else value
 
 
+def prompt_choice(label: str, choices: list[tuple[str, str]], current: object = "") -> str:
+    current_text = "" if current is None else str(current).strip()
+    values = {value for value, _ in choices}
+    for index, (value, title) in enumerate(choices, start=1):
+        marker = "*" if value == current_text else " "
+        print(f"  {marker} {index}. {title} ({value})")
+    while True:
+        raw = input(f"{label} [{current_text}]: ").strip()
+        if raw == "":
+            return current_text or choices[0][0]
+        if raw.isdigit():
+            index = int(raw)
+            if 1 <= index <= len(choices):
+                return choices[index - 1][0]
+        normalized = raw.lower()
+        if normalized in values:
+            return normalized
+        print(f"Please choose 1-{len(choices)} or one of: {', '.join(value for value, _ in choices)}", file=sys.stderr)
+
+
+def prompt_multi_select(
+    label: str,
+    options: list[dict[str, str]],
+    selected_values: list[str] | None = None,
+) -> list[dict[str, str]]:
+    selected = set(selected_values or [])
+    value_to_option = {str(option.get("value") or ""): option for option in options}
+    selected = {value for value in selected if value in value_to_option}
+
+    while True:
+        print(label)
+        for index, option in enumerate(options, start=1):
+            value = str(option.get("value") or "")
+            checked = "x" if value in selected else " "
+            title = str(option.get("label") or value)
+            print(f"  [{checked}] {index}. {title} ({value})")
+
+        raw = input("Select numbers, 'a' all, 'n' none, Enter confirm: ").strip().lower()
+        if raw == "":
+            return [option for option in options if str(option.get("value") or "") in selected]
+        if raw == "a":
+            selected = set(value_to_option)
+            continue
+        if raw == "n":
+            selected.clear()
+            continue
+
+        changed = False
+        for token in re.split(r"[,，;；\s]+", raw):
+            if not token:
+                continue
+            if not token.isdigit():
+                print(f"Ignored invalid selection: {token}", file=sys.stderr)
+                continue
+            index = int(token)
+            if not 1 <= index <= len(options):
+                print(f"Ignored out-of-range selection: {token}", file=sys.stderr)
+                continue
+            value = str(options[index - 1].get("value") or "")
+            if value in selected:
+                selected.remove(value)
+            else:
+                selected.add(value)
+            changed = True
+        if not changed:
+            print("No valid selection changed.", file=sys.stderr)
+
+
 def _prompt_fields(config: dict[str, object], fields: list[tuple[str, str, bool]]) -> None:
     for key, label, secret in fields:
         config[key] = prompt_text(label, config.get(key, ""), secret=secret)
@@ -49,9 +117,162 @@ def _normalize_bot_channel(value: object) -> str:
     return channel
 
 
+def _json_dumps(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _json_list(value: object) -> list[dict[str, object]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if not value:
+        return []
+    try:
+        loaded = json.loads(str(value))
+    except Exception:
+        return []
+    if not isinstance(loaded, list):
+        return []
+    return [item for item in loaded if isinstance(item, dict)]
+
+
+def _chat_options(chats: list[dict[str, object]]) -> list[dict[str, str]]:
+    options: list[dict[str, str]] = []
+    for chat in nga_feishu_watch.merge_feishu_chats(chats):
+        chat_id = str(chat.get("chat_id") or "").strip()
+        if not chat_id:
+            continue
+        label = str(chat.get("name") or chat_id).strip() or chat_id
+        options.append({"value": chat_id, "label": label})
+    return options
+
+
+def _current_feishu_target_ids(config: dict[str, object]) -> list[str]:
+    ids = [
+        str(target.get("receive_id") or "").strip()
+        for target in _json_list(config.get("push_targets"))
+        if str(target.get("channel") or "feishu").strip() == "feishu"
+    ]
+    if ids:
+        return [item for item in ids if item]
+    receive_id = str(config.get("feishu_receive_id") or "").strip()
+    return [receive_id] if receive_id else []
+
+
+def _target_ids_from_config(config: dict[str, object]) -> list[str]:
+    return [
+        str(target.get("id") or "").strip()
+        for target in _json_list(config.get("push_targets"))
+        if str(target.get("id") or "").strip()
+    ]
+
+
+def _configure_feishu_channel(config: dict[str, object]) -> None:
+    config["feishu_app_id"] = prompt_text("Feishu app ID", config.get("feishu_app_id", ""))
+    config["feishu_app_secret"] = prompt_text("Feishu app secret", config.get("feishu_app_secret", ""), secret=True)
+
+    app_id = str(config.get("feishu_app_id") or "").strip()
+    app_secret = str(config.get("feishu_app_secret") or "").strip()
+    profile = {
+        "id": "default",
+        "label": "Default Feishu bot",
+        "app_id": app_id,
+        "app_secret": app_secret,
+        "id_type": "chat_id",
+        "chats": [],
+    }
+    selected_chats: list[dict[str, str]] = []
+    should_list_chats = bool(app_id and app_secret) and not _current_feishu_target_ids(config)
+    if should_list_chats:
+        try:
+            chats = nga_feishu_watch.list_feishu_chats(app_id, app_secret, 10)
+        except Exception as exc:
+            print(f"Could not list Feishu groups: {exc}", file=sys.stderr)
+            chats = []
+        options = _chat_options(chats)
+        if options:
+            selected_chats = prompt_multi_select("Feishu groups visible to this bot", options)
+            profile["chats"] = [
+                {
+                    "chat_id": chat["value"],
+                    "name": chat["label"],
+                    "chat_type": "",
+                    "description": "",
+                }
+                for chat in selected_chats
+            ]
+
+    if selected_chats:
+        targets = []
+        for index, chat in enumerate(selected_chats, start=1):
+            targets.append(
+                {
+                    "id": f"feishu_{index}",
+                    "label": chat["label"],
+                    "channel": "feishu",
+                    "profile_id": "default",
+                    "receive_id": chat["value"],
+                    "id_type": "chat_id",
+                    "default_author_id": str(config.get("default_author_id") or "150058").strip(),
+                    "default_tid": str(config.get("default_tid") or "45974302").strip(),
+                }
+            )
+        config["feishu_receive_id"] = selected_chats[0]["value"]
+        config["push_targets"] = _json_dumps(targets)
+    else:
+        config["feishu_receive_id"] = prompt_text("Feishu receive ID", config.get("feishu_receive_id", ""))
+
+    config["feishu_id_type"] = "chat_id"
+    config["feishu_bot_profiles"] = _json_dumps([profile])
+
+
+def _sync_listen_rules(config: dict[str, object]) -> None:
+    target_ids = _target_ids_from_config(config)
+    if not target_ids:
+        return
+    rules: list[dict[str, object]] = []
+    watch_mode = str(config.get("watch_mode") or "author").strip()
+    if watch_mode in {"author", "both"}:
+        for target in nga_feishu_watch.parse_target_list(config.get("watch_author_ids"), str(config.get("default_author_id") or "150058")):
+            rules.append(
+                {
+                    "id": f"author:{target.id}",
+                    "label": target.label,
+                    "mode": "author",
+                    "author_id": target.id,
+                    "tid": "",
+                    "target_ids": list(target_ids),
+                }
+            )
+    if watch_mode in {"thread_author", "both"}:
+        for watch in nga_feishu_watch.parse_thread_author_watches(config.get("thread_author_watches")):
+            rules.append(
+                {
+                    "id": f"thread_author:{watch.tid}:{watch.author_id}",
+                    "label": watch.label,
+                    "mode": "thread_author",
+                    "author_id": watch.author_id,
+                    "tid": watch.tid,
+                    "target_ids": list(target_ids),
+                }
+            )
+    if rules:
+        config["listen_rules"] = _json_dumps(rules)
+
+
 def prompt_basic_config(config: dict[str, object]) -> dict[str, object]:
     updated = dict(config)
-    updated["bot_channel"] = _normalize_bot_channel(prompt_text("Bot channel", updated.get("bot_channel", "feishu")))
+    updated["bot_channel"] = _normalize_bot_channel(
+        prompt_choice(
+            "Bot channel",
+            [
+                ("feishu", "Feishu"),
+                ("email", "Email"),
+                ("wechat", "WeChat"),
+                ("dingtalk", "DingTalk"),
+            ],
+            updated.get("bot_channel", "feishu"),
+        )
+    )
     updated["nga_cookie"] = prompt_text("NGA cookie", updated.get("nga_cookie", ""), secret=True)
     channel = str(updated.get("bot_channel") or "feishu").strip()
     channel_fields = {
@@ -59,11 +280,6 @@ def prompt_basic_config(config: dict[str, object]) -> dict[str, object]:
             ("email_to", "Email to", False),
             ("email_username", "Email username", False),
             ("email_password", "Email password", True),
-        ],
-        "feishu": [
-            ("feishu_app_id", "Feishu app ID", False),
-            ("feishu_app_secret", "Feishu app secret", True),
-            ("feishu_receive_id", "Feishu receive ID", False),
         ],
         "wechat": [
             ("wechat_bot_token", "WeChat bot token", True),
@@ -75,13 +291,27 @@ def prompt_basic_config(config: dict[str, object]) -> dict[str, object]:
             ("dingtalk_target_user_ids", "DingTalk target user IDs", False),
         ],
     }
-    _prompt_fields(updated, channel_fields.get(channel, []))
-    updated["watch_mode"] = prompt_text("Watch mode", updated.get("watch_mode", "author"))
+    if channel == "feishu":
+        _configure_feishu_channel(updated)
+    else:
+        _prompt_fields(updated, channel_fields.get(channel, []))
+    updated["watch_mode"] = prompt_choice(
+        "Watch mode",
+        [
+            ("author", "Watch user profile replies"),
+            ("thread_author", "Watch author inside fixed thread"),
+            ("both", "Watch both"),
+        ],
+        updated.get("watch_mode", "author"),
+    )
     updated["watch_author_ids"] = prompt_text("Watch author IDs", updated.get("watch_author_ids", ""))
     updated["preset_thread_ids"] = prompt_text("Preset thread IDs", updated.get("preset_thread_ids", ""))
+    if str(updated.get("watch_mode") or "author") in {"thread_author", "both"}:
+        updated["thread_author_watches"] = prompt_text("Thread author watches", updated.get("thread_author_watches", ""))
     updated["interval"] = prompt_text("Interval", updated.get("interval", "30"))
     updated["jitter"] = prompt_text("Jitter", updated.get("jitter", "20"))
     updated["state_path"] = prompt_text("State path", updated.get("state_path", ".nga_seen.json"))
+    _sync_listen_rules(updated)
     return updated
 
 

@@ -260,7 +260,7 @@ Linux 服务器可以直接安装为 `ngawolf` 命令，不需要克隆源码：
 curl -fsSL https://github.com/huangbwww/nga-wolf-watcher/releases/latest/download/install-linux.sh | sudo bash
 ```
 
-安装脚本会把程序放到 `/opt/ngawolf`，把配置放到 `/etc/ngawolf/config.json`，把运行状态放到 `/var/lib/ngawolf`，并生成 `/usr/local/bin/ngawolf`。首次配置：
+安装脚本会把程序放到 `/opt/ngawolf`，把配置放到 `/etc/ngawolf/config.json`，把运行状态放到 `/var/lib/ngawolf`，并生成 `/usr/local/bin/ngawolf`。首次配置会进入数字菜单向导；飞书模式下输入 App ID / Secret 后会自动查询机器人可见群组，可输入编号切换选择，输入 `a` 全选，再回车确认：
 
 ```bash
 sudo ngawolf init
@@ -305,7 +305,7 @@ cd D:\nga-wolf
 python -m pip install lark-oapi customtkinter
 ```
 
-Linux 服务器推荐使用交互式 CLI 配置，不需要启动桌面 GUI 或 Web 管理台：
+Linux 服务器推荐使用交互式 CLI 配置，不需要启动桌面 GUI 或 Web 管理台。飞书模式会自动查询可见群组并生成发送目标和监听规则；如果有多个群，可以在多选菜单里输入 `a` 一次性加入：
 
 ```bash
 python ngawolf_cli.py init
