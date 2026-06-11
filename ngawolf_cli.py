@@ -154,7 +154,7 @@ def command_check(paths: CliPaths) -> int:
 
 def command_mark_seen(paths: CliPaths) -> int:
     config = load_service_config(paths)
-    errors = nga_wolf_config.validate_config(config, require_cookie=True)
+    errors = nga_wolf_config.validate_config(config, require_cookie=True, require_receive_id=False)
     if errors:
         print_validation_errors(errors)
         return 2
@@ -181,10 +181,14 @@ def command_run(paths: CliPaths, once: bool = False) -> int:
         print_validation_errors(errors)
         return 2
     if once:
-        args = build_service_args(paths, config, mark_seen=False)
-        setattr(args, "once", True)
-        nga_feishu_watch.run_once(args)
-        return 0
+        try:
+            args = build_service_args(paths, config, mark_seen=False)
+            setattr(args, "once", True)
+            nga_feishu_watch.run_once(args)
+            return 0
+        except KeyboardInterrupt:
+            print("Watcher stopped.", file=sys.stderr)
+            return 130
     try:
         nga_wolf_config.run_watcher_from_config(paths.config_path, data_dir=paths.data_dir)
     except KeyboardInterrupt:

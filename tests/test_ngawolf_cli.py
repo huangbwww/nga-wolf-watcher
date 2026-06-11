@@ -175,7 +175,17 @@ def test_command_mark_seen_validates_and_runs_once(tmp_path: Path) -> None:
         data_dir=tmp_path / "state",
         log_file=tmp_path / "watcher.log",
     )
-    config = _valid_email_config()
+    config = dict(nga_wolf_config.DEFAULT_CONFIG)
+    config.update(
+        {
+            "bot_channel": "feishu",
+            "nga_cookie": "cookie",
+            "feishu_app_id": "app-id",
+            "feishu_app_secret": "app-secret",
+            "watch_author_ids": "150058=author",
+            "preset_thread_ids": "45974302=thread",
+        }
+    )
     args = argparse.Namespace()
 
     with patch.object(ngawolf_cli, "load_service_config", return_value=config), patch.object(
@@ -185,7 +195,7 @@ def test_command_mark_seen_validates_and_runs_once(tmp_path: Path) -> None:
     ) as run_once:
         assert ngawolf_cli.command_mark_seen(paths) == 0
 
-    validate_config.assert_called_once_with(config, require_cookie=True)
+    validate_config.assert_called_once_with(config, require_cookie=True, require_receive_id=False)
     build_service_args.assert_called_once_with(paths, config, mark_seen=True)
     run_once.assert_called_once_with(args)
 
@@ -231,6 +241,26 @@ def test_command_run_once_validates_and_runs_once(tmp_path: Path) -> None:
     validate_config.assert_called_once_with(config, require_cookie=True)
     build_service_args.assert_called_once_with(paths, config, mark_seen=False)
     run_once.assert_called_once_with(args)
+
+
+def test_command_run_once_returns_130_on_keyboard_interrupt(tmp_path: Path, capsys) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+    config = _valid_email_config()
+    args = argparse.Namespace()
+
+    with patch.object(ngawolf_cli, "load_service_config", return_value=config), patch.object(
+        ngawolf_cli.nga_wolf_config, "validate_config", return_value=[]
+    ), patch.object(ngawolf_cli, "build_service_args", return_value=args), patch.object(
+        ngawolf_cli.nga_feishu_watch, "run_once", side_effect=KeyboardInterrupt
+    ):
+        assert ngawolf_cli.command_run(paths, once=True) == 130
+
+    captured = capsys.readouterr()
+    assert "stopped" in captured.err.lower()
 
 
 def test_command_run_long_running_delegates_to_shared_watcher(tmp_path: Path) -> None:
