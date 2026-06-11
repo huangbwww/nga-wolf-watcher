@@ -29,6 +29,9 @@ rem set "EMAIL_FROM=your-account@gmail.com"
 rem set "EMAIL_FROM_NAME=NGA Wolf Watcher"
 rem set "EMAIL_REPLY_TO="
 rem set "EMAIL_TO=receiver@example.com"
+rem Set NGA_BOT_CHANNEL=wxpusher to send notifications through WxPusher.
+rem set "WXPUSHER_SPTS="
+rem set "WXPUSHER_CONTENT_TYPE=markdown"
 
 rem Optional defaults.
 set "NGA_DEFAULT_AUTHOR_ID=150058"
