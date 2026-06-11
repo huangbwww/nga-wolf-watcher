@@ -275,7 +275,7 @@ On a Linux server, install the `ngawolf` command without cloning the repository:
 curl -fsSL https://github.com/huangbwww/nga-wolf-watcher/releases/latest/download/install-linux.sh | sudo bash
 ```
 
-The installer puts the app under `/opt/ngawolf`, stores config at `/etc/ngawolf/config.json`, stores runtime state under `/var/lib/ngawolf`, and creates `/usr/local/bin/ngawolf`. First-time setup opens a numeric menu wizard; in Feishu mode, after you enter the App ID / Secret, it lists visible groups so you can toggle numbers, enter `a` to select all, then press Enter to confirm:
+The installer puts the app under `/opt/ngawolf`, stores config at `/etc/ngawolf/config.json`, stores runtime state under `/var/lib/ngawolf`, and creates `/usr/local/bin/ngawolf`. First-time setup opens a terminal wizard with arrow-key selection. In Feishu mode, after you enter the App ID / Secret, it lists visible groups so you can move with Up/Down, toggle with Space, then press Enter to confirm. If the terminal TUI dependency is unavailable, the CLI falls back to the older numeric prompts:
 
 ```bash
 sudo ngawolf init
@@ -317,10 +317,10 @@ Install dependencies:
 
 ```powershell
 cd D:\nga-wolf
-python -m pip install lark-oapi customtkinter
+python -m pip install lark-oapi customtkinter questionary
 ```
 
-On a Linux server, use the interactive CLI instead of starting the desktop GUI or web manager. Feishu mode can list visible groups and generate push targets plus listen rules automatically; enter `a` in the multi-select menu to add all groups:
+On a Linux server, use the interactive CLI instead of starting the desktop GUI or web manager. Feishu mode can list visible groups and generate push targets plus listen rules automatically; use Up/Down to move, Space to select groups, and Enter to confirm. WxPusher setup defaults to the SPT simple-push mode, so the wizard only needs the SPT unless you choose the App Token + UID/Topic modes:
 
 ```bash
 python ngawolf_cli.py init

@@ -1,3 +1,4 @@
 lark-oapi
 pycryptodome
 dingtalk-stream
+questionary

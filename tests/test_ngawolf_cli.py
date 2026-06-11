@@ -603,6 +603,74 @@ def test_prompt_multi_select_supports_all_and_confirm() -> None:
     assert selected == options
 
 
+class FakeQuestionaryPrompt:
+    def __init__(self, answer):
+        self.answer = answer
+
+    def ask(self):
+        return self.answer
+
+
+class FakeQuestionary:
+    def __init__(self, *, select_answer=None, checkbox_answer=None):
+        self.select_answer = select_answer
+        self.checkbox_answer = checkbox_answer
+        self.select_calls = []
+        self.checkbox_calls = []
+
+    def select(self, message, choices, default=None):
+        self.select_calls.append({"message": message, "choices": choices, "default": default})
+        return FakeQuestionaryPrompt(self.select_answer)
+
+    def checkbox(self, message, choices):
+        self.checkbox_calls.append({"message": message, "choices": choices})
+        return FakeQuestionaryPrompt(self.checkbox_answer)
+
+
+def test_prompt_choice_uses_questionary_in_interactive_terminal(monkeypatch) -> None:
+    fake = FakeQuestionary(select_answer="email")
+    monkeypatch.setattr(ngawolf_cli, "questionary", fake)
+    monkeypatch.setattr(ngawolf_cli, "is_interactive_terminal", lambda: True)
+
+    with patch("builtins.input") as input_mock:
+        selected = ngawolf_cli.prompt_choice("Bot channel", [("feishu", "Feishu"), ("email", "Email")], "feishu")
+
+    assert selected == "email"
+    assert fake.select_calls == [
+        {
+            "message": "Bot channel",
+            "choices": [{"name": "Feishu", "value": "feishu"}, {"name": "Email", "value": "email"}],
+            "default": "feishu",
+        }
+    ]
+    input_mock.assert_not_called()
+
+
+def test_prompt_multi_select_uses_questionary_checkbox_in_interactive_terminal(monkeypatch) -> None:
+    fake = FakeQuestionary(checkbox_answer=["oc_2"])
+    monkeypatch.setattr(ngawolf_cli, "questionary", fake)
+    monkeypatch.setattr(ngawolf_cli, "is_interactive_terminal", lambda: True)
+    options = [
+        {"value": "oc_1", "label": "Alpha"},
+        {"value": "oc_2", "label": "Beta"},
+    ]
+
+    with patch("builtins.input") as input_mock:
+        selected = ngawolf_cli.prompt_multi_select("Feishu groups", options, selected_values=["oc_1"])
+
+    assert selected == [{"value": "oc_2", "label": "Beta"}]
+    assert fake.checkbox_calls == [
+        {
+            "message": "Feishu groups",
+            "choices": [
+                {"name": "Alpha", "value": "oc_1", "checked": True},
+                {"name": "Beta", "value": "oc_2", "checked": False},
+            ],
+        }
+    ]
+    input_mock.assert_not_called()
+
+
 def test_prompt_choice_reprompts_after_invalid_selection() -> None:
     with patch("builtins.input", side_effect=["invalid", "2"]):
         selected = ngawolf_cli.prompt_choice("Bot channel", [("feishu", "Feishu"), ("email", "Email")], "feishu")
@@ -692,6 +760,68 @@ def test_prompt_basic_config_lists_feishu_chats_and_builds_routes() -> None:
             "target_ids": ["feishu_1", "feishu_2"],
         }
     ]
+
+
+def test_prompt_basic_config_builds_wxpusher_spt_profile_and_routes(monkeypatch) -> None:
+    monkeypatch.setattr(ngawolf_cli, "questionary", None)
+    config = dict(nga_wolf_config.DEFAULT_CONFIG)
+    inputs = [
+        "wxpusher",
+        "",
+        "",
+        "",
+        "150058=wolf",
+        "45974302=wolf",
+        "",
+        "",
+        "",
+    ]
+
+    with patch("builtins.input", side_effect=inputs), patch("getpass.getpass", side_effect=["cookie", "SPT_secret"]):
+        updated = ngawolf_cli.prompt_basic_config(config)
+
+    assert updated["bot_channel"] == "wxpusher"
+    assert updated["nga_cookie"] == "cookie"
+    assert updated["wxpusher_spts"] == "SPT_secret"
+    assert updated["wxpusher_app_token"] == ""
+    assert updated["wxpusher_uids"] == ""
+    assert updated["wxpusher_topic_ids"] == ""
+    assert updated["wxpusher_content_type"] == "markdown"
+
+    assert json.loads(str(updated["wxpusher_profiles"])) == [
+        {
+            "id": "default",
+            "label": "Default WxPusher",
+            "spts": "SPT_secret",
+            "app_token": "",
+            "uids": "",
+            "topic_ids": "",
+            "content_type": "markdown",
+        }
+    ]
+    assert json.loads(str(updated["push_targets"])) == [
+        {
+            "id": "wxpusher_1",
+            "label": "Default WxPusher",
+            "channel": "wxpusher",
+            "profile_id": "default",
+            "receive_id": "",
+            "id_type": "spt",
+            "default_author_id": "150058",
+            "default_tid": "45974302",
+        }
+    ]
+    assert json.loads(str(updated["listen_rules"])) == [
+        {
+            "id": "author:150058",
+            "label": "wolf",
+            "mode": "author",
+            "author_id": "150058",
+            "tid": "",
+            "target_ids": ["wxpusher_1"],
+        }
+    ]
+    assert nga_wolf_config.validate_config(updated, require_cookie=True) == []
 
 
 def test_command_init_refuses_to_overwrite_existing_config(tmp_path: Path) -> None:

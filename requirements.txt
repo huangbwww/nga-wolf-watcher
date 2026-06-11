@@ -5,3 +5,4 @@ pystray
 Pillow
 pycryptodome
 dingtalk-stream
+questionary

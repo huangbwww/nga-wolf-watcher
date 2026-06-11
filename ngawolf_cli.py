@@ -11,6 +11,11 @@ from pathlib import Path
 import nga_feishu_watch
 import nga_wolf_config
 
+try:
+    import questionary
+except Exception:  # pragma: no cover - optional terminal enhancement
+    questionary = None
+
 
 @dataclass(frozen=True)
 class CliPaths:
@@ -19,8 +24,43 @@ class CliPaths:
     log_file: Path
 
 
+def is_interactive_terminal() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _questionary_client():
+    if questionary is None or not is_interactive_terminal():
+        return None
+    return questionary
+
+
+def _questionary_choice(client, title: str, value: str, *, checked: bool | None = None):
+    choice_cls = getattr(client, "Choice", None)
+    if choice_cls is not None:
+        kwargs = {"title": title, "value": value}
+        if checked is not None:
+            kwargs["checked"] = checked
+        return choice_cls(**kwargs)
+    item = {"name": title, "value": value}
+    if checked is not None:
+        item["checked"] = checked
+    return item
+
+
 def prompt_text(label: str, current: object = "", *, secret: bool = False) -> str:
     current_text = "" if current is None else str(current)
+    client = _questionary_client()
+    if client is not None:
+        try:
+            prompt = client.password(label) if secret else client.text(label, default=current_text)
+            value = prompt.ask()
+        except Exception:
+            value = None
+        if value is None:
+            return current_text
+        value_text = str(value).strip()
+        return current_text if value_text == "" else value_text
+
     if secret and current_text:
         prompt = f"{label} [hidden]: "
     elif current_text:
@@ -40,13 +80,26 @@ def prompt_text(label: str, current: object = "", *, secret: bool = False) -> st
 def prompt_choice(label: str, choices: list[tuple[str, str]], current: object = "") -> str:
     current_text = "" if current is None else str(current).strip()
     values = {value for value, _ in choices}
+    default = current_text if current_text in values else choices[0][0]
+    client = _questionary_client()
+    if client is not None:
+        answer = client.select(
+            label,
+            choices=[_questionary_choice(client, title, value) for value, title in choices],
+            default=default,
+        ).ask()
+        if answer is None:
+            return default
+        normalized_answer = str(answer).strip().lower()
+        return normalized_answer if normalized_answer in values else default
+
     for index, (value, title) in enumerate(choices, start=1):
         marker = "*" if value == current_text else " "
         print(f"  {marker} {index}. {title} ({value})")
     while True:
         raw = input(f"{label} [{current_text}]: ").strip()
         if raw == "":
-            return current_text or choices[0][0]
+            return default
         if raw.isdigit():
             index = int(raw)
             if 1 <= index <= len(choices):
@@ -65,6 +118,24 @@ def prompt_multi_select(
     selected = set(selected_values or [])
     value_to_option = {str(option.get("value") or ""): option for option in options}
     selected = {value for value in selected if value in value_to_option}
+    client = _questionary_client()
+    if client is not None:
+        answers = client.checkbox(
+            label,
+            choices=[
+                _questionary_choice(
+                    client,
+                    str(option.get("label") or option.get("value") or ""),
+                    str(option.get("value") or ""),
+                    checked=str(option.get("value") or "") in selected,
+                )
+                for option in options
+            ],
+        ).ask()
+        if answers is None:
+            answers = selected
+        answer_values = {str(value) for value in answers}
+        return [option for option in options if str(option.get("value") or "") in answer_values]
 
     while True:
         print(label)
@@ -112,8 +183,8 @@ def _prompt_fields(config: dict[str, object], fields: list[tuple[str, str, bool]
 
 def _normalize_bot_channel(value: object) -> str:
     channel = str(value or "feishu").strip().lower()
-    if channel not in {"feishu", "wechat", "dingtalk", "email"}:
-        raise ValueError("bot_channel must be one of: feishu, wechat, dingtalk, email")
+    if channel not in {"feishu", "wechat", "dingtalk", "email", "wxpusher"}:
+        raise ValueError("bot_channel must be one of: feishu, wechat, dingtalk, email, wxpusher")
     return channel
 
 
@@ -225,6 +296,85 @@ def _configure_feishu_channel(config: dict[str, object]) -> None:
     config["feishu_bot_profiles"] = _json_dumps([profile])
 
 
+def _current_wxpusher_delivery_mode(config: dict[str, object]) -> str:
+    profiles = _json_list(config.get("wxpusher_profiles"))
+    profile = profiles[0] if profiles else {}
+    if str(config.get("wxpusher_spts") or profile.get("spts") or "").strip():
+        return "spt"
+    if str(config.get("wxpusher_topic_ids") or profile.get("topic_ids") or "").strip():
+        return "topic_id"
+    if str(config.get("wxpusher_uids") or profile.get("uids") or "").strip():
+        return "uid"
+    return "spt"
+
+
+def _configure_wxpusher_channel(config: dict[str, object]) -> None:
+    delivery_mode = prompt_choice(
+        "WxPusher delivery mode",
+        [
+            ("spt", "SPT simple push"),
+            ("uid", "App Token + UID"),
+            ("topic_id", "App Token + Topic ID"),
+        ],
+        _current_wxpusher_delivery_mode(config),
+    )
+    config["wxpusher_content_type"] = prompt_choice(
+        "WxPusher content type",
+        [
+            ("markdown", "Markdown"),
+            ("text", "Plain text"),
+            ("html", "HTML"),
+        ],
+        config.get("wxpusher_content_type", "markdown"),
+    )
+    if delivery_mode == "spt":
+        config["wxpusher_spts"] = prompt_text("WxPusher SPT", config.get("wxpusher_spts", ""), secret=True)
+        config["wxpusher_app_token"] = ""
+        config["wxpusher_uids"] = ""
+        config["wxpusher_topic_ids"] = ""
+        receive_id = ""
+        id_type = "spt"
+    elif delivery_mode == "uid":
+        config["wxpusher_spts"] = ""
+        config["wxpusher_app_token"] = prompt_text("WxPusher App Token", config.get("wxpusher_app_token", ""), secret=True)
+        config["wxpusher_uids"] = prompt_text("WxPusher UID", config.get("wxpusher_uids", ""))
+        config["wxpusher_topic_ids"] = ""
+        receive_id = str(config.get("wxpusher_uids") or "").strip()
+        id_type = "uid"
+    else:
+        config["wxpusher_spts"] = ""
+        config["wxpusher_app_token"] = prompt_text("WxPusher App Token", config.get("wxpusher_app_token", ""), secret=True)
+        config["wxpusher_uids"] = ""
+        config["wxpusher_topic_ids"] = prompt_text("WxPusher Topic ID", config.get("wxpusher_topic_ids", ""))
+        receive_id = str(config.get("wxpusher_topic_ids") or "").strip()
+        id_type = "topic_id"
+
+    profile = {
+        "id": "default",
+        "label": "Default WxPusher",
+        "spts": str(config.get("wxpusher_spts") or "").strip(),
+        "app_token": str(config.get("wxpusher_app_token") or "").strip(),
+        "uids": str(config.get("wxpusher_uids") or "").strip(),
+        "topic_ids": str(config.get("wxpusher_topic_ids") or "").strip(),
+        "content_type": str(config.get("wxpusher_content_type") or "markdown").strip() or "markdown",
+    }
+    config["wxpusher_profiles"] = _json_dumps([profile])
+    config["push_targets"] = _json_dumps(
+        [
+            {
+                "id": "wxpusher_1",
+                "label": "Default WxPusher",
+                "channel": "wxpusher",
+                "profile_id": "default",
+                "receive_id": receive_id,
+                "id_type": id_type,
+                "default_author_id": str(config.get("default_author_id") or "150058").strip(),
+                "default_tid": str(config.get("default_tid") or "45974302").strip(),
+            }
+        ]
+    )
+
+
 def _sync_listen_rules(config: dict[str, object]) -> None:
     target_ids = _target_ids_from_config(config)
     if not target_ids:
@@ -266,6 +416,7 @@ def prompt_basic_config(config: dict[str, object]) -> dict[str, object]:
             "Bot channel",
             [
                 ("feishu", "Feishu"),
+                ("wxpusher", "WxPusher"),
                 ("email", "Email"),
                 ("wechat", "WeChat"),
                 ("dingtalk", "DingTalk"),
@@ -293,6 +444,8 @@ def prompt_basic_config(config: dict[str, object]) -> dict[str, object]:
     }
     if channel == "feishu":
         _configure_feishu_channel(updated)
+    elif channel == "wxpusher":
+        _configure_wxpusher_channel(updated)
     else:
         _prompt_fields(updated, channel_fields.get(channel, []))
     updated["watch_mode"] = prompt_choice(
