@@ -189,13 +189,37 @@ def test_command_mark_seen_validates_and_runs_once(tmp_path: Path) -> None:
     args = argparse.Namespace()
 
     with patch.object(ngawolf_cli, "load_service_config", return_value=config), patch.object(
-        ngawolf_cli.nga_wolf_config, "validate_config", return_value=[]
-    ) as validate_config, patch.object(ngawolf_cli, "build_service_args", return_value=args) as build_service_args, patch.object(
+        ngawolf_cli, "validate_mark_seen_config", return_value=[]
+    ) as validate_mark_seen_config, patch.object(ngawolf_cli, "build_service_args", return_value=args) as build_service_args, patch.object(
         ngawolf_cli.nga_feishu_watch, "run_once", return_value=1
     ) as run_once:
         assert ngawolf_cli.command_mark_seen(paths) == 0
 
-    validate_config.assert_called_once_with(config, require_cookie=True, require_receive_id=False)
+    validate_mark_seen_config.assert_called_once_with(config)
+    build_service_args.assert_called_once_with(paths, config, mark_seen=True)
+    run_once.assert_called_once_with(args)
+
+
+def test_command_mark_seen_accepts_minimal_config_without_delivery_credentials(tmp_path: Path) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+    config = {
+        "bot_channel": "email",
+        "nga_cookie": "cookie",
+        "watch_mode": "author",
+        "watch_author_ids": "150058=author",
+        "preset_thread_ids": "45974302=thread",
+    }
+    args = argparse.Namespace()
+
+    with patch.object(ngawolf_cli, "load_service_config", return_value=config), patch.object(
+        ngawolf_cli, "build_service_args", return_value=args
+    ) as build_service_args, patch.object(ngawolf_cli.nga_feishu_watch, "run_once", return_value=1) as run_once:
+        assert ngawolf_cli.command_mark_seen(paths) == 0
+
     build_service_args.assert_called_once_with(paths, config, mark_seen=True)
     run_once.assert_called_once_with(args)
 

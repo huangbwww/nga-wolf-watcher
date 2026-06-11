@@ -111,6 +111,29 @@ def print_validation_errors(errors: list[str]) -> None:
         print(error, file=sys.stderr)
 
 
+def validate_mark_seen_config(config: dict[str, object]) -> list[str]:
+    errors: list[str] = []
+    if not str(config.get("nga_cookie") or "").strip():
+        errors.append("NGA Cookie")
+
+    watch_mode = str(config.get("watch_mode") or "author").strip()
+    if watch_mode not in {"author", "thread_author", "both"}:
+        errors.append("Watch mode must be author, thread_author, or both")
+
+    for key, label, fallback in [
+        ("watch_author_ids", "Watch author IDs", str(config.get("default_author_id") or "150058").strip() or "150058"),
+        ("preset_thread_ids", "Preset thread IDs", str(config.get("default_tid") or "45974302").strip() or "45974302"),
+    ]:
+        raw = str(config.get(key) or "").strip()
+        if not raw:
+            continue
+        for target in nga_feishu_watch.parse_target_list(raw, fallback):
+            if not target.id.isdigit():
+                errors.append(f"{label} contains non-numeric ID: {target.id}")
+
+    return errors
+
+
 def command_init(paths: CliPaths) -> int:
     if paths.config_path.exists():
         print(f"Config already exists: {paths.config_path}", file=sys.stderr)
@@ -154,7 +177,7 @@ def command_check(paths: CliPaths) -> int:
 
 def command_mark_seen(paths: CliPaths) -> int:
     config = load_service_config(paths)
-    errors = nga_wolf_config.validate_config(config, require_cookie=True, require_receive_id=False)
+    errors = validate_mark_seen_config(config)
     if errors:
         print_validation_errors(errors)
         return 2
