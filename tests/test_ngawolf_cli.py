@@ -105,7 +105,7 @@ def test_prompt_basic_config_keeps_existing_values_when_user_presses_enter() -> 
         "state_path": "state.json",
     }
 
-    with patch("builtins.input", side_effect=[""] * 11):
+    with patch("builtins.input", side_effect=[""] * 9), patch("getpass.getpass", side_effect=["", ""]):
         updated = ngawolf_cli.prompt_basic_config(config)
 
     assert updated == config
@@ -116,8 +116,6 @@ def test_prompt_basic_config_updates_values_when_user_enters_replacements() -> N
     config = dict(nga_wolf_config.DEFAULT_CONFIG)
     inputs = [
         "wechat",
-        "new-cookie",
-        "new-token",
         "new-user-id",
         "thread_author",
         "10=alpha",
@@ -127,7 +125,7 @@ def test_prompt_basic_config_updates_values_when_user_enters_replacements() -> N
         "runtime/state.json",
     ]
 
-    with patch("builtins.input", side_effect=inputs):
+    with patch("builtins.input", side_effect=inputs), patch("getpass.getpass", side_effect=["new-cookie", "new-token"]):
         updated = ngawolf_cli.prompt_basic_config(config)
 
     assert updated["bot_channel"] == "wechat"
@@ -159,17 +157,15 @@ def test_prompt_basic_config_prompts_only_email_fields_for_email_channel() -> No
         prompts.append(prompt)
         return ""
 
-    with patch("builtins.input", side_effect=record_prompt):
+    with patch("builtins.input", side_effect=record_prompt), patch("getpass.getpass", side_effect=["cookie", "secret"]) as getpass_mock:
         updated = ngawolf_cli.prompt_basic_config(config)
 
     watch_author_default = str(nga_wolf_config.DEFAULT_CONFIG["watch_author_ids"])
     preset_thread_default = str(nga_wolf_config.DEFAULT_CONFIG["preset_thread_ids"])
     assert prompts == [
         "Bot channel [email]: ",
-        "NGA cookie [hidden]: ",
         "Email to [receiver@example.com]: ",
         "Email username [sender@example.com]: ",
-        "Email password [hidden]: ",
         "Watch mode [author]: ",
         f"Watch author IDs [{watch_author_default}]: ",
         f"Preset thread IDs [{preset_thread_default}]: ",
@@ -180,28 +176,53 @@ def test_prompt_basic_config_prompts_only_email_fields_for_email_channel() -> No
     assert updated["email_to"] == "receiver@example.com"
     assert updated["email_username"] == "sender@example.com"
     assert updated["email_password"] == "secret"
-    assert len(prompts) == 11
+    assert getpass_mock.call_count == 2
 
 
-def test_prompt_text_masks_existing_secret_value_in_prompt() -> None:
-    prompts: list[str] = []
+def test_prompt_text_uses_getpass_for_secret_input_and_trims_value() -> None:
+    with patch("getpass.getpass", return_value="  secret-value  ") as getpass_mock, patch("builtins.input") as input_mock:
+        assert ngawolf_cli.prompt_text("Token", "current", secret=True) == "secret-value"
 
-    def record_prompt(prompt: str = "") -> str:
-        prompts.append(prompt)
-        return ""
-
-    with patch("builtins.input", side_effect=record_prompt):
-        assert ngawolf_cli.prompt_text("Token", "secret-value", secret=True) == "secret-value"
-
-    assert prompts == ["Token [hidden]: "]
+    getpass_mock.assert_called_once_with("Token [hidden]: ")
+    input_mock.assert_not_called()
 
 
 def test_prompt_text_trims_whitespace_and_preserves_current_on_blank_spaces() -> None:
-    with patch("builtins.input", side_effect=["   "]):
-        assert ngawolf_cli.prompt_text("Label", "old") == "old"
+    with patch("getpass.getpass", return_value="   "), patch("builtins.input") as input_mock:
+        assert ngawolf_cli.prompt_text("Label", "old", secret=True) == "old"
+    input_mock.assert_not_called()
 
-    with patch("builtins.input", side_effect=["  new value  "]):
-        assert ngawolf_cli.prompt_text("Label", "old") == "new value"
+    with patch("getpass.getpass", return_value="  new value  "):
+        assert ngawolf_cli.prompt_text("Label", "old", secret=True) == "new value"
+
+
+def test_prompt_basic_config_normalizes_bot_channel_and_prompts_wechat_fields() -> None:
+    config = dict(nga_wolf_config.DEFAULT_CONFIG)
+    config["nga_cookie"] = "cookie"
+    config["wechat_bot_token"] = "token"
+    prompts: list[str] = []
+    inputs = iter(["WeChat", "", "", "", "", "", "", ""])
+
+    def record_input(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return next(inputs)
+
+    with patch("builtins.input", side_effect=record_input), patch("getpass.getpass", side_effect=["cookie", "token"]) as getpass_mock:
+        updated = ngawolf_cli.prompt_basic_config(config)
+
+    assert updated["bot_channel"] == "wechat"
+    assert prompts == [
+        "Bot channel [feishu]: ",
+        "WeChat target user ID: ",
+        "Watch mode [author]: ",
+        "Watch author IDs [150058=狼大]: ",
+        "Preset thread IDs [45974302=自立自强，科学技术打头阵]: ",
+        "Interval [30]: ",
+        "Jitter [20]: ",
+        "State path [.nga_seen.json]: ",
+    ]
+    assert getpass_mock.call_args_list[0].args == ("NGA cookie [hidden]: ",)
+    assert getpass_mock.call_args_list[1].args == ("WeChat bot token [hidden]: ",)
 
 
 def test_command_init_refuses_to_overwrite_existing_config(tmp_path: Path) -> None:
@@ -269,4 +290,35 @@ def test_command_config_rejects_malformed_json_without_overwriting(tmp_path: Pat
         assert ngawolf_cli.command_config(paths) == 2
 
     prompt_basic_config.assert_not_called()
+    assert config_path.read_text(encoding="utf-8") == original_text
+
+
+def test_command_init_rejects_invalid_bot_channel_without_saving(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    paths = ngawolf_cli.CliPaths(
+        config_path=config_path,
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+
+    with patch("builtins.input", side_effect=["invalid"]), patch("getpass.getpass", return_value="cookie"):
+        assert ngawolf_cli.command_init(paths) == 2
+
+    assert not config_path.exists()
+
+
+def test_command_config_rejects_invalid_bot_channel_without_overwriting(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    base_config = dict(nga_wolf_config.DEFAULT_CONFIG)
+    nga_wolf_config.save_config(base_config, config_path)
+    original_text = config_path.read_text(encoding="utf-8")
+    paths = ngawolf_cli.CliPaths(
+        config_path=config_path,
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+
+    with patch("builtins.input", side_effect=["invalid"]), patch("getpass.getpass", return_value="cookie"):
+        assert ngawolf_cli.command_config(paths) == 2
+
     assert config_path.read_text(encoding="utf-8") == original_text

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import getpass
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,7 +25,13 @@ def prompt_text(label: str, current: object = "", *, secret: bool = False) -> st
         prompt = f"{label} [{current_text}]: "
     else:
         prompt = f"{label}: "
-    value = input(prompt).strip()
+    if secret:
+        try:
+            value = getpass.getpass(prompt).strip()
+        except (EOFError, OSError, ValueError):
+            value = input(prompt).strip()
+    else:
+        value = input(prompt).strip()
     return current_text if value == "" else value
 
 
@@ -33,9 +40,16 @@ def _prompt_fields(config: dict[str, object], fields: list[tuple[str, str, bool]
         config[key] = prompt_text(label, config.get(key, ""), secret=secret)
 
 
+def _normalize_bot_channel(value: object) -> str:
+    channel = str(value or "feishu").strip().lower()
+    if channel not in {"feishu", "wechat", "dingtalk", "email"}:
+        raise ValueError("bot_channel must be one of: feishu, wechat, dingtalk, email")
+    return channel
+
+
 def prompt_basic_config(config: dict[str, object]) -> dict[str, object]:
     updated = dict(config)
-    updated["bot_channel"] = prompt_text("Bot channel", updated.get("bot_channel", "feishu"))
+    updated["bot_channel"] = _normalize_bot_channel(prompt_text("Bot channel", updated.get("bot_channel", "feishu")))
     updated["nga_cookie"] = prompt_text("NGA cookie", updated.get("nga_cookie", ""), secret=True)
     channel = str(updated.get("bot_channel") or "feishu").strip()
     channel_fields = {
@@ -86,7 +100,11 @@ def command_init(paths: CliPaths) -> int:
     if paths.config_path.exists():
         print(f"Config already exists: {paths.config_path}", file=sys.stderr)
         return 2
-    config = prompt_basic_config(dict(nga_wolf_config.DEFAULT_CONFIG))
+    try:
+        config = prompt_basic_config(dict(nga_wolf_config.DEFAULT_CONFIG))
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     nga_wolf_config.save_config(config, paths.config_path)
     print(paths.config_path)
     return 0
@@ -100,7 +118,11 @@ def command_config(paths: CliPaths) -> int:
     if config is None:
         print(f"Config is not valid JSON: {paths.config_path}", file=sys.stderr)
         return 2
-    updated = prompt_basic_config(config)
+    try:
+        updated = prompt_basic_config(config)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     nga_wolf_config.save_config(updated, paths.config_path)
     print(paths.config_path)
     return 0
