@@ -55,6 +55,12 @@ DEFAULT_CONFIG = {
     "email_reply_to": "",
     "email_to": "",
     "email_smtp_profiles": "[]",
+    "wxpusher_spts": "",
+    "wxpusher_app_token": "",
+    "wxpusher_uids": "",
+    "wxpusher_topic_ids": "",
+    "wxpusher_content_type": "markdown",
+    "wxpusher_profiles": "[]",
     "default_author_id": "150058",
     "default_tid": "45974302",
     "watch_mode": "author",
@@ -185,6 +191,8 @@ def ensure_profile_id(prefix: str, profile: dict[str, Any]) -> str:
         return nga_feishu_watch.stable_profile_id("email", str(profile.get("username") or ""), str(profile.get("from_email") or ""), str(profile.get("label") or ""))
     if prefix == "dingtalk":
         return nga_feishu_watch.stable_profile_id("dingtalk", str(profile.get("account_id") or "default"), str(profile.get("client_id") or ""), str(profile.get("label") or ""))
+    if prefix == "wxpusher":
+        return nga_feishu_watch.stable_profile_id("wxpusher", str(profile.get("spts") or ""), str(profile.get("app_token") or ""), str(profile.get("label") or ""))
     return nga_feishu_watch.stable_profile_id("wechat", str(profile.get("account_id") or "default"), str(profile.get("token") or "")[:16])
 
 
@@ -317,21 +325,85 @@ def load_email_profiles(config: dict[str, object]) -> list[dict[str, Any]]:
     ]
 
 
+def load_wxpusher_profiles(config: dict[str, object]) -> list[dict[str, Any]]:
+    profiles = json_list_config(config, "wxpusher_profiles")
+    for profile in profiles:
+        profile["id"] = ensure_profile_id("wxpusher", profile)
+        profile.setdefault("label", "")
+        profile.setdefault("spts", "")
+        profile.setdefault("app_token", "")
+        profile.setdefault("uids", "")
+        profile.setdefault("topic_ids", "")
+        profile.setdefault("content_type", "markdown")
+    if profiles:
+        return profiles
+    spts = str(config.get("wxpusher_spts") or "").strip()
+    app_token = str(config.get("wxpusher_app_token") or "").strip()
+    if not (spts or app_token):
+        return []
+    return [
+        {
+            "id": "default",
+            "label": "Default WxPusher",
+            "spts": spts,
+            "app_token": app_token,
+            "uids": str(config.get("wxpusher_uids") or "").strip(),
+            "topic_ids": str(config.get("wxpusher_topic_ids") or "").strip(),
+            "content_type": str(config.get("wxpusher_content_type") or "markdown").strip() or "markdown",
+        }
+    ]
+
+
 def load_push_targets(
     config: dict[str, object],
     feishu_profiles: list[dict[str, Any]],
     wechat_profiles: list[dict[str, Any]],
     dingtalk_profiles: list[dict[str, Any]] | None = None,
     email_profiles: list[dict[str, Any]] | None = None,
+    wxpusher_profiles: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     targets = json_list_config(config, "push_targets")
     for target in targets:
-        target.setdefault("id", nga_feishu_watch.stable_profile_id("target", str(target.get("channel") or ""), str(target.get("profile_id") or ""), str(target.get("receive_id") or "")))
+        channel = str(target.get("channel") or "feishu").strip().lower()
+        if channel not in {"feishu", "wechat", "dingtalk", "email", "wxpusher"}:
+            channel = "feishu"
+        target["channel"] = channel
+        if not str(target.get("receive_id") or "").strip():
+            target["receive_id"] = (
+                str(target.get("chat_id") or "").strip()
+                or str(target.get("target_user_id") or "").strip()
+                or str(target.get("target_user_ids") or "").strip()
+                or str(target.get("feishu_receive_id") or "").strip()
+                or str(target.get("dingtalk_target_user_ids") or "").strip()
+                or str(target.get("email_to") or "").strip()
+                or str(target.get("wxpusher_spts") or "").strip()
+                or str(target.get("spt") or "").strip()
+                or str(target.get("spts") or "").strip()
+                or str(target.get("wxpusher_uids") or "").strip()
+                or str(target.get("uid") or "").strip()
+                or str(target.get("uids") or "").strip()
+                or str(target.get("wxpusher_topic_ids") or "").strip()
+                or str(target.get("topic_id") or "").strip()
+                or str(target.get("topic_ids") or "").strip()
+                or str(target.get("route_receive_id") or "").strip()
+            )
+        target.setdefault("id", nga_feishu_watch.stable_profile_id("target", channel, str(target.get("profile_id") or ""), str(target.get("receive_id") or "")))
         target.setdefault("label", "")
-        target.setdefault("channel", "feishu")
         target.setdefault("profile_id", "")
-        target.setdefault("receive_id", "")
-        target.setdefault("id_type", "chat_id")
+        id_type = str(target.get("id_type") or target.get("receive_id_type") or target.get("feishu_id_type") or "").strip()
+        if not id_type or (channel == "wxpusher" and id_type == "chat_id"):
+            if channel == "email":
+                id_type = "email"
+            elif channel in {"wechat", "dingtalk"}:
+                id_type = "user_id"
+            elif channel == "wxpusher":
+                if target.get("wxpusher_spts") or target.get("spt") or target.get("spts"):
+                    id_type = "spt"
+                else:
+                    id_type = "topic_id" if (target.get("wxpusher_topic_ids") or target.get("topic_id") or target.get("topic_ids")) else "uid"
+            else:
+                id_type = "chat_id"
+        target["id_type"] = id_type
         target.setdefault("default_author_id", "")
         target.setdefault("default_tid", "")
     if targets:
@@ -393,6 +465,36 @@ def load_push_targets(
                 "default_tid": str(config.get("default_tid") or ""),
             }
         )
+    wxpusher_uids = str(config.get("wxpusher_uids") or "").strip()
+    wxpusher_topic_ids = str(config.get("wxpusher_topic_ids") or "").strip()
+    wxpusher_spts = str(config.get("wxpusher_spts") or "").strip()
+    wxpusher_profiles = wxpusher_profiles or []
+    if wxpusher_profiles and (wxpusher_spts or any(str(profile.get("spts") or "").strip() for profile in wxpusher_profiles)):
+        fallback.append(
+            {
+                "id": "default_wxpusher",
+                "label": "Default WxPusher",
+                "channel": "wxpusher",
+                "profile_id": str(wxpusher_profiles[0].get("id") or "default"),
+                "receive_id": "",
+                "id_type": "spt",
+                "default_author_id": str(config.get("default_author_id") or ""),
+                "default_tid": str(config.get("default_tid") or ""),
+            }
+        )
+    elif wxpusher_profiles and (wxpusher_uids or wxpusher_topic_ids):
+        fallback.append(
+            {
+                "id": "default_wxpusher",
+                "label": "Default WxPusher",
+                "channel": "wxpusher",
+                "profile_id": str(wxpusher_profiles[0].get("id") or "default"),
+                "receive_id": wxpusher_uids or wxpusher_topic_ids,
+                "id_type": "uid" if wxpusher_uids else "topic_id",
+                "default_author_id": str(config.get("default_author_id") or ""),
+                "default_tid": str(config.get("default_tid") or ""),
+            }
+        )
     return fallback
 
 
@@ -422,6 +524,8 @@ def load_listen_rules(config: dict[str, object]) -> list[dict[str, Any]]:
         default_targets.append("default_wechat")
     if str(config.get("email_to") or "").strip():
         default_targets.append("default_email")
+    if str(config.get("wxpusher_spts") or "").strip() or str(config.get("wxpusher_uids") or "").strip() or str(config.get("wxpusher_topic_ids") or "").strip():
+        default_targets.append("default_wxpusher")
     if mode in {"author", "both"}:
         for target in nga_feishu_watch.parse_target_list(config.get("watch_author_ids"), str(config.get("default_author_id") or "150058")):
             legacy.append({"id": f"author:{target.id}", "label": target.label, "mode": "author", "author_id": target.id, "tid": "", "target_ids": list(default_targets)})
@@ -521,6 +625,12 @@ def build_args(
         email_from_name=str(config.get("email_from_name") or "NGA Wolf Watcher").strip(),
         email_reply_to=str(config.get("email_reply_to") or "").strip(),
         email_to=str(config.get("email_to") or "").strip(),
+        wxpusher_spts=str(config.get("wxpusher_spts") or "").strip(),
+        wxpusher_profiles=str(config.get("wxpusher_profiles") or "").strip(),
+        wxpusher_app_token=str(config.get("wxpusher_app_token") or "").strip(),
+        wxpusher_uids=str(config.get("wxpusher_uids") or "").strip(),
+        wxpusher_topic_ids=str(config.get("wxpusher_topic_ids") or "").strip(),
+        wxpusher_content_type=str(config.get("wxpusher_content_type") or "markdown").strip() or "markdown",
         wechat_poll=str(config.get("bot_channel") or "feishu").strip() == "wechat",
         timeout=int_value(config, "timeout", 20),
         dry_run=False,
@@ -585,17 +695,22 @@ def validate_config(
     require_cookie: bool = True,
 ) -> list[str]:
     channel = str(config.get("bot_channel") or "feishu").strip()
-    if channel not in {"feishu", "wechat", "dingtalk", "email"}:
+    if channel not in {"feishu", "wechat", "dingtalk", "email", "wxpusher"}:
         channel = "feishu"
     required: list[tuple[str, str]] = []
     feishu_profiles = load_feishu_profiles(config)
     wechat_profiles = load_wechat_profiles(config)
     dingtalk_profiles = load_dingtalk_profiles(config)
     email_profiles = load_email_profiles(config)
+    wxpusher_profiles = load_wxpusher_profiles(config)
     has_feishu_profile = any(str(profile.get("app_id") or "").strip() and str(profile.get("app_secret") or "").strip() for profile in feishu_profiles)
     has_wechat_profile = any(str(profile.get("token") or "").strip() for profile in wechat_profiles)
     has_dingtalk_profile = any(str(profile.get("client_id") or "").strip() and str(profile.get("client_secret") or "").strip() for profile in dingtalk_profiles)
     has_email_profile = any(str(profile.get("username") or "").strip() and str(profile.get("password") or "").strip() for profile in email_profiles)
+    has_wxpusher_profile = any(
+        str(profile.get("spts") or "").strip() or str(profile.get("app_token") or "").strip()
+        for profile in wxpusher_profiles
+    )
     push_targets = nga_feishu_watch.parse_push_targets(config.get("push_targets"))
     listen_rules = nga_feishu_watch.parse_listen_rules(config.get("listen_rules"))
     has_structured_routes = bool(push_targets or listen_rules)
@@ -639,6 +754,17 @@ def validate_config(
             required.append(("email_to", "收件邮箱"))
     if has_email_profile:
         required = [(key, label) for key, label in required if key not in {"email_username", "email_password"}]
+    if not has_structured_routes and channel == "wxpusher":
+        if not has_wxpusher_profile:
+            required.append(("wxpusher_spts", "WxPusher SPT"))
+        if require_receive_id:
+            spts = str(config.get("wxpusher_spts") or "").strip()
+            uids = str(config.get("wxpusher_uids") or "").strip()
+            topic_ids = str(config.get("wxpusher_topic_ids") or "").strip()
+            if not (spts or uids or topic_ids):
+                required.append(("wxpusher_uids", "WxPusher UID or Topic ID"))
+    if has_wxpusher_profile:
+        required = [(key, label) for key, label in required if key not in {"wxpusher_spts", "wxpusher_app_token"}]
     if require_cookie:
         required.append(("nga_cookie", "NGA Cookie"))
     errors = [label for key, label in required if not str(config.get(key) or "").strip()]
@@ -684,6 +810,17 @@ def validate_config(
                 errors.append(f"推送目标 {target.label or target.id} 的邮箱发信配置缺少登录账号或密码/授权码")
             if not target.receive_id:
                 errors.append(f"推送目标 {target.label or target.id} 缺少收件邮箱")
+        if target.channel == "wxpusher":
+            profile = next((item for item in wxpusher_profiles if str(item.get("id") or "") == target.profile_id), None)
+            profile_spts = str(profile.get("spts") or "").strip() if profile else ""
+            if not profile:
+                errors.append(f"Push target {target.label or target.id} has no usable WxPusher profile")
+            elif profile_spts:
+                pass
+            elif not str(profile.get("app_token") or "").strip():
+                errors.append(f"Push target {target.label or target.id} WxPusher profile is missing App Token")
+            if not profile_spts and not target.receive_id:
+                errors.append(f"Push target {target.label or target.id} is missing UID or Topic ID")
     for rule in listen_rules:
         if not rule.author_id.isdigit() or (rule.mode == "thread_author" and not rule.tid.isdigit()):
             errors.append(f"监听规则 {rule.label or rule.id} 包含非数字 NGA ID")

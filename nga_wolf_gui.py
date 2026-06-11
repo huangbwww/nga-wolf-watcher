@@ -56,6 +56,7 @@ ROUTE_CHANNEL_LABELS = {
     "wechat": "微信",
     "dingtalk": "钉钉",
     "email": "邮箱",
+    "wxpusher": "WxPusher",
 }
 ROUTE_CHANNEL_VALUES = {label: value for value, label in ROUTE_CHANNEL_LABELS.items()}
 
@@ -235,14 +236,51 @@ def load_email_profiles(config: dict[str, object]) -> list[dict[str, Any]]:
     return nga_wolf_config.load_email_profiles(config)
 
 
+def load_wxpusher_profiles(config: dict[str, object]) -> list[dict[str, Any]]:
+    profiles = json_list_config(config, "wxpusher_profiles")
+    for profile in profiles:
+        profile["id"] = ensure_profile_id("wxpusher", profile)
+        profile.setdefault("label", "")
+        profile.setdefault("spts", "")
+        profile.setdefault("app_token", "")
+        profile.setdefault("uids", "")
+        profile.setdefault("topic_ids", "")
+        profile.setdefault("content_type", "markdown")
+    if profiles:
+        return profiles
+    spts = str(config.get("wxpusher_spts") or "").strip()
+    app_token = str(config.get("wxpusher_app_token") or "").strip()
+    if not (spts or app_token):
+        return []
+    return [
+        {
+            "id": "default",
+            "label": "默认 WxPusher",
+            "spts": spts,
+            "app_token": app_token,
+            "uids": str(config.get("wxpusher_uids") or "").strip(),
+            "topic_ids": str(config.get("wxpusher_topic_ids") or "").strip(),
+            "content_type": str(config.get("wxpusher_content_type") or "markdown").strip() or "markdown",
+        }
+    ]
+
+
 def load_push_targets(
     config: dict[str, object],
     feishu_profiles: list[dict[str, Any]],
     wechat_profiles: list[dict[str, Any]],
     dingtalk_profiles: list[dict[str, Any]] | None = None,
     email_profiles: list[dict[str, Any]] | None = None,
+    wxpusher_profiles: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    return nga_wolf_config.load_push_targets(config, feishu_profiles, wechat_profiles, dingtalk_profiles, email_profiles)
+    return nga_wolf_config.load_push_targets(
+        config,
+        feishu_profiles,
+        wechat_profiles,
+        dingtalk_profiles,
+        email_profiles,
+        wxpusher_profiles,
+    )
 
 
 def load_listen_rules(config: dict[str, object]) -> list[dict[str, Any]]:
@@ -497,7 +535,7 @@ class App:
         }
         if not self.vars["feishu_id_type"].get():
             self.vars["feishu_id_type"].set("chat_id")
-        if self.vars["bot_channel"].get() not in {"feishu", "wechat", "dingtalk", "email"}:
+        if self.vars["bot_channel"].get() not in {"feishu", "wechat", "dingtalk", "email", "wxpusher"}:
             self.vars["bot_channel"].set("feishu")
         if not self.vars["wechat_bot_base_url"].get():
             self.vars["wechat_bot_base_url"].set("https://ilinkai.weixin.qq.com")
@@ -550,7 +588,15 @@ class App:
         self.wechat_profiles = load_wechat_profiles(self.config)
         self.dingtalk_profiles = load_dingtalk_profiles(self.config)
         self.email_profiles = load_email_profiles(self.config)
-        self.push_targets = load_push_targets(self.config, self.feishu_profiles, self.wechat_profiles, self.dingtalk_profiles, self.email_profiles)
+        self.wxpusher_profiles = load_wxpusher_profiles(self.config)
+        self.push_targets = load_push_targets(
+            self.config,
+            self.feishu_profiles,
+            self.wechat_profiles,
+            self.dingtalk_profiles,
+            self.email_profiles,
+            self.wxpusher_profiles,
+        )
         self.listen_rules = load_listen_rules(self.config)
         self.feishu_profile_listboxes: list[Listbox] = []
         self.wechat_profile_listboxes: list[Listbox] = []
@@ -3471,6 +3517,7 @@ class App:
         config["wechat_bot_profiles"] = json.dumps(self.wechat_profiles, ensure_ascii=False, indent=2)
         config["dingtalk_bot_profiles"] = json.dumps(getattr(self, "dingtalk_profiles", []), ensure_ascii=False, indent=2)
         config["email_smtp_profiles"] = json.dumps(getattr(self, "email_profiles", []), ensure_ascii=False, indent=2)
+        config["wxpusher_profiles"] = json.dumps(getattr(self, "wxpusher_profiles", []), ensure_ascii=False, indent=2)
         config["push_targets"] = json.dumps(self.push_targets, ensure_ascii=False, indent=2)
         config["listen_rules"] = json.dumps(self.listen_rules, ensure_ascii=False, indent=2)
         schedule_target_ids = self.ai_schedule_target_ids()
@@ -3522,12 +3569,34 @@ class App:
             config["email_from"] = ""
             config["email_from_name"] = "NGA Wolf Watcher"
             config["email_reply_to"] = ""
+        if getattr(self, "wxpusher_profiles", []):
+            profile = self.wxpusher_profiles[0]
+            config["wxpusher_spts"] = str(profile.get("spts") or "").strip()
+            config["wxpusher_app_token"] = str(profile.get("app_token") or "").strip()
+            config["wxpusher_uids"] = str(profile.get("uids") or "").strip()
+            config["wxpusher_topic_ids"] = str(profile.get("topic_ids") or "").strip()
+            config["wxpusher_content_type"] = str(profile.get("content_type") or "markdown").strip() or "markdown"
+        else:
+            config["wxpusher_spts"] = ""
+            config["wxpusher_app_token"] = ""
+            config["wxpusher_uids"] = ""
+            config["wxpusher_topic_ids"] = ""
+            config["wxpusher_content_type"] = "markdown"
         first_feishu_target = next((target for target in self.push_targets if str(target.get("channel") or "feishu") == "feishu"), None)
         config["feishu_receive_id"] = str(first_feishu_target.get("receive_id") or "").strip() if first_feishu_target else ""
         if first_feishu_target and str(first_feishu_target.get("id_type") or "").strip():
             config["feishu_id_type"] = str(first_feishu_target.get("id_type") or "chat_id").strip() or "chat_id"
         first_email_target = next((target for target in self.push_targets if str(target.get("channel") or "feishu") == "email"), None)
         config["email_to"] = str(first_email_target.get("receive_id") or "").strip() if first_email_target else ""
+        first_wxpusher_target = next((target for target in self.push_targets if str(target.get("channel") or "feishu") == "wxpusher"), None)
+        if first_wxpusher_target:
+            receive_id = str(first_wxpusher_target.get("receive_id") or "").strip()
+            if str(first_wxpusher_target.get("id_type") or "uid").strip() in {"topic", "topic_id", "topic_ids"}:
+                config["wxpusher_topic_ids"] = receive_id
+                config["wxpusher_uids"] = ""
+            else:
+                config["wxpusher_uids"] = receive_id
+                config["wxpusher_topic_ids"] = ""
         author_text = str(config.get("watch_author_ids") or "").strip()
         thread_text = str(config.get("preset_thread_ids") or "").strip()
         author_targets = nga_feishu_watch.parse_target_list(author_text, "")

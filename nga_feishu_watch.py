@@ -46,6 +46,7 @@ import ai_analysis
 import dingtalk_bot
 import email_channel
 import wechat_bot
+import wxpusher_channel
 
 
 NGA_ENDPOINT = "https://bbs.nga.cn/thread.php"
@@ -283,6 +284,17 @@ class EmailSmtpProfile:
 
 
 @dataclass(frozen=True)
+class WxPusherProfile:
+    id: str
+    label: str = ""
+    spts: str = ""
+    app_token: str = ""
+    uids: str = ""
+    topic_ids: str = ""
+    content_type: str = wxpusher_channel.DEFAULT_CONTENT_TYPE
+
+
+@dataclass(frozen=True)
 class PushTarget:
     id: str
     label: str = ""
@@ -399,7 +411,7 @@ def parse_route_parts(route_parts: list[str]) -> dict[str, str]:
 
 def route_channel_from_parts(route: dict[str, str], default: str = "") -> str:
     value = (route.get("channel") or route.get("route_channel") or default).strip().lower()
-    if value in {"feishu", "wechat", "email", "dingtalk"}:
+    if value in {"feishu", "wechat", "email", "dingtalk", "wxpusher"}:
         return value
     if route.get("wechat_profile") or route.get("wechat_profile_id"):
         return "wechat"
@@ -407,9 +419,57 @@ def route_channel_from_parts(route: dict[str, str], default: str = "") -> str:
         return "dingtalk"
     if route.get("email_profile") or route.get("email_profile_id"):
         return "email"
+    if route.get("wxpusher_profile") or route.get("wxpusher_profile_id") or route.get("wxpusher_spts") or route.get("spt") or route.get("spts") or route.get("wxpusher_uids") or route.get("wxpusher_topic_ids"):
+        return "wxpusher"
     if route.get("bot") or route.get("profile") or route.get("profile_id") or route.get("receive_id"):
         return "feishu"
     return ""
+
+
+def route_id_type_from_parts(route: dict[str, str]) -> str:
+    explicit = route.get("id_type", "") or route.get("receive_id_type", "") or route.get("feishu_id_type", "")
+    if explicit:
+        return explicit
+    if route.get("wxpusher_spts") or route.get("spt") or route.get("spts"):
+        return "spt"
+    if route.get("wxpusher_topic_ids") or route.get("topic_id") or route.get("topic_ids"):
+        return "topic_id"
+    if route.get("wxpusher_uids") or route.get("uid") or route.get("uids"):
+        return "uid"
+    return "chat_id"
+
+
+def route_receive_id_from_parts(route: dict[str, str]) -> str:
+    return (
+        route.get("receive_id", "")
+        or route.get("feishu_receive_id", "")
+        or route.get("dingtalk_target_user_ids", "")
+        or route.get("target_user_ids", "")
+        or route.get("email_to", "")
+        or route.get("wxpusher_spts", "")
+        or route.get("spt", "")
+        or route.get("spts", "")
+        or route.get("wxpusher_uids", "")
+        or route.get("uid", "")
+        or route.get("uids", "")
+        or route.get("wxpusher_topic_ids", "")
+        or route.get("topic_id", "")
+        or route.get("topic_ids", "")
+    )
+
+
+def push_target_id_type_from_item(item: dict[str, Any], channel: str) -> str:
+    explicit = str(item.get("id_type") or item.get("receive_id_type") or item.get("feishu_id_type") or "").strip()
+    if explicit:
+        return explicit
+    if channel == "email":
+        return "email"
+    if channel == "dingtalk":
+        return "user_id"
+    if channel == "wxpusher":
+        inferred = route_id_type_from_parts(item)
+        return inferred if inferred != "chat_id" else "uid"
+    return "chat_id"
 
 
 def parse_target_list(raw: Any, fallback_id: str = "") -> list[WatchTarget]:
@@ -444,9 +504,9 @@ def parse_target_list(raw: Any, fallback_id: str = "") -> list[WatchTarget]:
                 target_id,
                 label,
                 route_channel=route_channel_from_parts(route),
-                route_profile_id=route.get("bot", "") or route.get("profile", "") or route.get("profile_id", "") or route.get("wechat_profile", "") or route.get("wechat_profile_id", "") or route.get("dingtalk_profile", "") or route.get("dingtalk_profile_id", "") or route.get("email_profile", "") or route.get("email_profile_id", ""),
-                route_receive_id=route.get("receive_id", "") or route.get("feishu_receive_id", "") or route.get("dingtalk_target_user_ids", "") or route.get("target_user_ids", "") or route.get("email_to", ""),
-                route_id_type=route.get("id_type", "") or route.get("receive_id_type", "") or route.get("feishu_id_type", "chat_id"),
+                route_profile_id=route.get("bot", "") or route.get("profile", "") or route.get("profile_id", "") or route.get("wechat_profile", "") or route.get("wechat_profile_id", "") or route.get("dingtalk_profile", "") or route.get("dingtalk_profile_id", "") or route.get("email_profile", "") or route.get("email_profile_id", "") or route.get("wxpusher_profile", "") or route.get("wxpusher_profile_id", ""),
+                route_receive_id=route_receive_id_from_parts(route),
+                route_id_type=route_id_type_from_parts(route),
             )
         )
     fallback = str(fallback_id or "").strip()
@@ -497,11 +557,11 @@ def parse_thread_author_watches(raw: Any) -> list[ThreadAuthorWatch]:
                     author_id=author_id,
                     label=label,
                     route_channel=route_channel_from_parts(route),
-                    route_profile_id=route.get("bot", "") or route.get("profile", "") or route.get("profile_id", "") or route.get("wechat_profile", "") or route.get("wechat_profile_id", "") or route.get("dingtalk_profile", "") or route.get("dingtalk_profile_id", "") or route.get("email_profile", "") or route.get("email_profile_id", ""),
+                    route_profile_id=route.get("bot", "") or route.get("profile", "") or route.get("profile_id", "") or route.get("wechat_profile", "") or route.get("wechat_profile_id", "") or route.get("dingtalk_profile", "") or route.get("dingtalk_profile_id", "") or route.get("email_profile", "") or route.get("email_profile_id", "") or route.get("wxpusher_profile", "") or route.get("wxpusher_profile_id", ""),
                     feishu_app_id=route.get("app_id", "") or route.get("feishu_app_id", ""),
                     feishu_app_secret=route.get("app_secret", "") or route.get("feishu_app_secret", ""),
-                    feishu_receive_id=route.get("receive_id", "") or route.get("feishu_receive_id", "") or route.get("dingtalk_target_user_ids", "") or route.get("target_user_ids", "") or route.get("email_to", ""),
-                    feishu_id_type=route.get("id_type", "") or route.get("receive_id_type", "") or route.get("feishu_id_type", "chat_id"),
+                    feishu_receive_id=route_receive_id_from_parts(route),
+                    feishu_id_type=route_id_type_from_parts(route),
                 )
             )
     return watches
@@ -670,9 +730,35 @@ def parse_email_smtp_profiles(raw: Any) -> list[EmailSmtpProfile]:
     return profiles
 
 
+def parse_wxpusher_profiles(raw: Any) -> list[WxPusherProfile]:
+    profiles: list[WxPusherProfile] = []
+    seen: set[str] = set()
+    for item in json_list_value(raw):
+        if not isinstance(item, dict):
+            continue
+        spts = str(item.get("spts") or item.get("spt") or item.get("wxpusher_spts") or item.get("wxpusher_spt") or "").strip()
+        app_token = str(item.get("app_token") or item.get("appToken") or item.get("wxpusher_app_token") or "").strip()
+        profile_id = str(item.get("id") or "").strip() or stable_profile_id("wxpusher", spts, app_token, str(item.get("label") or ""))
+        if not profile_id or profile_id in seen:
+            continue
+        seen.add(profile_id)
+        profiles.append(
+            WxPusherProfile(
+                id=profile_id,
+                label=str(item.get("label") or item.get("name") or "").strip(),
+                spts=spts,
+                app_token=app_token,
+                uids=str(item.get("uids") or item.get("uid") or item.get("wxpusher_uids") or "").strip(),
+                topic_ids=str(item.get("topic_ids") or item.get("topicIds") or item.get("topic_id") or item.get("wxpusher_topic_ids") or "").strip(),
+                content_type=str(item.get("content_type") or item.get("contentType") or item.get("wxpusher_content_type") or wxpusher_channel.DEFAULT_CONTENT_TYPE).strip() or wxpusher_channel.DEFAULT_CONTENT_TYPE,
+            )
+        )
+    return profiles
+
+
 def normalize_channel(raw: Any, default: str = "feishu") -> str:
     value = str(raw or default).strip().lower()
-    return value if value in {"feishu", "wechat", "email", "dingtalk"} else default
+    return value if value in {"feishu", "wechat", "email", "dingtalk", "wxpusher"} else default
 
 
 def normalize_listen_mode(raw: Any, default: str = "thread_author") -> str:
@@ -696,6 +782,15 @@ def parse_push_targets(raw: Any) -> list[PushTarget]:
             or item.get("target_user_ids")
             or item.get("feishu_receive_id")
             or item.get("dingtalk_target_user_ids")
+            or item.get("wxpusher_spts")
+            or item.get("spt")
+            or item.get("spts")
+            or item.get("wxpusher_uids")
+            or item.get("uid")
+            or item.get("uids")
+            or item.get("wxpusher_topic_ids")
+            or item.get("topic_id")
+            or item.get("topic_ids")
             or item.get("route_receive_id")
             or ""
         ).strip()
@@ -711,7 +806,7 @@ def parse_push_targets(raw: Any) -> list[PushTarget]:
                 channel=channel,
                 profile_id=profile_id,
                 receive_id=receive_id,
-                id_type=str(item.get("id_type") or item.get("receive_id_type") or item.get("feishu_id_type") or ("email" if channel == "email" else ("user_id" if channel == "dingtalk" else "chat_id"))).strip() or ("email" if channel == "email" else ("user_id" if channel == "dingtalk" else "chat_id")),
+                id_type=push_target_id_type_from_item(item, channel),
                 default_author_id=str(item.get("default_author_id") or item.get("author_id") or "").strip(),
                 default_tid=str(item.get("default_tid") or item.get("tid") or "").strip(),
             )
@@ -864,6 +959,28 @@ def email_smtp_profiles(args: argparse.Namespace) -> list[EmailSmtpProfile]:
     ]
 
 
+def wxpusher_profiles(args: argparse.Namespace) -> list[WxPusherProfile]:
+    raw = getattr(args, "wxpusher_profiles", "") or os.getenv("WXPUSHER_PROFILES", "")
+    profiles = parse_wxpusher_profiles(raw)
+    if profiles:
+        return profiles
+    spts = getattr(args, "wxpusher_spts", "") or os.getenv("WXPUSHER_SPTS", "") or os.getenv("WXPUSHER_SPT", "")
+    app_token = getattr(args, "wxpusher_app_token", "") or os.getenv("WXPUSHER_APP_TOKEN", "")
+    if not (spts or app_token):
+        return []
+    return [
+        WxPusherProfile(
+            id="default",
+            label="default",
+            spts=str(spts).strip(),
+            app_token=str(app_token).strip(),
+            uids=str(getattr(args, "wxpusher_uids", "") or os.getenv("WXPUSHER_UIDS", "")).strip(),
+            topic_ids=str(getattr(args, "wxpusher_topic_ids", "") or os.getenv("WXPUSHER_TOPIC_IDS", "")).strip(),
+            content_type=str(getattr(args, "wxpusher_content_type", "") or os.getenv("WXPUSHER_CONTENT_TYPE", wxpusher_channel.DEFAULT_CONTENT_TYPE)).strip() or wxpusher_channel.DEFAULT_CONTENT_TYPE,
+        )
+    ]
+
+
 def configured_push_targets(args: argparse.Namespace) -> list[PushTarget]:
     raw = getattr(args, "push_targets", "") or os.getenv("NGA_PUSH_TARGETS", "")
     targets = parse_push_targets(raw)
@@ -920,6 +1037,39 @@ def configured_push_targets(args: argparse.Namespace) -> list[PushTarget]:
                 )
             ]
         return []
+    if channel == "wxpusher":
+        profile = find_wxpusher_profile(args, "")
+        spts = str(getattr(args, "wxpusher_spts", "") or os.getenv("WXPUSHER_SPTS", "") or os.getenv("WXPUSHER_SPT", "")).strip()
+        uids = str(getattr(args, "wxpusher_uids", "") or os.getenv("WXPUSHER_UIDS", "")).strip()
+        topic_ids = str(getattr(args, "wxpusher_topic_ids", "") or os.getenv("WXPUSHER_TOPIC_IDS", "")).strip()
+        receive_id = uids or topic_ids or (profile.uids if profile else "") or (profile.topic_ids if profile else "")
+        if spts or (profile and profile.spts):
+            return [
+                PushTarget(
+                    id="default",
+                    label="Default WxPusher",
+                    channel="wxpusher",
+                    profile_id=profile.id if profile else "",
+                    receive_id="",
+                    id_type="spt",
+                    default_author_id=str(getattr(args, "default_author_id", "") or DEFAULT_AUTHOR_ID),
+                    default_tid=str(getattr(args, "default_tid", "") or DEFAULT_TID),
+                )
+            ]
+        if profile or receive_id:
+            return [
+                PushTarget(
+                    id="default",
+                    label="Default WxPusher",
+                    channel="wxpusher",
+                    profile_id=profile.id if profile else "",
+                    receive_id=receive_id,
+                    id_type="uid" if (uids or (profile and profile.uids)) else "topic_id",
+                    default_author_id=str(getattr(args, "default_author_id", "") or DEFAULT_AUTHOR_ID),
+                    default_tid=str(getattr(args, "default_tid", "") or DEFAULT_TID),
+                )
+            ]
+        return []
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     profile = find_feishu_profile(args, "")
     if app_id or app_secret or receive_id or profile:
@@ -958,7 +1108,7 @@ def command_channel_profile_filter(args: argparse.Namespace) -> dict[str, set[st
     rules = configured_listen_rules(args)
     if not rules:
         return None
-    active: dict[str, set[str]] = {"feishu": set(), "wechat": set(), "dingtalk": set(), "email": set()}
+    active: dict[str, set[str]] = {"feishu": set(), "wechat": set(), "dingtalk": set(), "email": set(), "wxpusher": set()}
     for rule in rules:
         for target_id in rule.target_ids:
             target = find_push_target(args, target_id)
@@ -1044,6 +1194,19 @@ def args_for_push_target(args: argparse.Namespace, target: PushTarget) -> argpar
             route_channel="email",
             route_profile_id=target.profile_id,
             receive_id=target.receive_id,
+        )
+        if target.default_author_id:
+            cloned.default_author_id = target.default_author_id
+        if target.default_tid:
+            cloned.default_tid = target.default_tid
+        return cloned
+    if target.channel == "wxpusher":
+        cloned = args_for_configured_route(
+            args,
+            route_channel="wxpusher",
+            route_profile_id=target.profile_id,
+            receive_id=target.receive_id,
+            receive_id_type=target.id_type,
         )
         if target.default_author_id:
             cloned.default_author_id = target.default_author_id
@@ -1157,7 +1320,7 @@ def add_thread_author_source(post: NgaPost, watch: ThreadAuthorWatch) -> NgaPost
 
 def bot_channel(args: argparse.Namespace) -> str:
     channel = str(getattr(args, "bot_channel", "") or os.getenv("NGA_BOT_CHANNEL", "feishu")).strip().lower()
-    return channel if channel in {"feishu", "wechat", "email", "dingtalk"} else "feishu"
+    return channel if channel in {"feishu", "wechat", "email", "dingtalk", "wxpusher"} else "feishu"
 
 
 def is_wechat_channel(args: argparse.Namespace) -> bool:
@@ -1170,6 +1333,10 @@ def is_email_channel(args: argparse.Namespace) -> bool:
 
 def is_dingtalk_channel(args: argparse.Namespace) -> bool:
     return bot_channel(args) == "dingtalk"
+
+
+def is_wxpusher_channel(args: argparse.Namespace) -> bool:
+    return bot_channel(args) == "wxpusher"
 
 
 def wechat_client_for_args(args: argparse.Namespace) -> wechat_bot.WeChatBotClient:
@@ -1244,6 +1411,17 @@ def find_email_profile(args: argparse.Namespace, profile_id: str) -> EmailSmtpPr
     return None
 
 
+def find_wxpusher_profile(args: argparse.Namespace, profile_id: str) -> WxPusherProfile | None:
+    target = str(profile_id or "").strip()
+    profiles = wxpusher_profiles(args)
+    if not target and profiles:
+        return profiles[0]
+    for profile in profiles:
+        if target in {profile.id, profile.label, profile.spts, profile.app_token}:
+            return profile
+    return None
+
+
 def args_for_configured_route(
     args: argparse.Namespace,
     *,
@@ -1299,6 +1477,25 @@ def args_for_configured_route(
             cloned.email_reply_to = profile.reply_to
         if receive_id:
             cloned.email_to = receive_id
+        return cloned
+    if channel == "wxpusher":
+        profile = find_wxpusher_profile(args, route_profile_id)
+        cloned = copy.copy(args)
+        cloned.bot_channel = "wxpusher"
+        if profile:
+            cloned.wxpusher_spts = profile.spts
+            cloned.wxpusher_app_token = profile.app_token
+            cloned.wxpusher_uids = profile.uids
+            cloned.wxpusher_topic_ids = profile.topic_ids
+            cloned.wxpusher_content_type = profile.content_type
+        if receive_id:
+            target_type = str(receive_id_type or "").strip().lower()
+            if target_type in {"spt", "spts", "simple_push_token", "simple_push_tokens"}:
+                cloned.wxpusher_spts = receive_id
+            elif target_type in {"topic", "topic_id", "topic_ids"}:
+                cloned.wxpusher_topic_ids = receive_id
+            else:
+                cloned.wxpusher_uids = receive_id
         return cloned
     if channel == "feishu" or route_profile_id or receive_id or legacy_feishu_app_id or legacy_feishu_app_secret:
         profile = find_feishu_profile(args, route_profile_id)
@@ -2262,6 +2459,74 @@ def posts_to_txt(posts: list[NgaPost], title: str) -> str:
     return "\n".join(chunks)
 
 
+def wxpusher_escape_inline(value: str) -> str:
+    text = str(value or "")
+    for char in ("\\", "`", "*", "[", "]"):
+        text = text.replace(char, f"\\{char}")
+    return text
+
+
+def wxpusher_escape_markdown_text(value: str) -> str:
+    lines: list[str] = []
+    for line in str(value or "").splitlines():
+        stripped = line.lstrip()
+        prefix = line[: len(line) - len(stripped)]
+        if re.match(r"#{1,6}(?:\s|$)", stripped):
+            line = prefix + "\\" + stripped
+        elif re.match(r"[-*+]\s+", stripped):
+            line = prefix + "\\" + stripped
+        elif re.match(r"\d+\.\s+", stripped):
+            line = prefix + re.sub(r"^(\d+)\.", r"\1\\.", stripped, count=1)
+        elif stripped.startswith(">"):
+            line = prefix + "\\" + stripped
+        elif re.fullmatch(r"[-*_]{3,}", stripped):
+            line = prefix + "\\" + stripped
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def wxpusher_friendly_post_content(value: str, *, quote_limit: int = 800, reply_limit: int = 1800) -> str:
+    text = wxpusher_escape_markdown_text(friendly_post_content(value, quote_limit=quote_limit, reply_limit=reply_limit))
+    formatted: list[str] = []
+    for line in text.splitlines():
+        if line == "被回复内容：":
+            formatted.append("**被回复内容：**")
+        elif line == "本次回复：":
+            formatted.append('<span style="color:#d93025;font-weight:700;">本次回复：</span>')
+        else:
+            formatted.append(line)
+    return "\n".join(formatted).strip()
+
+
+def wxpusher_posts_markdown(posts: list[NgaPost]) -> str:
+    lines: list[str] = []
+    for idx, post in enumerate(posts, 1):
+        if idx > 1:
+            lines.extend(["", "---", ""])
+        subject = wxpusher_escape_inline(post.subject or "NGA 回复")
+        lines.append(f"**第 {idx} 条：{subject}**")
+        meta: list[str] = []
+        if post.post_time:
+            meta.append(f"时间：{post.post_time}")
+        if post.author or post.author_id:
+            meta.append(f"作者：{wxpusher_escape_inline(post.author or post.author_id)}")
+        if post.floor:
+            meta.append(f"楼层：#{post.floor}")
+        if post.source_id:
+            meta.append(f"监听：{wxpusher_escape_inline(post.source_label or post.source_id)}")
+        if meta:
+            lines.append(" · ".join(meta))
+        if post.url:
+            lines.append(f"[打开 NGA]({post.url})")
+        content = wxpusher_friendly_post_content(post.content)
+        if content:
+            lines.extend(["", content])
+        image_lines = post_image_lines(post, limit=4)
+        if image_lines:
+            lines.extend(["", *wxpusher_escape_markdown_text("\n".join(image_lines)).splitlines()])
+    return "\n".join(lines).strip()
+
+
 def dingtalk_posts_markdown(posts: list[NgaPost], title: str) -> str:
     lines = [f"## {title}"]
     for idx, post in enumerate(posts, 1):
@@ -3142,6 +3407,33 @@ def push_email_text(
     email_channel.send_email(email_config_for_args(args), recipient, title or "NGA Wolf Watcher", text, attachments=attachments)
 
 
+def wxpusher_config_for_args(args: argparse.Namespace) -> wxpusher_channel.WxPusherConfig:
+    return wxpusher_channel.WxPusherConfig(
+        spts=str(getattr(args, "wxpusher_spts", "") or os.getenv("WXPUSHER_SPTS", "") or os.getenv("WXPUSHER_SPT", "")).strip(),
+        app_token=str(getattr(args, "wxpusher_app_token", "") or os.getenv("WXPUSHER_APP_TOKEN", "")).strip(),
+        uids=str(getattr(args, "wxpusher_uids", "") or os.getenv("WXPUSHER_UIDS", "")).strip(),
+        topic_ids=str(getattr(args, "wxpusher_topic_ids", "") or os.getenv("WXPUSHER_TOPIC_IDS", "")).strip(),
+        content_type=str(getattr(args, "wxpusher_content_type", "") or os.getenv("WXPUSHER_CONTENT_TYPE", wxpusher_channel.DEFAULT_CONTENT_TYPE)).strip() or wxpusher_channel.DEFAULT_CONTENT_TYPE,
+        timeout=int(getattr(args, "timeout", 20) or 20),
+    )
+
+
+def wxpusher_markdown(title: str, text: str) -> str:
+    if not title:
+        return str(text or "")
+    body = str(text or "").strip()
+    heading = f"**{wxpusher_escape_inline(title)}**"
+    return f"{heading}\n\n{body}" if body else heading
+
+
+def push_wxpusher_text(args: argparse.Namespace, title: str, text: str, *, url: str = "") -> None:
+    config = wxpusher_config_for_args(args)
+    content = str(text or "")
+    if wxpusher_channel.content_type_code(config.content_type) == 3:
+        content = wxpusher_markdown(title, content)
+    wxpusher_channel.send_message(config, title or "NGA Wolf Watcher", content, url=url)
+
+
 def push_channel_raw_text(args: argparse.Namespace, text: str) -> None:
     if is_wechat_channel(args):
         wechat_client_for_args(args).send_text_to_target(text)
@@ -3151,6 +3443,9 @@ def push_channel_raw_text(args: argparse.Namespace, text: str) -> None:
         return
     if is_email_channel(args):
         push_email_text(args, "NGA Wolf Watcher", text)
+        return
+    if is_wxpusher_channel(args):
+        push_wxpusher_text(args, "NGA Wolf Watcher", text)
         return
     push_feishu_raw_text(args, text)
 
@@ -3166,6 +3461,9 @@ def push_channel_text(args: argparse.Namespace, title: str, text: str) -> None:
         return
     if is_email_channel(args):
         push_email_text(args, title or "NGA Wolf Watcher", text)
+        return
+    if is_wxpusher_channel(args):
+        push_wxpusher_text(args, title or "NGA Wolf Watcher", text)
         return
     push_feishu_text(args, title, text)
 
@@ -3271,6 +3569,9 @@ def push_channel_file(args: argparse.Namespace, file_name: str, text: str) -> No
             attachments=(email_channel.EmailAttachment(file_name=file_name, content=str(text or "").encode("utf-8"), mime_type="text/plain"),),
         )
         return
+    if is_wxpusher_channel(args):
+        push_wxpusher_text(args, Path(file_name).stem or "NGA Wolf Watcher", "\n\n".join([file_name, str(text or "")]))
+        return
     push_feishu_file(args, file_name, text)
 
 
@@ -3283,6 +3584,12 @@ def push_channel_posts(args: argparse.Namespace, posts: list[NgaPost], title: st
         return
     if is_email_channel(args):
         push_email_text(args, title, posts_to_txt(posts, title))
+        return
+    if is_wxpusher_channel(args):
+        first_url = posts[0].url if posts else ""
+        config = wxpusher_config_for_args(args)
+        text = wxpusher_posts_markdown(posts) if wxpusher_channel.content_type_code(config.content_type) == 3 else posts_to_txt(posts, title)
+        push_wxpusher_text(args, title, text, url=first_url)
         return
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     if not (app_id and app_secret and receive_id):
@@ -3644,6 +3951,9 @@ def push_ai_markdown(args: argparse.Namespace, title: str, markdown: str, *, is_
     if is_email_channel(args):
         push_channel_text(args, title, markdown)
         return
+    if is_wxpusher_channel(args):
+        push_channel_text(args, title, markdown)
+        return
     if is_dingtalk_channel(args):
         status_card_id = str(getattr(args, "dingtalk_ai_status_card_id", "") or "").strip()
         if status_card_id:
@@ -3686,6 +3996,8 @@ def ai_manager_for_args(args: argparse.Namespace) -> ai_analysis.AIManager:
         target = getattr(args, "dingtalk_target_user_ids", "")
     elif is_email_channel(args):
         target = getattr(args, "email_to", "")
+    elif is_wxpusher_channel(args):
+        target = getattr(args, "wxpusher_spts", "") or getattr(args, "wxpusher_uids", "") or getattr(args, "wxpusher_topic_ids", "")
     else:
         target = getattr(args, "feishu_receive_id", "")
     key = (str(config.work_dir.resolve()), f"{bot_channel(args)}:{target or ''}")
@@ -5704,6 +6016,18 @@ def channel_route_key(args: argparse.Namespace) -> tuple[str, str, str, str, str
             secret_hash,
             str(getattr(args, "dingtalk_target_user_ids", "") or ""),
         )
+    if is_wxpusher_channel(args):
+        spts = str(getattr(args, "wxpusher_spts", "") or "")
+        spt_hash = hashlib.sha1(spts.encode("utf-8")).hexdigest()[:12] if spts else ""
+        token = str(getattr(args, "wxpusher_app_token", "") or "")
+        token_hash = hashlib.sha1(token.encode("utf-8")).hexdigest()[:12] if token else ""
+        return (
+            "wxpusher",
+            spt_hash or token_hash,
+            str(getattr(args, "wxpusher_uids", "") or ""),
+            str(getattr(args, "wxpusher_topic_ids", "") or ""),
+            str(getattr(args, "wxpusher_content_type", "") or ""),
+        )
     return feishu_route_key(args)
 
 
@@ -6207,6 +6531,10 @@ def send_test_message(args: argparse.Namespace) -> None:
         push_channel_posts(args, [post], "NGA Wolf Watcher test message")
         print("Test message sent.")
         return
+    if is_wxpusher_channel(args):
+        push_channel_posts(args, [post], "NGA Wolf Watcher test message")
+        print("Test message sent.")
+        return
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
     if app_id and app_secret and receive_id:
         push_feishu_app_posts(
@@ -6237,6 +6565,10 @@ def push_deferred_summary_direct(args: argparse.Namespace, posts: list[NgaPost],
         push_channel_posts(args, posts, title)
         return
     if is_email_channel(args):
+        title = f"Quiet-hours summary ({len(posts)} posts)"
+        push_channel_posts(args, posts, title)
+        return
+    if is_wxpusher_channel(args):
         title = f"Quiet-hours summary ({len(posts)} posts)"
         push_channel_posts(args, posts, title)
         return
@@ -6298,6 +6630,9 @@ def push_single_channel_post(args: argparse.Namespace, post: NgaPost, mention_us
         push_channel_posts(args, [post], new_reply_title(post))
         return
     if is_email_channel(args):
+        push_channel_posts(args, [post], new_reply_title(post))
+        return
+    if is_wxpusher_channel(args):
         push_channel_posts(args, [post], new_reply_title(post))
         return
     app_id, app_secret, receive_id, receive_id_type = feishu_credentials(args)
@@ -7379,7 +7714,7 @@ def run_once(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Watch an NGA user's replies and push new ones to Feishu, WeChat, DingTalk, or email.")
-    parser.add_argument("--bot-channel", choices=["feishu", "wechat", "dingtalk", "email"], default=os.getenv("NGA_BOT_CHANNEL", "feishu"))
+    parser.add_argument("--bot-channel", choices=["feishu", "wechat", "dingtalk", "email", "wxpusher"], default=os.getenv("NGA_BOT_CHANNEL", "feishu"))
     parser.add_argument("--author-id", default=os.getenv("NGA_AUTHOR_ID", DEFAULT_AUTHOR_ID))
     parser.add_argument("--author-ids", default=os.getenv("NGA_AUTHOR_IDS", ""), help="Comma or newline separated NGA user IDs to watch. Supports id=label.")
     parser.add_argument("--watch-mode", choices=["author", "thread_author", "both"], default=os.getenv("NGA_WATCH_MODE", "author"))
@@ -7466,6 +7801,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--email-from-name", default=os.getenv("EMAIL_FROM_NAME", "NGA Wolf Watcher"))
     parser.add_argument("--email-reply-to", default=os.getenv("EMAIL_REPLY_TO", ""))
     parser.add_argument("--email-to", default=os.getenv("EMAIL_TO", "") or os.getenv("GMAIL_TO", ""))
+    parser.add_argument("--wxpusher-profiles", default=os.getenv("WXPUSHER_PROFILES", ""))
+    parser.add_argument("--wxpusher-spts", default=os.getenv("WXPUSHER_SPTS", os.getenv("WXPUSHER_SPT", "")))
+    parser.add_argument("--wxpusher-app-token", default=os.getenv("WXPUSHER_APP_TOKEN", ""))
+    parser.add_argument("--wxpusher-uids", default=os.getenv("WXPUSHER_UIDS", ""))
+    parser.add_argument("--wxpusher-topic-ids", default=os.getenv("WXPUSHER_TOPIC_IDS", ""))
+    parser.add_argument("--wxpusher-content-type", choices=["text", "html", "markdown", "1", "2", "3"], default=os.getenv("WXPUSHER_CONTENT_TYPE", wxpusher_channel.DEFAULT_CONTENT_TYPE))
     parser.add_argument("--retries", type=int, default=int(os.getenv("NGA_RETRIES", "10")))
     parser.add_argument(
         "--retry-initial-delay",
@@ -7564,6 +7905,8 @@ def main() -> None:
                 elif is_dingtalk_channel(args):
                     changed = False
                 elif is_email_channel(args):
+                    changed = False
+                elif is_wxpusher_channel(args):
                     changed = False
                 else:
                     changed = handle_feishu_commands(args, state)

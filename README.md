@@ -62,13 +62,13 @@ The GUI saves local secrets under `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`.
 
 The recommended client separates configuration into clearer sections while keeping old configs compatible:
 
-- `Message channel profiles`: bot accounts only. A Feishu profile stores App ID / App Secret and caches the chat list inside that profile; a WeChat profile stores the ilink token, target user, and account id; a DingTalk profile stores the Stream robot credentials and proactive target users; an email profile stores SMTP settings for outbound mail. This is the sender mailbox; using a separate small mailbox as the sending bot is recommended.
+- `Message channel profiles`: bot accounts only. A Feishu profile stores App ID / App Secret and caches the chat list inside that profile; a WeChat profile stores the ilink token, target user, and account id; a DingTalk profile stores the Stream robot credentials and proactive target users; an email profile stores SMTP settings for outbound mail; a WxPusher profile stores the SPT used by simple push.
 - `Targets` / `NGA resources`: reusable user IDs and thread IDs for monitoring and manual fetches.
-- `Listen rules`: choose the watch source, either an author reply page or a fixed thread filtered by author, then directly select send destinations. A Feishu destination is a Feishu profile plus one chat; a WeChat destination is a WeChat profile; a DingTalk destination is a DingTalk profile; an email destination is an email sender profile plus recipient address. The real receiving mailbox is configured here. One rule can push to multiple destinations at the same time.
+- `Listen rules`: choose the watch source, either an author reply page or a fixed thread filtered by author, then directly select send destinations. A Feishu destination is a Feishu profile plus one chat; a WeChat destination is a WeChat profile; a DingTalk destination is a DingTalk profile; an email destination is an email sender profile plus recipient address; a WxPusher destination is a WxPusher SPT profile. One rule can push to multiple destinations at the same time.
 
 Manual fetches are not limited by listen rules. Feishu, WeChat, and DingTalk commands such as `/history_r`, `/pack_r`, `/history_t`, and `/pack_t` can fetch any configured user or thread. Short commands use the current entry's default user/thread when available.
 
-AI settings remain global. Feishu, WeChat, and DingTalk entries share the same AI work directory and local agent queue. New-post auto analysis follows the triggering listen rule's send destinations. Scheduled analysis runs once per interval, then copies the result to the selected scheduled-analysis targets.
+AI settings remain global. Feishu, WeChat, DingTalk, email, and WxPusher targets share the same AI work directory and local agent queue. New-post auto analysis follows the triggering listen rule's send destinations. Scheduled analysis runs once per interval, then copies the result to the selected scheduled-analysis targets.
 
 The WeChat channel uses the same kind of personal-WeChat ilink gateway as cc-connect. It is not a normal official WeChat bot and it does not automate the desktop WeChat client. On first use, the target WeChat account must send one message to the bot so the watcher can cache its `context_token`; proactive NGA pushes can only be sent after that. WeChat has no Feishu cards, so `/setting` returns a plain-text menu and copyable commands.
 
@@ -144,6 +144,23 @@ In the GUI, prefer the mailbox type templates. 163, 126, QQ Mail, Gmail, and Out
 The sender can be any mailbox that supports standard SMTP authentication, such as Gmail, Outlook, QQ Mail, 163 Mail, or an enterprise mailbox. Using a separate small mailbox as the sending bot is recommended so your personal mailbox authorization token is not stored in the watcher config. Most personal mailboxes cannot use the normal login password for SMTP. Open the mailbox provider's web settings, enable `POP3/SMTP/IMAP` or the equivalent SMTP service, then generate an authorization code, client authorization code, or app password. 163/126/QQ Mail usually use authorization codes. Gmail usually needs a Google App Password, and App Passwords require 2-Step Verification on the Google Account.
 
 The recipient can be any email address. The email channel is outbound-only: it can receive new-reply pushes, quiet-hours summaries, packed `.txt` results, and AI analysis output, but it does not receive chat commands or log in to the recipient mailbox to read replies.
+
+WxPusher channel variables:
+
+```text
+NGA_BOT_CHANNEL=wxpusher
+WXPUSHER_SPTS=<SPT_xxx>
+WXPUSHER_CONTENT_TYPE=markdown
+```
+
+Recommended EXE setup:
+
+1. Install or open a WxPusher client and copy its `SPT` from the client.
+2. In the EXE, switch the message channel to `WxPusher`, add a WxPusher profile, and fill `SPT`.
+3. In `Listen rules`, add a send target and choose that WxPusher profile.
+4. Click `Send test` on that target before starting long-running monitoring.
+
+WxPusher is outbound-only in this app. It can receive new NGA replies, quiet-hours summaries, packed text content, and AI analysis output, but it does not support `/start`, `/setting`, manual fetch commands, or AI chat input from WxPusher.
 
 ### Do-Not-Disturb Hours
 

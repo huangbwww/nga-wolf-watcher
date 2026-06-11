@@ -235,13 +235,14 @@ def read_json_config(path: Path) -> dict[str, Any]:
 def webui_preflight_errors(config: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     channel = str(config.get("bot_channel") or "feishu").strip().lower()
-    if channel not in {"feishu", "wechat", "dingtalk", "email"}:
+    if channel not in {"feishu", "wechat", "dingtalk", "email", "wxpusher"}:
         channel = "feishu"
 
     feishu_profiles = legacy.load_feishu_profiles(config)
     wechat_profiles = legacy.load_wechat_profiles(config)
     dingtalk_profiles = legacy.load_dingtalk_profiles(config)
     email_profiles = legacy.load_email_profiles(config)
+    wxpusher_profiles = legacy.load_wxpusher_profiles(config)
     has_feishu = any(
         str(profile.get("app_id") or "").strip() and str(profile.get("app_secret") or "").strip()
         for profile in feishu_profiles
@@ -252,6 +253,10 @@ def webui_preflight_errors(config: dict[str, Any]) -> list[str]:
         str(profile.get("username") or "").strip() and str(profile.get("password") or "").strip()
         for profile in email_profiles
     )
+    has_wxpusher = any(
+        str(profile.get("spts") or "").strip() or str(profile.get("app_token") or "").strip()
+        for profile in wxpusher_profiles
+    )
     if channel == "wechat":
         if not has_wechat:
             errors.append("请先配置一个微信Bot配置")
@@ -261,6 +266,9 @@ def webui_preflight_errors(config: dict[str, Any]) -> list[str]:
     elif channel == "email":
         if not has_email:
             errors.append("请先配置一个邮箱发信配置")
+    elif channel == "wxpusher":
+        if not has_wxpusher:
+            errors.append("请先配置一个 WxPusher 配置")
     elif not has_feishu:
         errors.append("请先配置一个飞书配置")
 
@@ -286,6 +294,8 @@ def webui_friendly_errors(config: dict[str, Any], errors: list[str], include_pre
             continue
         if text in {"Feishu App ID", "Feishu App Secret", "Receive ID"} or "飞书机器人缺少 App ID" in text or "飞书机器人缺少 App ID 或 App Secret" in text:
             friendly.append("请先配置一个飞书配置")
+        elif text in {"WxPusher SPT", "WxPusher App Token", "WxPusher UID 或 Topic ID"} or "WxPusher" in text:
+            friendly.append("请先配置一个 WxPusher 配置，并填写 SPT")
         elif text in {"微信 Bot Token", "微信目标用户 ID"} or "微信机器人缺少 Token" in text:
             friendly.append("请先配置一个微信Bot配置")
         elif text == "NGA Cookie":
@@ -320,6 +330,18 @@ def webui_friendly_errors(config: dict[str, Any], errors: list[str], include_pre
             deduped.append(error)
             seen.add(error)
     return deduped
+
+
+def _is_send_test_ignorable_validation_error(error: Any) -> bool:
+    text = str(error or "").strip()
+    return (
+        text == "NGA Cookie"
+        or text.startswith("监听规则 ")
+        or text.startswith("监听用户 ID 列表")
+        or text.startswith("帖子预设 ID 列表")
+        or "存在未单独选择通道的监听项" in text
+        or "帖内作者监听模式需要至少一条" in text
+    )
 
 
 def _first_target_id(raw: Any, fallback: str = "") -> str:
@@ -580,9 +602,9 @@ class PreviewApi:
         merged = self._merged_config(config)
         errors = legacy.validate_config(merged, require_cookie=False)
         if errors:
-            non_cookie_errors = [error for error in errors if error != "NGA Cookie"]
-            if non_cookie_errors:
-                return {"ok": False, "errors": webui_friendly_errors(merged, non_cookie_errors)}
+            send_test_errors = [error for error in errors if not _is_send_test_ignorable_validation_error(error)]
+            if send_test_errors:
+                return {"ok": False, "errors": webui_friendly_errors(merged, send_test_errors)}
         args = legacy.build_args(merged)
         target = legacy.nga_feishu_watch.find_push_target(args, target_id)
         if target is None:

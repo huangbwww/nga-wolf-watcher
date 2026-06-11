@@ -458,8 +458,8 @@ header p,
 
 .segmented {
   display: inline-grid;
-  grid-template-columns: repeat(4, minmax(56px, 1fr));
-  width: min(100%, 292px);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  width: min(100%, 360px);
   padding: 3px;
   border: 1px solid #cbd5e1;
   border-radius: 9px;
@@ -1267,5 +1267,11 @@ textarea:focus {
   .quiet-time-grid,
   .time-range-row {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 420px) {
+  .segmented {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
