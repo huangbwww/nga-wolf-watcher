@@ -48,6 +48,30 @@ def test_resolve_cli_paths_honors_explicit_overrides(tmp_path: Path) -> None:
     assert paths.log_file == log_file
 
 
+def test_resolve_cli_paths_expands_user_home_overrides(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    args = ngawolf_cli.parse_args(
+        [
+            "--config",
+            "~/cfg.json",
+            "--data-dir",
+            "~/state",
+            "--log-file",
+            "~/watcher.log",
+            "check",
+        ]
+    )
+
+    paths = ngawolf_cli.resolve_cli_paths(args)
+
+    assert paths.config_path == tmp_path / "cfg.json"
+    assert paths.data_dir == tmp_path / "state"
+    assert paths.log_file == tmp_path / "watcher.log"
+
+
 def test_run_once_flag_is_set() -> None:
     args = ngawolf_cli.parse_args(["run", "--once"])
 

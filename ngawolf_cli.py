@@ -46,9 +46,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def resolve_cli_paths(args: argparse.Namespace) -> CliPaths:
-    config_path = Path(getattr(args, "config", None) or nga_wolf_config.linux_config_path())
-    data_dir = Path(getattr(args, "data_dir", None) or nga_wolf_config.linux_data_dir())
-    log_file = Path(getattr(args, "log_file", None) or (data_dir / nga_wolf_config.LOG_FILE))
+    config_override = getattr(args, "config", None)
+    data_dir_override = getattr(args, "data_dir", None)
+    log_file_override = getattr(args, "log_file", None)
+
+    config_path = config_override.expanduser() if config_override is not None else nga_wolf_config.linux_config_path()
+    data_dir = data_dir_override.expanduser() if data_dir_override is not None else nga_wolf_config.linux_data_dir()
+    log_file = log_file_override.expanduser() if log_file_override is not None else (data_dir / nga_wolf_config.LOG_FILE)
     return CliPaths(config_path=config_path, data_dir=data_dir, log_file=log_file)
 
 
