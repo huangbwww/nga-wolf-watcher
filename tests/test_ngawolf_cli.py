@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from unittest.mock import patch
 
 import ngawolf_cli
+import nga_wolf_config
 
 
 def test_parse_args_accepts_supported_commands() -> None:
@@ -77,3 +80,132 @@ def test_run_once_flag_is_set() -> None:
 
     assert args.command == "run"
     assert args.once is True
+
+
+def test_prompt_basic_config_keeps_existing_values_when_user_presses_enter() -> None:
+    config = {
+        "bot_channel": "feishu",
+        "nga_cookie": "cookie",
+        "email_to": "receiver@example.com",
+        "email_username": "sender@example.com",
+        "email_password": "secret",
+        "feishu_app_id": "app",
+        "feishu_app_secret": "secret",
+        "feishu_receive_id": "chat",
+        "wechat_bot_token": "token",
+        "wechat_bot_target_user_id": "user",
+        "dingtalk_client_id": "client",
+        "dingtalk_client_secret": "secret",
+        "dingtalk_target_user_ids": "a;b",
+        "watch_mode": "both",
+        "watch_author_ids": "1=alpha",
+        "preset_thread_ids": "2=beta",
+        "interval": "15",
+        "jitter": "3",
+        "state_path": "state.json",
+    }
+
+    with patch("builtins.input", side_effect=[""] * 19):
+        updated = ngawolf_cli.prompt_basic_config(config)
+
+    assert updated == config
+    assert updated is not config
+
+
+def test_prompt_basic_config_updates_values_when_user_enters_replacements() -> None:
+    config = dict(nga_wolf_config.DEFAULT_CONFIG)
+    inputs = [
+        "wechat",
+        "new-cookie",
+        "receiver@example.com",
+        "new-user@example.com",
+        "new-password",
+        "new-app-id",
+        "new-app-secret",
+        "new-chat-id",
+        "new-token",
+        "new-user-id",
+        "new-client-id",
+        "new-client-secret",
+        "user-1;user-2",
+        "thread_author",
+        "10=alpha",
+        "20=beta",
+        "45",
+        "9",
+        "runtime/state.json",
+    ]
+
+    with patch("builtins.input", side_effect=inputs):
+        updated = ngawolf_cli.prompt_basic_config(config)
+
+    assert updated["bot_channel"] == "wechat"
+    assert updated["nga_cookie"] == "new-cookie"
+    assert updated["email_to"] == "receiver@example.com"
+    assert updated["email_username"] == "new-user@example.com"
+    assert updated["email_password"] == "new-password"
+    assert updated["feishu_app_id"] == "new-app-id"
+    assert updated["feishu_app_secret"] == "new-app-secret"
+    assert updated["feishu_receive_id"] == "new-chat-id"
+    assert updated["wechat_bot_token"] == "new-token"
+    assert updated["wechat_bot_target_user_id"] == "new-user-id"
+    assert updated["dingtalk_client_id"] == "new-client-id"
+    assert updated["dingtalk_client_secret"] == "new-client-secret"
+    assert updated["dingtalk_target_user_ids"] == "user-1;user-2"
+    assert updated["watch_mode"] == "thread_author"
+    assert updated["watch_author_ids"] == "10=alpha"
+    assert updated["preset_thread_ids"] == "20=beta"
+    assert updated["interval"] == "45"
+    assert updated["jitter"] == "9"
+    assert updated["state_path"] == "runtime/state.json"
+
+
+def test_command_init_refuses_to_overwrite_existing_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+    paths = ngawolf_cli.CliPaths(
+        config_path=config_path,
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+
+    with patch.object(ngawolf_cli, "prompt_basic_config") as prompt_basic_config:
+        assert ngawolf_cli.command_init(paths) == 2
+
+    prompt_basic_config.assert_not_called()
+    assert json.loads(config_path.read_text(encoding="utf-8")) == {}
+
+
+def test_command_init_creates_config_file_when_missing(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    paths = ngawolf_cli.CliPaths(
+        config_path=config_path,
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+    expected_config = {"bot_channel": "email", "nga_cookie": "cookie"}
+
+    with patch.object(ngawolf_cli, "prompt_basic_config", return_value=expected_config):
+        assert ngawolf_cli.command_init(paths) == 0
+
+    assert json.loads(config_path.read_text(encoding="utf-8")) == expected_config
+
+
+def test_command_config_updates_existing_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    base_config = dict(nga_wolf_config.DEFAULT_CONFIG)
+    base_config["bot_channel"] = "feishu"
+    nga_wolf_config.save_config(base_config, config_path)
+    paths = ngawolf_cli.CliPaths(
+        config_path=config_path,
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+    updated_config = dict(base_config)
+    updated_config["bot_channel"] = "wechat"
+    updated_config["wechat_bot_target_user_id"] = "new-user"
+
+    with patch.object(ngawolf_cli, "prompt_basic_config", return_value=updated_config):
+        assert ngawolf_cli.command_config(paths) == 0
+
+    assert json.loads(config_path.read_text(encoding="utf-8")) == updated_config
