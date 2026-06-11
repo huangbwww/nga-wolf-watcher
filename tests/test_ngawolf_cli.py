@@ -266,6 +266,29 @@ def test_command_mark_seen_rejects_thread_author_mode_without_selectors(tmp_path
     run_once.assert_not_called()
 
 
+def test_command_mark_seen_rejects_both_mode_without_thread_author_selectors(tmp_path: Path) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+    config = {
+        "bot_channel": "email",
+        "nga_cookie": "cookie",
+        "watch_mode": "both",
+        "watch_author_ids": "150058",
+        "thread_author_watches": "",
+        "listen_rules": "",
+    }
+
+    with patch.object(ngawolf_cli, "load_service_config", return_value=config), patch.object(
+        ngawolf_cli.nga_feishu_watch, "run_once"
+    ) as run_once:
+        assert ngawolf_cli.command_mark_seen(paths) != 0
+
+    run_once.assert_not_called()
+
+
 def test_command_mark_seen_accepts_thread_author_watch_without_delivery_credentials(tmp_path: Path) -> None:
     paths = ngawolf_cli.CliPaths(
         config_path=tmp_path / "config.json",

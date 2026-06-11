@@ -151,8 +151,7 @@ def validate_mark_seen_config(config: dict[str, object]) -> list[str]:
         parsed_watches = nga_feishu_watch.parse_thread_author_watches(raw_thread_watches)
         parsed_rules = [rule for rule in nga_feishu_watch.parse_listen_rules(raw_listen_rules) if rule.mode == "thread_author"]
         if not raw_thread_watches and not parsed_rules:
-            if watch_mode == "thread_author":
-                errors.append("Thread author watches must contain at least one valid tid:author_id rule")
+            errors.append("Thread author watches must contain at least one valid tid:author_id rule")
             return
         if raw_thread_watches and not parsed_watches:
             errors.append("Thread author watches must contain at least one valid tid:author_id rule")
