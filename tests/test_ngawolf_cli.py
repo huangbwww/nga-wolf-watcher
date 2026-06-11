@@ -196,6 +196,14 @@ def test_prompt_text_masks_existing_secret_value_in_prompt() -> None:
     assert prompts == ["Token [hidden]: "]
 
 
+def test_prompt_text_trims_whitespace_and_preserves_current_on_blank_spaces() -> None:
+    with patch("builtins.input", side_effect=["   "]):
+        assert ngawolf_cli.prompt_text("Label", "old") == "old"
+
+    with patch("builtins.input", side_effect=["  new value  "]):
+        assert ngawolf_cli.prompt_text("Label", "old") == "new value"
+
+
 def test_command_init_refuses_to_overwrite_existing_config(tmp_path: Path) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text("{}", encoding="utf-8")

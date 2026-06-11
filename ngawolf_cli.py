@@ -24,7 +24,7 @@ def prompt_text(label: str, current: object = "", *, secret: bool = False) -> st
         prompt = f"{label} [{current_text}]: "
     else:
         prompt = f"{label}: "
-    value = input(prompt)
+    value = input(prompt).strip()
     return current_text if value == "" else value
 
 
