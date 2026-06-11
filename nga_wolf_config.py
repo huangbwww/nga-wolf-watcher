@@ -763,7 +763,7 @@ def validate_config(
     return errors
 
 
-def run_watcher_from_config(path: Path, *, ws_no_watch: bool = False) -> None:
+def run_watcher_from_config(path: Path, *, data_dir: Path | None = None, ws_no_watch: bool = False) -> None:
     with path.open("r", encoding="utf-8-sig") as handle:
         config = json.load(handle)
     log_file = str(config.get("_log_path") or "")
@@ -773,7 +773,7 @@ def run_watcher_from_config(path: Path, *, ws_no_watch: bool = False) -> None:
         sys.stderr = log_handle
     try:
         channel = str(config.get("bot_channel") or "feishu").strip()
-        args = build_args(config, ws=(channel == "feishu"), ws_no_watch=ws_no_watch)
+        args = build_args(config, data_dir=data_dir, ws=(channel == "feishu"), ws_no_watch=ws_no_watch)
         if nga_feishu_watch.uses_structured_routes(args) and not ws_no_watch:
             print("姝ｅ湪鍚姩缁撴瀯鍖栧閫氶亾鐩戝惉杩涚▼銆?")
             nga_feishu_watch.start_multi_channel(args)

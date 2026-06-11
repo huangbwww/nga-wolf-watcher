@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import importlib
 import json
+import sys
+import types
 from pathlib import Path
 
 import nga_wolf_config
@@ -122,3 +125,21 @@ def test_validate_config_reports_missing_cookie_and_invalid_email_requirements()
 
     assert "NGA Cookie" in errors
     assert len(errors) >= 4
+
+
+def test_gui_validate_config_delegates_to_shared_module(monkeypatch) -> None:
+    sys.modules.setdefault("customtkinter", types.SimpleNamespace())
+    nga_wolf_gui = importlib.import_module("nga_wolf_gui")
+
+    config = {"bot_channel": "email"}
+    expected = ["delegated"]
+
+    def fake_validate_config(payload, *, require_receive_id=True, require_cookie=True):
+        assert payload is config
+        assert require_receive_id is False
+        assert require_cookie is True
+        return expected
+
+    monkeypatch.setattr(nga_wolf_config, "validate_config", fake_validate_config)
+
+    assert nga_wolf_gui.validate_config(config, require_receive_id=False) == expected
