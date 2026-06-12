@@ -472,25 +472,30 @@ def test_prompt_basic_config_keeps_existing_values_when_user_presses_enter() -> 
     with patch("builtins.input", side_effect=[""] * 10), patch("getpass.getpass", side_effect=["", ""]):
         updated = ngawolf_cli.prompt_basic_config(config)
 
-    assert updated == config
+    for key, value in config.items():
+        if key in {"push_targets", "listen_rules"}:
+            continue
+        assert updated[key] == value
     assert updated is not config
 
 
 def test_prompt_basic_config_updates_values_when_user_enters_replacements() -> None:
     config = dict(nga_wolf_config.DEFAULT_CONFIG)
     inputs = [
-        "wechat",
+        "add_wechat",
         "new-user-id",
-        "author",
+        "done",
+        "add_author",
         "10",
         "alpha",
-        "thread",
+        "add_thread",
         "20",
         "beta",
-        "thread_author",
-        "20",
-        "10",
-        "alpha in thread",
+        "done",
+        "add_thread_author",
+        "",
+        "",
+        "",
         "done",
     ]
 
@@ -501,10 +506,20 @@ def test_prompt_basic_config_updates_values_when_user_enters_replacements() -> N
     assert updated["nga_cookie"] == "new-cookie"
     assert updated["wechat_bot_token"] == "new-token"
     assert updated["wechat_bot_target_user_id"] == "new-user-id"
-    assert updated["watch_mode"] == "both"
+    assert updated["watch_mode"] == "thread_author"
     assert updated["watch_author_ids"] == "10=alpha"
     assert updated["preset_thread_ids"] == "20=beta"
-    assert updated["thread_author_watches"] == "20:10=alpha in thread"
+    assert updated["thread_author_watches"] == ""
+    assert json.loads(str(updated["listen_rules"])) == [
+        {
+            "id": "thread_author:20:10",
+            "label": "beta / alpha",
+            "mode": "thread_author",
+            "author_id": "10",
+            "tid": "20",
+            "target_ids": ["wechat_1"],
+        }
+    ]
     assert updated["interval"] == "30"
     assert updated["jitter"] == "5"
     assert updated["state_path"] == ".nga_seen.json"
@@ -531,15 +546,14 @@ def test_prompt_basic_config_prompts_only_email_fields_for_email_channel() -> No
         updated = ngawolf_cli.prompt_basic_config(config)
 
     assert prompts == [
-        "推送通道 [email]: ",
-        "收件邮箱 [receiver@example.com]: ",
-        "邮箱账号 [sender@example.com]: ",
-        "监听配置 [done]: ",
+        "推送通道管理 [done]: ",
+        "用户和帖子管理 [done]: ",
+        "监听规则管理 [done]: ",
     ]
     assert updated["email_to"] == "receiver@example.com"
     assert updated["email_username"] == "sender@example.com"
     assert updated["email_password"] == "secret"
-    assert getpass_mock.call_count == 2
+    assert getpass_mock.call_count == 1
 
 
 def test_prompt_basic_config_uses_runtime_defaults_without_prompting_runtime_fields() -> None:
@@ -590,7 +604,7 @@ def test_prompt_basic_config_normalizes_bot_channel_and_prompts_wechat_fields() 
     config["nga_cookie"] = "cookie"
     config["wechat_bot_token"] = "token"
     prompts: list[str] = []
-    inputs = iter(["WeChat", "", "", "", "", "", "", ""])
+    inputs = iter(["add_wechat", "user", "", "", ""])
 
     def record_input(prompt: str = "") -> str:
         prompts.append(prompt)
@@ -600,10 +614,13 @@ def test_prompt_basic_config_normalizes_bot_channel_and_prompts_wechat_fields() 
         updated = ngawolf_cli.prompt_basic_config(config)
 
     assert updated["bot_channel"] == "wechat"
+    assert updated["wechat_bot_target_user_id"] == "user"
     assert prompts == [
-        "推送通道 [feishu]: ",
+        "推送通道管理 [add_feishu]: ",
         "WeChat 目标用户 ID: ",
-        "监听配置 [done]: ",
+        "推送通道管理 [done]: ",
+        "用户和帖子管理 [done]: ",
+        "监听规则管理 [done]: ",
     ]
     assert getpass_mock.call_args_list[0].args == ("NGA cookie [hidden]: ",)
     assert getpass_mock.call_args_list[1].args == ("WeChat bot token [hidden]: ",)
@@ -667,7 +684,7 @@ def test_prompt_choice_uses_questionary_in_interactive_terminal(monkeypatch) -> 
             "style": {"rules": fake.styles[0]},
         }
     ]
-    assert ("highlighted", "fg:#00afff bold") in fake.styles[0]
+    assert ("highlighted", "fg:#00afff bold noreverse") in fake.styles[0]
     input_mock.assert_not_called()
 
 
@@ -733,20 +750,54 @@ def test_configure_feishu_channel_can_choose_manual_receive_id_after_listing_gro
     assert config["feishu_receive_id"] == "oc_manual"
 
 
-def test_configure_watch_settings_adds_entries_and_derives_watch_mode() -> None:
+def test_configure_watch_resources_adds_entries() -> None:
     config: dict[str, object] = {}
 
-    with patch.object(ngawolf_cli, "prompt_choice", side_effect=["author", "thread", "thread_author", "done"]), patch.object(
+    with patch.object(ngawolf_cli, "prompt_choice", side_effect=["add_author", "add_thread", "done"]), patch.object(
         ngawolf_cli,
         "prompt_text",
-        side_effect=["123", "Alice", "456", "Thread", "456", "123", "Alice in thread"],
+        side_effect=["123", "Alice", "456", "Thread"],
     ):
-        ngawolf_cli._configure_watch_settings(config)
+        ngawolf_cli._configure_watch_resources(config)
 
     assert config["watch_author_ids"] == "123=Alice"
     assert config["preset_thread_ids"] == "456=Thread"
-    assert config["thread_author_watches"] == "456:123=Alice in thread"
-    assert config["watch_mode"] == "both"
+
+
+def test_configure_listen_rules_adds_thread_author_rule_with_selected_targets() -> None:
+    config: dict[str, object] = {
+        "watch_author_ids": "123=Alice",
+        "preset_thread_ids": "456=Thread",
+        "push_targets": json.dumps(
+            [
+                {"id": "feishu_1", "label": "Alpha", "channel": "feishu", "receive_id": "oc_1"},
+                {"id": "wxpusher_1", "label": "WxPusher", "channel": "wxpusher", "receive_id": ""},
+            ],
+            ensure_ascii=False,
+        ),
+    }
+
+    with patch.object(ngawolf_cli, "prompt_choice", side_effect=["add_thread_author", "456=Thread", "123=Alice", "done"]), patch.object(
+        ngawolf_cli,
+        "prompt_multi_select",
+        return_value=[
+            {"value": "feishu_1", "label": "Alpha"},
+            {"value": "wxpusher_1", "label": "WxPusher"},
+        ],
+    ):
+        ngawolf_cli._configure_listen_rules(config)
+
+    assert config["watch_mode"] == "thread_author"
+    assert json.loads(str(config["listen_rules"])) == [
+        {
+            "id": "thread_author:456:123",
+            "label": "Thread / Alice",
+            "mode": "thread_author",
+            "author_id": "123",
+            "tid": "456",
+            "target_ids": ["feishu_1", "wxpusher_1"],
+        }
+    ]
 
 
 def test_prompt_multi_select_uses_questionary_checkbox_in_interactive_terminal(monkeypatch) -> None:
@@ -772,7 +823,7 @@ def test_prompt_multi_select_uses_questionary_checkbox_in_interactive_terminal(m
             "style": {"rules": fake.styles[0]},
         }
     ]
-    assert ("highlighted", "fg:#00afff bold") in fake.styles[0]
+    assert ("highlighted", "fg:#00afff bold noreverse") in fake.styles[0]
     input_mock.assert_not_called()
 
 
@@ -792,8 +843,13 @@ def test_prompt_basic_config_lists_feishu_chats_and_builds_routes() -> None:
         "a",
         "",
         "",
-        "150058=wolf",
-        "45974302=wolf",
+        "add_author",
+        "150058",
+        "wolf",
+        "done",
+        "add_author",
+        "",
+        "",
         "",
         "",
         "",
@@ -859,7 +915,7 @@ def test_prompt_basic_config_lists_feishu_chats_and_builds_routes() -> None:
     assert rules == [
         {
             "id": "author:150058",
-            "label": "狼大",
+            "label": "wolf",
             "mode": "author",
             "author_id": "150058",
             "tid": "",
@@ -872,12 +928,17 @@ def test_prompt_basic_config_builds_wxpusher_spt_profile_and_routes(monkeypatch)
     monkeypatch.setattr(ngawolf_cli, "questionary", None)
     config = dict(nga_wolf_config.DEFAULT_CONFIG)
     inputs = [
-        "wxpusher",
+        "add_wxpusher",
         "",
         "",
         "",
-        "150058=wolf",
-        "45974302=wolf",
+        "add_author",
+        "150058",
+        "wolf",
+        "done",
+        "add_author",
+        "",
+        "",
         "",
         "",
         "",
@@ -920,7 +981,7 @@ def test_prompt_basic_config_builds_wxpusher_spt_profile_and_routes(monkeypatch)
     assert json.loads(str(updated["listen_rules"])) == [
         {
             "id": "author:150058",
-            "label": "狼大",
+            "label": "wolf",
             "mode": "author",
             "author_id": "150058",
             "tid": "",

@@ -56,13 +56,13 @@ def _questionary_style(client):
             [
                 ("qmark", "fg:#888888"),
                 ("question", "bold"),
-                ("answer", "fg:#00afff bold"),
-                ("pointer", "fg:#00afff bold"),
-                ("highlighted", "fg:#00afff bold"),
-                ("selected", "fg:#00af00"),
+                ("answer", "fg:#00afff bold noreverse"),
+                ("pointer", "fg:#00afff bold noreverse"),
+                ("highlighted", "fg:#00afff bold noreverse"),
+                ("selected", "fg:#00afff noreverse"),
                 ("separator", "fg:#888888"),
                 ("instruction", "fg:#888888"),
-                ("text", ""),
+                ("text", "noreverse"),
                 ("disabled", "fg:#888888 italic"),
             ]
         )
@@ -433,6 +433,149 @@ def _configure_wxpusher_channel(config: dict[str, object]) -> None:
     )
 
 
+def _merge_targets(existing: list[dict[str, object]], added: list[dict[str, object]]) -> list[dict[str, object]]:
+    merged = [dict(target) for target in existing]
+    indexes = {str(target.get("id") or ""): index for index, target in enumerate(merged) if str(target.get("id") or "")}
+    for target in added:
+        target_id = str(target.get("id") or "")
+        if target_id and target_id in indexes:
+            merged[indexes[target_id]] = dict(target)
+        else:
+            merged.append(dict(target))
+    return merged
+
+
+def _next_target_id(config: dict[str, object], prefix: str) -> str:
+    existing = {str(target.get("id") or "") for target in _json_list(config.get("push_targets"))}
+    index = 1
+    while f"{prefix}_{index}" in existing:
+        index += 1
+    return f"{prefix}_{index}"
+
+
+def _run_channel_config(config: dict[str, object], channel: str) -> None:
+    before = _json_list(config.get("push_targets"))
+    if channel == "feishu":
+        _configure_feishu_channel(config)
+        after = _json_list(config.get("push_targets"))
+        config["push_targets"] = _json_dumps(_merge_targets(before, after))
+    elif channel == "wxpusher":
+        _configure_wxpusher_channel(config)
+        after = _json_list(config.get("push_targets"))
+        config["push_targets"] = _json_dumps(_merge_targets(before, after))
+    elif channel == "email":
+        _prompt_fields(
+            config,
+            [
+                ("email_to", "收件邮箱", False),
+                ("email_username", "邮箱账号", False),
+                ("email_password", "邮箱密码或授权码", True),
+            ],
+        )
+        receive_id = str(config.get("email_to") or "").strip()
+        if receive_id:
+            target = {
+                "id": _next_target_id(config, "email"),
+                "label": receive_id,
+                "channel": "email",
+                "profile_id": "default",
+                "receive_id": receive_id,
+                "id_type": "email",
+                "default_author_id": str(config.get("default_author_id") or "150058").strip(),
+                "default_tid": str(config.get("default_tid") or "45974302").strip(),
+            }
+            config["push_targets"] = _json_dumps(_merge_targets(before, [target]))
+    elif channel == "wechat":
+        _prompt_fields(
+            config,
+            [
+                ("wechat_bot_token", "WeChat bot token", True),
+                ("wechat_bot_target_user_id", "WeChat 目标用户 ID", False),
+            ],
+        )
+        receive_id = str(config.get("wechat_bot_target_user_id") or "").strip()
+        if receive_id:
+            target = {
+                "id": _next_target_id(config, "wechat"),
+                "label": "WeChat",
+                "channel": "wechat",
+                "profile_id": "default",
+                "receive_id": receive_id,
+                "id_type": "user_id",
+                "default_author_id": str(config.get("default_author_id") or "150058").strip(),
+                "default_tid": str(config.get("default_tid") or "45974302").strip(),
+            }
+            config["push_targets"] = _json_dumps(_merge_targets(before, [target]))
+    elif channel == "dingtalk":
+        _prompt_fields(
+            config,
+            [
+                ("dingtalk_client_id", "DingTalk Client ID", False),
+                ("dingtalk_client_secret", "DingTalk Client Secret", True),
+                ("dingtalk_target_user_ids", "DingTalk 目标用户 ID", False),
+            ],
+        )
+        receive_id = str(config.get("dingtalk_target_user_ids") or "").strip()
+        if receive_id:
+            target = {
+                "id": _next_target_id(config, "dingtalk"),
+                "label": "DingTalk",
+                "channel": "dingtalk",
+                "profile_id": "default",
+                "receive_id": receive_id,
+                "id_type": "user_id",
+                "default_author_id": str(config.get("default_author_id") or "150058").strip(),
+                "default_tid": str(config.get("default_tid") or "45974302").strip(),
+            }
+            config["push_targets"] = _json_dumps(_merge_targets(before, [target]))
+
+    targets = _json_list(config.get("push_targets"))
+    if targets:
+        config["bot_channel"] = str(targets[0].get("channel") or channel)
+
+
+def _manage_push_targets(config: dict[str, object]) -> None:
+    if not _json_list(config.get("push_targets")):
+        feishu_profiles = nga_wolf_config.load_feishu_profiles(config)
+        wechat_profiles = nga_wolf_config.load_wechat_profiles(config)
+        dingtalk_profiles = nga_wolf_config.load_dingtalk_profiles(config)
+        email_profiles = nga_wolf_config.load_email_profiles(config)
+        wxpusher_profiles = nga_wolf_config.load_wxpusher_profiles(config)
+        legacy_targets = nga_wolf_config.load_push_targets(
+            config,
+            feishu_profiles,
+            wechat_profiles,
+            dingtalk_profiles,
+            email_profiles,
+            wxpusher_profiles,
+        )
+        if legacy_targets:
+            config["push_targets"] = _json_dumps(legacy_targets)
+            config["bot_channel"] = str(legacy_targets[0].get("channel") or config.get("bot_channel") or "feishu")
+
+    while True:
+        targets = _json_list(config.get("push_targets"))
+        action = prompt_choice(
+            "推送通道管理",
+            [
+                ("view", f"查看已配置推送通道（已配置 {len(targets)} 个）"),
+                ("add_feishu", "添加 Feishu"),
+                ("add_wxpusher", "添加 WxPusher"),
+                ("add_email", "添加 Email"),
+                ("add_wechat", "添加 WeChat"),
+                ("add_dingtalk", "添加 DingTalk"),
+                ("done", "完成推送通道管理"),
+            ],
+            "done" if targets else "add_feishu",
+        )
+        if action == "done":
+            break
+        if action == "view":
+            _print_existing("已配置推送通道", [_target_title(target) for target in targets])
+            continue
+        _run_channel_config(config, action.removeprefix("add_"))
+
+
 def _split_config_entries(value: object) -> list[str]:
     if not value:
         return []
@@ -451,55 +594,184 @@ def _clear_default_entries(entries: list[str], key: str) -> None:
         entries.clear()
 
 
-def _configure_watch_settings(config: dict[str, object]) -> None:
+def _entry_parts(entry: str) -> tuple[str, str]:
+    main = entry.split("|", 1)[0].strip()
+    if "=" in main:
+        item_id, label = main.split("=", 1)
+        return item_id.strip(), label.strip()
+    if ":" in main and not main.count(":") == 1:
+        item_id, label = main.split(":", 1)
+        return item_id.strip(), label.strip()
+    return main.strip(), ""
+
+
+def _entry_title(entry: str) -> str:
+    item_id, label = _entry_parts(entry)
+    return f"{label} ({item_id})" if label else item_id
+
+
+def _target_title(target: dict[str, object]) -> str:
+    label = str(target.get("label") or target.get("id") or "").strip()
+    channel = str(target.get("channel") or "").strip()
+    receive_id = str(target.get("receive_id") or "").strip()
+    suffix = f"{channel}"
+    if receive_id:
+        suffix = f"{suffix} / {receive_id}"
+    return f"{label} ({suffix})" if label else suffix
+
+
+def _print_existing(title: str, rows: list[str]) -> None:
+    print(title)
+    if not rows:
+        print("  暂无")
+        return
+    for index, row in enumerate(rows, start=1):
+        print(f"  {index}. {row}")
+
+
+def _selected_option_value(options: list[dict[str, str]]) -> list[str]:
+    return [str(option.get("value") or "") for option in options if str(option.get("value") or "")]
+
+
+def _select_existing_entry(label: str, entries: list[str]) -> str:
+    if not entries:
+        return ""
+    choices = [(entry, _entry_title(entry)) for entry in entries]
+    return prompt_choice(label, choices, entries[0])
+
+
+def _configure_watch_resources(config: dict[str, object]) -> None:
     author_entries = _split_config_entries(config.get("watch_author_ids"))
     thread_entries = _split_config_entries(config.get("preset_thread_ids"))
-    thread_author_entries = _split_config_entries(config.get("thread_author_watches"))
 
     while True:
-        default_action = "done" if (author_entries or thread_entries or thread_author_entries) else "author"
         action = prompt_choice(
-            "监听配置",
+            "用户和帖子管理",
             [
-                ("author", "添加监听用户 ID"),
-                ("thread", "添加固定帖子 ID"),
-                ("thread_author", "添加帖子内指定用户监听"),
-                ("done", "完成监听配置"),
+                ("view_authors", f"查看已配置用户 ID（已配置 {len(author_entries)} 个）"),
+                ("add_author", "添加用户 ID"),
+                ("view_threads", f"查看已配置帖子 ID（已配置 {len(thread_entries)} 个）"),
+                ("add_thread", "添加帖子 ID"),
+                ("done", "完成用户和帖子管理"),
             ],
-            default_action,
+            "done" if (author_entries or thread_entries) else "add_author",
         )
         if action == "done":
             break
-        if action == "author":
+        if action == "view_authors":
+            _print_existing("已配置用户 ID", [_entry_title(entry) for entry in author_entries])
+        elif action == "add_author":
             _clear_default_entries(author_entries, "watch_author_ids")
             author_id = prompt_text("监听用户 ID", "")
             if author_id:
                 author_entries.append(_entry_with_label(author_id, prompt_text("备注名称（可空）", "")))
-        elif action == "thread":
+        elif action == "view_threads":
+            _print_existing("已配置帖子 ID", [_entry_title(entry) for entry in thread_entries])
+        elif action == "add_thread":
             _clear_default_entries(thread_entries, "preset_thread_ids")
             tid = prompt_text("固定帖子 ID", "")
             if tid:
                 thread_entries.append(_entry_with_label(tid, prompt_text("备注名称（可空）", "")))
-        elif action == "thread_author":
-            tid = prompt_text("帖子 ID", "")
-            author_id = prompt_text("用户 ID", "")
-            if tid and author_id:
-                thread_author_entries.append(_entry_with_label(f"{tid}:{author_id}", prompt_text("备注名称（可空）", "")))
 
     config["watch_author_ids"] = "\n".join(author_entries)
     config["preset_thread_ids"] = "\n".join(thread_entries)
-    config["thread_author_watches"] = "\n".join(thread_author_entries)
-    has_author = bool(author_entries)
-    has_thread_author = bool(thread_author_entries)
-    if has_author and has_thread_author:
-        config["watch_mode"] = "both"
-    elif has_thread_author:
-        config["watch_mode"] = "thread_author"
-    else:
-        config["watch_mode"] = "author"
+
+
+def _configure_listen_rules(config: dict[str, object]) -> None:
+    rules = _json_list(config.get("listen_rules"))
+    author_entries = _split_config_entries(config.get("watch_author_ids"))
+    thread_entries = _split_config_entries(config.get("preset_thread_ids"))
+    targets = _json_list(config.get("push_targets"))
+
+    while True:
+        action = prompt_choice(
+            "监听规则管理",
+            [
+                ("view", f"查看已有监听规则（已配置 {len(rules)} 条）"),
+                ("add_author", "添加用户主页监听"),
+                ("add_thread_author", "添加帖子内指定用户监听"),
+                ("done", "完成监听规则管理"),
+            ],
+            "done" if (rules or author_entries or thread_entries) else "add_author",
+        )
+        if action == "done":
+            break
+        if action == "view":
+            rows = []
+            for rule in rules:
+                mode = str(rule.get("mode") or "")
+                author_id = str(rule.get("author_id") or "")
+                tid = str(rule.get("tid") or "")
+                target_ids = rule.get("target_ids") if isinstance(rule.get("target_ids"), list) else []
+                source = f"用户 {author_id}" if mode == "author" else f"帖子 {tid} / 用户 {author_id}"
+                rows.append(f"{rule.get('label') or rule.get('id') or source} - {source} - 通道 {len(target_ids)} 个")
+            _print_existing("已有监听规则", rows)
+            continue
+
+        if not targets:
+            print("请先添加至少一个推送通道。", file=sys.stderr)
+            continue
+        target_options = [{"value": str(target.get("id") or ""), "label": _target_title(target)} for target in targets if str(target.get("id") or "")]
+        selected_targets = _selected_option_value(prompt_multi_select("选择监听通道", target_options, selected_values=[option["value"] for option in target_options]))
+        if not selected_targets:
+            print("未选择监听通道，已跳过。", file=sys.stderr)
+            continue
+
+        if action == "add_author":
+            if not author_entries:
+                print("请先在用户和帖子管理里添加用户 ID。", file=sys.stderr)
+                continue
+            author_entry = _select_existing_entry("选择用户 ID", author_entries)
+            author_id, label = _entry_parts(author_entry)
+            if not author_id:
+                continue
+            rules.append(
+                {
+                    "id": f"author:{author_id}",
+                    "label": label,
+                    "mode": "author",
+                    "author_id": author_id,
+                    "tid": "",
+                    "target_ids": selected_targets,
+                }
+            )
+        elif action == "add_thread_author":
+            if not author_entries or not thread_entries:
+                print("请先添加用户 ID 和帖子 ID。", file=sys.stderr)
+                continue
+            thread_entry = _select_existing_entry("选择帖子 ID", thread_entries)
+            author_entry = _select_existing_entry("选择用户 ID", author_entries)
+            tid, thread_label = _entry_parts(thread_entry)
+            author_id, author_label = _entry_parts(author_entry)
+            if not tid or not author_id:
+                continue
+            label = f"{thread_label or tid} / {author_label or author_id}"
+            rules.append(
+                {
+                    "id": f"thread_author:{tid}:{author_id}",
+                    "label": label,
+                    "mode": "thread_author",
+                    "author_id": author_id,
+                    "tid": tid,
+                    "target_ids": selected_targets,
+                }
+            )
+
+    config["listen_rules"] = _json_dumps(rules)
+    has_author = any(str(rule.get("mode") or "") == "author" for rule in rules)
+    has_thread_author = any(str(rule.get("mode") or "") == "thread_author" for rule in rules)
+    if rules:
+        if has_author and has_thread_author:
+            config["watch_mode"] = "both"
+        elif has_thread_author:
+            config["watch_mode"] = "thread_author"
+        else:
+            config["watch_mode"] = "author"
 
 
 def _sync_listen_rules(config: dict[str, object]) -> None:
+    if _json_list(config.get("listen_rules")):
+        return
     target_ids = _target_ids_from_config(config)
     if not target_ids:
         return
@@ -535,50 +807,15 @@ def _sync_listen_rules(config: dict[str, object]) -> None:
 
 def prompt_basic_config(config: dict[str, object]) -> dict[str, object]:
     updated = dict(config)
-    updated["bot_channel"] = _normalize_bot_channel(
-        prompt_choice(
-            "推送通道",
-            [
-                ("feishu", "Feishu"),
-                ("wxpusher", "WxPusher"),
-                ("email", "Email"),
-                ("wechat", "WeChat"),
-                ("dingtalk", "DingTalk"),
-            ],
-            updated.get("bot_channel", "feishu"),
-        )
-    )
     updated["nga_cookie"] = prompt_text("NGA cookie", updated.get("nga_cookie", ""), secret=True)
-    channel = str(updated.get("bot_channel") or "feishu").strip()
-    channel_fields = {
-        "email": [
-            ("email_to", "收件邮箱", False),
-            ("email_username", "邮箱账号", False),
-            ("email_password", "邮箱密码或授权码", True),
-        ],
-        "wechat": [
-            ("wechat_bot_token", "WeChat bot token", True),
-            ("wechat_bot_target_user_id", "WeChat 目标用户 ID", False),
-        ],
-        "dingtalk": [
-            ("dingtalk_client_id", "DingTalk Client ID", False),
-            ("dingtalk_client_secret", "DingTalk Client Secret", True),
-            ("dingtalk_target_user_ids", "DingTalk 目标用户 ID", False),
-        ],
-    }
-    if channel == "feishu":
-        _configure_feishu_channel(updated)
-    elif channel == "wxpusher":
-        _configure_wxpusher_channel(updated)
-    else:
-        _prompt_fields(updated, channel_fields.get(channel, []))
-    _configure_watch_settings(updated)
+    _manage_push_targets(updated)
+    _configure_watch_resources(updated)
+    _configure_listen_rules(updated)
     updated["interval"] = str(updated.get("interval") or "30").strip() or "30"
     current_jitter = str(updated.get("jitter") or "").strip()
     default_jitter = str(nga_wolf_config.DEFAULT_CONFIG.get("jitter") or "20").strip()
     updated["jitter"] = current_jitter if current_jitter and current_jitter != default_jitter else "5"
     updated["state_path"] = str(updated.get("state_path") or ".nga_seen.json").strip() or ".nga_seen.json"
-    _sync_listen_rules(updated)
     return updated
 
 
