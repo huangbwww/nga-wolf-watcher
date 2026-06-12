@@ -18,6 +18,8 @@ build/
 *.spec
 !NGA-Wolf-Watcher.spec
 !NGA-Wolf-Watcher-Web.spec
+!NGA-Wolf-Watcher-CLI.spec
+!NGA-Wolf-Watcher-Web-Onedir.spec
 nga_sample*.html
 nga_output8*.bin
 nga_forum.bin

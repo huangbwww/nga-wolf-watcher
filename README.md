@@ -45,11 +45,28 @@ Feature ideas are also welcome. They can be related to NGA, stock-related workfl
 
 Starting with `v1.3.0`, releases include a Linux server install path. On a server you can install the `ngawolf` command with one shell command, then use the terminal TUI to configure the NGA Cookie, push channels, NGA users/threads, and listen rules. The installed version creates a systemd service by default, and you can also manage background runtime and logs with `ngawolf start/stop/status/logs`.
 
-## Use The EXE
+## Release Assets
+
+Release assets use the same lowercase project prefix and include version, platform, architecture, and package type:
+
+```text
+nga-wolf-watcher-vX.Y.Z-windows-x86_64-setup.exe
+nga-wolf-watcher-vX.Y.Z-windows-x86_64-portable.zip
+nga-wolf-watcher-vX.Y.Z-linux-x86_64.tar.gz
+nga-wolf-watcher-vX.Y.Z-linux-aarch64.tar.gz
+install-linux.sh
+SHA256SUMS
+```
+
+The Windows `setup.exe` and `portable.zip` replace the old single large onefile exe. The Linux archives contain the headless `ngawolf` CLI; `install-linux.sh` installs those archives first and falls back to source installation only when needed.
+
+Current Windows release assets are not code-signed, so Windows SmartScreen may show an unknown-publisher warning. Verify downloaded files with `SHA256SUMS` from the same release when needed.
+
+## Windows Setup Or Portable
 
 This path does not require editing code or running Python commands.
 
-1. Download `NGA-Wolf-Watcher.exe` from [Releases](https://github.com/huangbwww/nga-wolf-watcher/releases/latest). Starting from 1.2.x, releases only ship the new configuration client.
+1. Download `nga-wolf-watcher-vX.Y.Z-windows-x86_64-setup.exe` from [Releases](https://github.com/huangbwww/nga-wolf-watcher/releases/latest). If you do not want to install, download `nga-wolf-watcher-vX.Y.Z-windows-x86_64-portable.zip`, extract it, and run `NGA-Wolf-Watcher.exe` inside the extracted folder.
 2. Open [Feishu Open Platform](https://open.feishu.cn/page/openclaw), create a bot app, and copy the app's `App ID` and `App Secret`.
 3. Add the bot to the target Feishu group.
 4. If you want to use `/start` and other commands without mentioning the bot, grant `im:message.group_msg`.
@@ -60,7 +77,7 @@ This path does not require editing code or running Python commands.
 
 Keep the first-start mark-seen option enabled before the first launch. It marks currently fetched NGA replies as already seen, so old replies are not pushed to Feishu in bulk.
 
-The GUI saves local secrets under `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`. Runtime state is stored next to it as `.nga_seen.json` by default. Do not share these files.
+The setup and portable builds use the same data directory as the older exe. The GUI saves local secrets under `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`. Runtime state is stored next to it as `.nga_seen.json` by default. Do not share these files.
 
 ### Message Channels, Targets, And Listen Rules
 
@@ -279,7 +296,7 @@ On a Linux server, install the `ngawolf` command without cloning the repository:
 curl -fsSL https://github.com/huangbwww/nga-wolf-watcher/releases/latest/download/install-linux.sh | sudo bash
 ```
 
-The installer puts the app under `/opt/ngawolf`, stores config at `/etc/ngawolf/config.json`, stores runtime state under `/var/lib/ngawolf`, and creates `/usr/local/bin/ngawolf`. First-time setup opens a terminal wizard with arrow-key selection. In Feishu mode, after you enter the App ID / Secret, it lists visible groups so you can move with Up/Down, toggle with Space, then press Enter to confirm. WeChat binding prints both a terminal QR code and the original link. If the terminal TUI dependency is unavailable, the CLI falls back to the older numeric prompts:
+The installer first tries the standard Linux release package for the current CPU architecture, such as `nga-wolf-watcher-vX.Y.Z-linux-x86_64.tar.gz` or `nga-wolf-watcher-vX.Y.Z-linux-aarch64.tar.gz`. These binary packages are built on Ubuntu 22.04 and target glibc-based Linux distributions; very old glibc systems and Alpine/musl systems may need the source-install fallback. If no suitable package is available, it falls back to source installation. It puts the app under `/opt/ngawolf`, stores config at `/etc/ngawolf/config.json`, stores runtime state under `/var/lib/ngawolf`, and creates `/usr/local/bin/ngawolf`. First-time setup opens a terminal wizard with arrow-key selection. In Feishu mode, after you enter the App ID / Secret, it lists visible groups so you can move with Up/Down, toggle with Space, then press Enter to confirm. WeChat binding prints both a terminal QR code and the original link. If the terminal TUI dependency is unavailable, the CLI falls back to the older numeric prompts:
 
 ```bash
 sudo ngawolf init
@@ -801,20 +818,20 @@ Troubleshooting:
 
 The script stores pushed reply ids, handled command ids, and deferred quiet-hour replies in `.nga_seen.json`. In the EXE GUI, the default file lives under `%LOCALAPPDATA%\NGA Wolf Watcher\`, next to `config.json`. It is separate from config because it is runtime state and is written frequently; deleting it resets the watcher’s seen/handled history.
 
-### Build The EXE
+### Build Windows Release Assets
 
-Build the frontend first, then package the pywebview client:
+Build the frontend first, then package the pywebview client as an onedir app. The release workflow then zips that folder for portable use and builds an installer with Inno Setup:
 
 ```powershell
 cd .\webui
 npm.cmd ci
 npm.cmd run build
 cd ..
-python -m pip install pywebview pystray pillow pyinstaller
-python -m PyInstaller --noconfirm --clean .\NGA-Wolf-Watcher-Web.spec
+python -m pip install -r requirements.txt pyinstaller
+python -m PyInstaller --noconfirm --clean .\NGA-Wolf-Watcher-Web-Onedir.spec
 ```
 
-The output is `dist\NGA-Wolf-Watcher.exe`.
+The portable app folder is `dist\NGA-Wolf-Watcher\`. Release assets are named `nga-wolf-watcher-vX.Y.Z-windows-x86_64-portable.zip` and `nga-wolf-watcher-vX.Y.Z-windows-x86_64-setup.exe`.
 
 ## Legacy Custom Bot Webhook
 

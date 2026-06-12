@@ -1,0 +1,203 @@
+name: Build release assets
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, for example v1.4.0'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+# Standard asset names:
+# - nga-wolf-watcher-${TAG}-windows-x86_64-setup.exe
+# - nga-wolf-watcher-${TAG}-windows-x86_64-portable.zip
+# - nga-wolf-watcher-${TAG}-linux-x86_64.tar.gz
+# - nga-wolf-watcher-${TAG}-linux-aarch64.tar.gz
+# - install-linux.sh
+# - SHA256SUMS
+
+jobs:
+  build-linux:
+    name: Linux CLI ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "Release tag must match vX.Y.Z, got: $TAG" >&2
+            exit 1
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -r requirements-linux.txt pyinstaller
+
+      - name: Build CLI
+        run: python -m PyInstaller --clean --noconfirm NGA-Wolf-Watcher-CLI.spec
+
+      - name: Pack Linux archive
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ARCH="${{ matrix.arch }}"
+          PACKAGE_DIR="nga-wolf-watcher-${TAG}-linux-${ARCH}"
+          ASSET="nga-wolf-watcher-${TAG}-linux-${ARCH}.tar.gz"
+
+          mkdir -p "release/${PACKAGE_DIR}"
+          cp -R dist/ngawolf/. "release/${PACKAGE_DIR}/"
+          cp packaging/linux/README-linux.md "release/${PACKAGE_DIR}/README-linux.md"
+          chmod +x "release/${PACKAGE_DIR}/ngawolf"
+          tar -czf "release/${ASSET}" -C release "${PACKAGE_DIR}"
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-${{ matrix.arch }}
+          path: release/*.tar.gz
+
+  build-windows:
+    name: Windows installer and portable
+    runs-on: windows-2025
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Validate release tag
+        shell: pwsh
+        run: |
+          if ($env:TAG -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Release tag must match vX.Y.Z, got: $env:TAG"
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Build web UI
+        working-directory: webui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build Windows app folder
+        run: python -m PyInstaller --clean --noconfirm NGA-Wolf-Watcher-Web-Onedir.spec
+
+      - name: Pack portable zip
+        shell: pwsh
+        run: |
+          $tag = $env:TAG
+          $portableRoot = "nga-wolf-watcher-$tag-windows-x86_64-portable"
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Copy-Item -Path "dist\NGA-Wolf-Watcher" -Destination "release\$portableRoot" -Recurse
+          Compress-Archive -Path "release\$portableRoot" -DestinationPath "release\nga-wolf-watcher-$tag-windows-x86_64-portable.zip" -Force
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          $tag = $env:TAG
+          $version = $tag.TrimStart("v")
+          $sourceDir = (Resolve-Path "dist\NGA-Wolf-Watcher").Path
+          $outputDir = (Resolve-Path "release").Path
+          $outputBase = "nga-wolf-watcher-$tag-windows-x86_64-setup"
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc "packaging\windows\nga-wolf-watcher.iss" "/DAppVersion=$version" "/DSourceDir=$sourceDir" "/DOutputDir=$outputDir" "/DOutputBaseFilename=$outputBase"
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-x86_64
+          path: |
+            release/*.zip
+            release/*.exe
+
+  publish:
+    name: Publish GitHub release
+    runs-on: ubuntu-24.04
+    needs:
+      - build-linux
+      - build-windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect assets and checksums
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p release-assets
+          find artifacts -maxdepth 3 -type f -print -exec cp {} release-assets/ \;
+          cp tools/install-linux.sh release-assets/install-linux.sh
+          chmod +x release-assets/install-linux.sh
+          (
+            cd release-assets
+            sha256sum * > SHA256SUMS
+          )
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ env.TAG }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            gh release create "$TAG" release-assets/* --title "$TAG" --generate-notes
+          fi
