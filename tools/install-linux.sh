@@ -4,6 +4,8 @@ set -Eeuo pipefail
 REPO="${NGAWOLF_REPO:-huangbwww/nga-wolf-watcher}"
 VERSION="${NGAWOLF_VERSION:-latest}"
 SOURCE_DIR="${NGAWOLF_SOURCE_DIR:-}"
+ARCHIVE_URL="${NGAWOLF_ARCHIVE_URL:-}"
+GITHUB_PROXY="${NGAWOLF_GITHUB_PROXY:-}"
 INSTALL_DIR="${NGAWOLF_INSTALL_DIR:-/opt/ngawolf}"
 APP_DIR="${INSTALL_DIR}/app"
 VENV_DIR="${INSTALL_DIR}/venv"
@@ -78,17 +80,34 @@ install_os_dependencies() {
   log "No supported package manager detected; assuming Python, curl, and tar are already installed."
 }
 
+github_url() {
+  local url="$1"
+  if [[ -n "$GITHUB_PROXY" ]]; then
+    printf '%s\n' "${GITHUB_PROXY%/}/$url"
+  else
+    printf '%s\n' "$url"
+  fi
+}
+
 resolve_latest_version() {
   local latest_url
-  latest_url="$(curl -fsSIL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest")"
+  latest_url="$(curl -fsSIL -o /dev/null -w '%{url_effective}' "$(github_url "https://github.com/${REPO}/releases/latest")")"
   [[ "$latest_url" != */tag/* ]] && die "Could not resolve latest release for ${REPO}"
-  printf '%s\n' "${latest_url##*/}"
+  local resolved="${latest_url##*/tag/}"
+  resolved="${resolved%%[?#]*}"
+  resolved="${resolved%%/}"
+  printf '%s\n' "$resolved"
 }
 
 download_release_source() {
   local resolved_version="$1"
   local archive_path="$2"
-  local archive_url="https://github.com/${REPO}/archive/refs/tags/${resolved_version}.tar.gz"
+  local archive_url
+  if [[ -n "$ARCHIVE_URL" ]]; then
+    archive_url="$ARCHIVE_URL"
+  else
+    archive_url="$(github_url "https://github.com/${REPO}/archive/refs/tags/${resolved_version}.tar.gz")"
+  fi
 
   log "Downloading ${REPO} ${resolved_version}"
   curl -fL "$archive_url" -o "$archive_path"
@@ -126,7 +145,7 @@ install_application_files() {
     copy_source_dir "$SOURCE_DIR" "$next_app"
   else
     local resolved_version="$VERSION"
-    if [[ "$resolved_version" == "latest" ]]; then
+    if [[ "$resolved_version" == "latest" && -z "$ARCHIVE_URL" ]]; then
       resolved_version="$(resolve_latest_version)"
     fi
     local archive_path="${TMP_DIR}/ngawolf.tar.gz"

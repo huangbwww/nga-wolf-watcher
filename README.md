@@ -327,6 +327,44 @@ curl -fsSL https://github.com/huangbwww/nga-wolf-watcher/releases/latest/downloa
 sudo NGAWOLF_SOURCE_DIR=/path/to/nga-wolf bash tools/install-linux.sh
 ```
 
+If the server cannot reach GitHub reliably, you can use a third-party GitHub mirror. Mirrors are not official project services and may stop working; pin the version to avoid `latest` redirects failing on the mirror:
+
+```bash
+curl -fsSL https://ghfast.top/https://github.com/huangbwww/nga-wolf-watcher/releases/latest/download/install-linux.sh \
+  | sudo NGAWOLF_VERSION=v1.3.0 NGAWOLF_GITHUB_PROXY=https://ghfast.top bash
+```
+
+You can also provide the mirrored source archive URL directly:
+
+```bash
+curl -fsSL https://ghfast.top/https://github.com/huangbwww/nga-wolf-watcher/releases/latest/download/install-linux.sh \
+  | sudo NGAWOLF_ARCHIVE_URL=https://ghfast.top/https://github.com/huangbwww/nga-wolf-watcher/archive/refs/tags/v1.3.0.tar.gz bash
+```
+
+For the most reliable mirrored install, download the source archive once and then install from that local directory:
+
+```bash
+MIRROR=https://ghfast.top VERSION=v1.3.0 bash -c '
+set -e
+tmp=$(mktemp -d)
+curl -fL "$MIRROR/https://github.com/huangbwww/nga-wolf-watcher/archive/refs/tags/$VERSION.tar.gz" -o "$tmp/src.tar.gz"
+tar -xzf "$tmp/src.tar.gz" -C "$tmp" --strip-components=1
+sudo NGAWOLF_SOURCE_DIR="$tmp" bash "$tmp/tools/install-linux.sh"
+'
+```
+
+If the Linux server cannot reach GitHub at all, download or clone the source on another machine, copy it to the server, then run:
+
+```bash
+sudo NGAWOLF_SOURCE_DIR=/path/to/nga-wolf bash /path/to/nga-wolf/tools/install-linux.sh
+```
+
+The installer still uses pip for Python dependencies. If PyPI is also slow, pass a pip mirror:
+
+```bash
+sudo PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple NGAWOLF_SOURCE_DIR=/path/to/nga-wolf bash /path/to/nga-wolf/tools/install-linux.sh
+```
+
 ### Run From Source
 
 Install dependencies:

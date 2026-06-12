@@ -47,6 +47,18 @@ def test_linux_installer_uses_headless_requirements_when_available() -> None:
     assert 'install -r "$req_file"' in script
 
 
+def test_linux_installer_supports_github_proxy_and_custom_archive_url() -> None:
+    script = INSTALLER.read_text(encoding="utf-8")
+
+    assert "NGAWOLF_GITHUB_PROXY" in script
+    assert "NGAWOLF_ARCHIVE_URL" in script
+    assert "github_url()" in script
+    assert '"${GITHUB_PROXY%/}/$url"' in script
+    assert 'github_url "https://github.com/${REPO}/releases/latest"' in script
+    assert 'github_url "https://github.com/${REPO}/archive/refs/tags/${resolved_version}.tar.gz"' in script
+    assert 'archive_url="$ARCHIVE_URL"' in script
+
+
 def test_linux_installer_prints_background_management_commands() -> None:
     script = INSTALLER.read_text(encoding="utf-8")
 

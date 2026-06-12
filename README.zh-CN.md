@@ -329,6 +329,44 @@ curl -fsSL https://github.com/huangbwww/nga-wolf-watcher/releases/latest/downloa
 sudo NGAWOLF_SOURCE_DIR=/path/to/nga-wolf bash tools/install-linux.sh
 ```
 
+如果服务器直连 GitHub 超时，可以用第三方 GitHub 镜像。镜像不是项目官方服务，可能随时失效；优先固定版本号，避免 `latest` 跳转在镜像站上失败：
+
+```bash
+curl -fsSL https://ghfast.top/https://github.com/huangbwww/nga-wolf-watcher/releases/latest/download/install-linux.sh \
+  | sudo NGAWOLF_VERSION=v1.3.0 NGAWOLF_GITHUB_PROXY=https://ghfast.top bash
+```
+
+也可以直接指定源码包镜像地址：
+
+```bash
+curl -fsSL https://ghfast.top/https://github.com/huangbwww/nga-wolf-watcher/releases/latest/download/install-linux.sh \
+  | sudo NGAWOLF_ARCHIVE_URL=https://ghfast.top/https://github.com/huangbwww/nga-wolf-watcher/archive/refs/tags/v1.3.0.tar.gz bash
+```
+
+如果只想依赖一次镜像下载，可以先下载源码包，再走本地目录安装；这种方式最适合 GitHub 不稳定的服务器：
+
+```bash
+MIRROR=https://ghfast.top VERSION=v1.3.0 bash -c '
+set -e
+tmp=$(mktemp -d)
+curl -fL "$MIRROR/https://github.com/huangbwww/nga-wolf-watcher/archive/refs/tags/$VERSION.tar.gz" -o "$tmp/src.tar.gz"
+tar -xzf "$tmp/src.tar.gz" -C "$tmp" --strip-components=1
+sudo NGAWOLF_SOURCE_DIR="$tmp" bash "$tmp/tools/install-linux.sh"
+'
+```
+
+如果 Linux 服务器完全不能访问 GitHub，可以在其他机器下载源码包或克隆仓库后传到服务器，再执行：
+
+```bash
+sudo NGAWOLF_SOURCE_DIR=/path/to/nga-wolf bash /path/to/nga-wolf/tools/install-linux.sh
+```
+
+安装过程还需要通过 pip 安装 Python 依赖；如果 PyPI 也慢，可以把 pip 镜像一并传给安装脚本：
+
+```bash
+sudo PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple NGAWOLF_SOURCE_DIR=/path/to/nga-wolf bash /path/to/nga-wolf/tools/install-linux.sh
+```
+
 ### 直接运行源码
 
 安装依赖：
