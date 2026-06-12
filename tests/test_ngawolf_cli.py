@@ -1117,7 +1117,7 @@ def test_manage_push_targets_reports_wechat_context_token_error_without_crashing
     )
     error = RuntimeError("微信用户 wechat-user 尚未建立 context_token。请先让该用户给机器人发一条消息。")
 
-    with patch.object(ngawolf_cli, "prompt_choice", side_effect=["test", "wechat_1", "done"]), patch.object(
+    with patch.object(ngawolf_cli, "prompt_choice", side_effect=["test", "wechat_1", "back", "done"]), patch.object(
         ngawolf_cli.nga_wolf_config, "validate_config", return_value=[]
     ), patch.object(ngawolf_cli.nga_feishu_watch, "args_for_push_target", return_value=argparse.Namespace(bot_channel="wechat")), patch.object(
         ngawolf_cli.nga_feishu_watch, "send_test_message", side_effect=error
@@ -1127,6 +1127,38 @@ def test_manage_push_targets_reports_wechat_context_token_error_without_crashing
     captured = capsys.readouterr()
     assert "请先用目标微信给机器人发一条消息，再回来测试。" in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_manage_push_targets_can_retry_failed_wechat_test(capsys) -> None:
+    config = dict(nga_wolf_config.DEFAULT_CONFIG)
+    config["wechat_bot_profiles"] = json.dumps(
+        [
+            {
+                "id": "wx",
+                "label": "WeChat",
+                "token": "token",
+                "target_user_id": "wechat-user",
+                "account_id": "default",
+            }
+        ],
+        ensure_ascii=False,
+    )
+    config["push_targets"] = json.dumps(
+        [{"id": "wechat_1", "label": "WeChat", "channel": "wechat", "profile_id": "wx", "receive_id": "wechat-user"}],
+        ensure_ascii=False,
+    )
+    error = RuntimeError("微信用户 wechat-user 尚未建立 context_token。请先让该用户给机器人发一条消息。")
+
+    with patch.object(ngawolf_cli, "prompt_choice", side_effect=["test", "wechat_1", "retry", "done"]), patch.object(
+        ngawolf_cli.nga_wolf_config, "validate_config", return_value=[]
+    ), patch.object(ngawolf_cli.nga_feishu_watch, "args_for_push_target", return_value=argparse.Namespace(bot_channel="wechat")), patch.object(
+        ngawolf_cli.nga_feishu_watch, "send_test_message", side_effect=[error, None]
+    ) as send_test_message:
+        ngawolf_cli._manage_push_targets(config)
+
+    assert send_test_message.call_count == 2
+    captured = capsys.readouterr()
+    assert "请先用目标微信给机器人发一条消息，再回来测试。" in captured.err
 
 
 def test_manage_push_targets_delete_last_target_clears_legacy_receive_field() -> None:

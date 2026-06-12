@@ -811,25 +811,42 @@ def _delete_push_target(config: dict[str, object]) -> None:
         config["bot_channel"] = "feishu"
 
 
-def _test_push_target(config: dict[str, object]) -> None:
+def _test_push_target(config: dict[str, object]) -> bool:
     targets = _json_list(config.get("push_targets"))
     choices = [(str(target.get("id") or ""), _target_title(target)) for target in targets if str(target.get("id") or "")]
     if not choices:
         print("暂无可测试的推送通道。", file=sys.stderr)
-        return
+        return False
     errors = nga_wolf_config.validate_config(config, require_cookie=False)
     if errors:
         print_validation_errors(errors)
-        return
+        return False
     target_id = prompt_choice("选择要测试的推送通道", choices, choices[0][0])
     args = nga_wolf_config.build_args(config)
-    target = nga_feishu_watch.find_push_target(args, target_id)
-    if target is None:
-        print("请选择有效推送通道。", file=sys.stderr)
-        return
-    title = target.label or target.id or target.receive_id or target.channel
-    print(f"正在测试推送通道：{title}")
-    _send_test_message_safely(nga_feishu_watch.args_for_push_target(args, target))
+    while True:
+        target = nga_feishu_watch.find_push_target(args, target_id)
+        if target is None:
+            print("请选择有效推送通道。", file=sys.stderr)
+            return False
+        title = target.label or target.id or target.receive_id or target.channel
+        print(f"正在测试推送通道：{title}")
+        if _send_test_message_safely(nga_feishu_watch.args_for_push_target(args, target)):
+            return True
+        action = prompt_choice(
+            "测试未通过",
+            [
+                ("retry", "重新测试当前通道"),
+                ("select", "重新选择推送通道"),
+                ("back", "返回推送通道管理"),
+            ],
+            "retry",
+        )
+        if action == "retry":
+            continue
+        if action == "select":
+            target_id = prompt_choice("选择要测试的推送通道", choices, target_id)
+            continue
+        return False
 
 
 def _test_send_error_message(exc: Exception) -> str:
@@ -896,8 +913,11 @@ def _manage_push_targets(config: dict[str, object]) -> None:
             config["push_targets"] = _json_dumps(legacy_targets)
             config["bot_channel"] = str(legacy_targets[0].get("channel") or config.get("bot_channel") or "feishu")
 
+    default_action = "done" if _json_list(config.get("push_targets")) else "add_feishu"
     while True:
         targets = _json_list(config.get("push_targets"))
+        if not targets and default_action in {"test", "delete", "view", "done"}:
+            default_action = "add_feishu"
         action = prompt_choice(
             "推送通道管理",
             [
@@ -911,20 +931,23 @@ def _manage_push_targets(config: dict[str, object]) -> None:
                 ("delete", f"删除推送通道（已配置 {len(targets)} 个）"),
                 ("done", "完成推送通道管理"),
             ],
-            "done" if targets else "add_feishu",
+            default_action,
         )
         if action == "done":
             break
         if action == "view":
             _print_existing("已配置推送通道", [_target_title(target) for target in targets])
+            default_action = "done" if targets else "add_feishu"
             continue
         if action == "delete":
             _delete_push_target(config)
+            default_action = "done" if _json_list(config.get("push_targets")) else "add_feishu"
             continue
         if action == "test":
-            _test_push_target(config)
+            default_action = "done" if _test_push_target(config) else "test"
             continue
         _run_channel_config(config, action.removeprefix("add_"))
+        default_action = "done" if _json_list(config.get("push_targets")) else "add_feishu"
 
 
 def _split_config_entries(value: object) -> list[str]:
