@@ -9,8 +9,11 @@ import json
 import getpass
 import os
 import re
+import signal
 import shutil
+import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -1492,6 +1495,170 @@ def command_test_send(paths: CliPaths) -> int:
     return 0 if _send_test_message_safely(args) else 2
 
 
+def _service_name() -> str:
+    return os.getenv("NGAWOLF_SERVICE_NAME", "ngawolf").strip() or "ngawolf"
+
+
+def _systemd_service_path() -> Path:
+    return Path("/etc/systemd/system") / f"{_service_name()}.service"
+
+
+def _should_use_systemd() -> bool:
+    return os.name != "nt" and shutil.which("systemctl") is not None and Path("/run/systemd/system").exists() and _systemd_service_path().exists()
+
+
+def _run_systemctl(action: str) -> int:
+    return subprocess.run(["systemctl", action, _service_name()], check=False).returncode
+
+
+def _pid_path(paths: CliPaths) -> Path:
+    return paths.data_dir / nga_wolf_config.WATCHER_PID_FILE
+
+
+def _read_pid(paths: CliPaths) -> int:
+    try:
+        return int(_pid_path(paths).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def _process_exists(pid: int) -> bool:
+    if pid <= 0 or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _terminate_process(pid: int) -> bool:
+    if pid <= 0 or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return False
+    for _ in range(30):
+        if not _process_exists(pid):
+            return True
+        time.sleep(0.1)
+    return not _process_exists(pid)
+
+
+def _local_run_command(paths: CliPaths) -> list[str]:
+    return [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--config",
+        str(paths.config_path),
+        "--data-dir",
+        str(paths.data_dir),
+        "--log-file",
+        str(paths.log_file),
+        "run",
+    ]
+
+
+def command_start(paths: CliPaths) -> int:
+    if _should_use_systemd():
+        return _run_systemctl("start")
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    paths.log_file.parent.mkdir(parents=True, exist_ok=True)
+    pid = _read_pid(paths)
+    if _process_exists(pid):
+        print(f"ngawolf 已在后台运行，PID {pid}。日志：{paths.log_file}")
+        return 0
+    log_handle = paths.log_file.open("ab", buffering=0)
+    try:
+        process = subprocess.Popen(
+            _local_run_command(paths),
+            cwd=str(Path(__file__).resolve().parent),
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=(os.name != "nt"),
+        )
+    finally:
+        log_handle.close()
+    _pid_path(paths).write_text(f"{process.pid}\n", encoding="utf-8")
+    print(f"已在后台启动 ngawolf，PID {process.pid}。日志：{paths.log_file}")
+    return 0
+
+
+def command_stop(paths: CliPaths) -> int:
+    if _should_use_systemd():
+        return _run_systemctl("stop")
+    pid = _read_pid(paths)
+    if not pid:
+        print("ngawolf 未在本地后台运行。")
+        return 0
+    if not _process_exists(pid):
+        with contextlib.suppress(OSError):
+            _pid_path(paths).unlink()
+        print("ngawolf 未在本地后台运行，已清理遗留 PID 文件。")
+        return 0
+    if _terminate_process(pid):
+        with contextlib.suppress(OSError):
+            _pid_path(paths).unlink()
+        print(f"已停止 ngawolf，PID {pid}。")
+        return 0
+    print(f"停止 ngawolf 失败，PID {pid}。", file=sys.stderr)
+    return 2
+
+
+def command_restart(paths: CliPaths) -> int:
+    if _should_use_systemd():
+        return _run_systemctl("restart")
+    stop_code = command_stop(paths)
+    if stop_code != 0:
+        return stop_code
+    return command_start(paths)
+
+
+def command_status(paths: CliPaths) -> int:
+    if _should_use_systemd():
+        return subprocess.run(["systemctl", "status", "--no-pager", _service_name()], check=False).returncode
+    pid = _read_pid(paths)
+    if _process_exists(pid):
+        print(f"ngawolf 正在本地后台运行，PID {pid}。日志：{paths.log_file}")
+        return 0
+    print("ngawolf 未在本地后台运行。")
+    return 3
+
+
+def _print_log_tail(path: Path, lines: int) -> None:
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return
+    for line in content[-max(1, lines):]:
+        print(line)
+
+
+def command_logs(paths: CliPaths, follow: bool = False, lines: int = 80) -> int:
+    lines = max(1, int(lines or 80))
+    if paths.log_file.exists():
+        tail = shutil.which("tail")
+        if tail:
+            command = ["tail", "-n", str(lines)]
+            if follow:
+                command.append("-f")
+            command.append(str(paths.log_file))
+            return subprocess.run(command, check=False).returncode
+        _print_log_tail(paths.log_file, lines)
+        if follow:
+            print("当前系统没有 tail 命令，无法持续跟随日志。", file=sys.stderr)
+        return 0
+    if _should_use_systemd():
+        command = ["journalctl", "-u", _service_name(), "-n", str(lines), "--no-pager"]
+        if follow:
+            command.append("-f")
+        return subprocess.run(command, check=False).returncode
+    print(f"日志文件不存在：{paths.log_file}", file=sys.stderr)
+    return 2
+
+
 def command_run(paths: CliPaths, once: bool = False) -> int:
     config = load_service_config(paths)
     errors = nga_wolf_config.validate_config(config, require_cookie=True)
@@ -1541,6 +1708,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     subparsers.add_parser("check", help="Validate config without starting the watcher.")
     subparsers.add_parser("mark-seen", help="Mark existing posts as seen.")
     subparsers.add_parser("test-send", help="Send a test message.")
+    subparsers.add_parser("start", help="Start the watcher in the background.")
+    subparsers.add_parser("stop", help="Stop the background watcher.")
+    subparsers.add_parser("restart", help="Restart the background watcher.")
+    subparsers.add_parser("status", help="Show background watcher status.")
+
+    logs_parser = subparsers.add_parser("logs", help="Show watcher logs.")
+    logs_parser.add_argument("-f", "--follow", action="store_true", help="Follow log output.")
+    logs_parser.add_argument("-n", "--lines", type=int, default=80, help="Number of log lines to show.")
 
     return parser.parse_args(argv)
 
@@ -1569,6 +1744,16 @@ def main(argv: list[str] | None = None) -> int:
         return command_mark_seen(paths)
     if args.command == "test-send":
         return command_test_send(paths)
+    if args.command == "start":
+        return command_start(paths)
+    if args.command == "stop":
+        return command_stop(paths)
+    if args.command == "restart":
+        return command_restart(paths)
+    if args.command == "status":
+        return command_status(paths)
+    if args.command == "logs":
+        return command_logs(paths, follow=getattr(args, "follow", False), lines=getattr(args, "lines", 80))
     if args.command == "run":
         return command_run(paths, once=getattr(args, "once", False))
     print(f"{args.command} is not implemented yet.", file=sys.stderr)

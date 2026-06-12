@@ -299,6 +299,18 @@ sudo systemctl enable --now ngawolf
 sudo systemctl status ngawolf
 ```
 
+也可以直接使用 CLI 包装命令管理后台服务和日志：
+
+```bash
+sudo ngawolf start
+sudo ngawolf status
+sudo ngawolf logs -f
+sudo ngawolf restart
+sudo ngawolf stop
+```
+
+安装版日志默认写到 `/var/log/ngawolf/watcher.log`。如果系统没有 systemd，`ngawolf start` 会退回到本地后台进程，并把 PID 写到 `/var/lib/ngawolf/watcher.pid`。
+
 之后需要修改配置：
 
 ```bash

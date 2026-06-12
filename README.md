@@ -297,6 +297,18 @@ sudo systemctl enable --now ngawolf
 sudo systemctl status ngawolf
 ```
 
+You can also use the CLI wrapper to manage the background watcher and logs:
+
+```bash
+sudo ngawolf start
+sudo ngawolf status
+sudo ngawolf logs -f
+sudo ngawolf restart
+sudo ngawolf stop
+```
+
+The installed log file defaults to `/var/log/ngawolf/watcher.log`. If systemd is unavailable, `ngawolf start` falls back to a local background process and writes its PID to `/var/lib/ngawolf/watcher.pid`.
+
 To edit config later:
 
 ```bash

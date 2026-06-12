@@ -344,7 +344,7 @@ def load_feishu_profiles(config: dict[str, object]) -> list[dict[str, Any]]:
     return [
         {
             "id": "default",
-            "label": "榛樿椋炰功",
+            "label": "默认飞书",
             "app_id": app_id,
             "app_secret": app_secret,
             "id_type": str(config.get("feishu_id_type") or "chat_id").strip() or "chat_id",
@@ -374,7 +374,7 @@ def load_wechat_profiles(config: dict[str, object]) -> list[dict[str, Any]]:
     return [
         {
             "id": "default",
-            "label": "榛樿寰俊",
+            "label": "默认微信",
             "token": token,
             "base_url": str(config.get("wechat_bot_base_url") or "https://ilinkai.weixin.qq.com").strip(),
             "cdn_base_url": str(config.get("wechat_bot_cdn_base_url") or "https://novac2c.cdn.weixin.qq.com/c2c").strip(),
@@ -408,7 +408,7 @@ def load_dingtalk_profiles(config: dict[str, object]) -> list[dict[str, Any]]:
     return [
         {
             "id": "default",
-            "label": "榛樿閽夐拤",
+            "label": "默认钉钉",
             "client_id": client_id,
             "client_secret": client_secret,
             "robot_code": robot_code,
@@ -442,7 +442,7 @@ def load_email_profiles(config: dict[str, object]) -> list[dict[str, Any]]:
     return [
         {
             "id": "default",
-            "label": "榛樿閭",
+            "label": "默认邮箱",
             "smtp_host": str(config.get("email_smtp_host") or "smtp.gmail.com").strip(),
             "smtp_port": str(config.get("email_smtp_port") or "587").strip(),
             "smtp_security": str(config.get("email_smtp_security") or "starttls").strip(),
@@ -544,7 +544,7 @@ def load_push_targets(
         fallback.append(
             {
                 "id": "default_feishu",
-                "label": "榛樿椋炰功缇?",
+                "label": "默认飞书群",
                 "channel": "feishu",
                 "profile_id": str(feishu_profiles[0].get("id") or "default"),
                 "receive_id": receive_id,
@@ -558,7 +558,7 @@ def load_push_targets(
         fallback.append(
             {
                 "id": "default_wechat",
-                "label": "榛樿寰俊",
+                "label": "默认微信",
                 "channel": "wechat",
                 "profile_id": str(wechat_profiles[0].get("id") or "default"),
                 "receive_id": target_user,
@@ -572,7 +572,7 @@ def load_push_targets(
         fallback.append(
             {
                 "id": "default_dingtalk",
-                "label": "榛樿閽夐拤",
+                "label": "默认钉钉",
                 "channel": "dingtalk",
                 "profile_id": str(dingtalk_profiles[0].get("id") or "default"),
                 "receive_id": dingtalk_targets,
@@ -586,7 +586,7 @@ def load_push_targets(
         fallback.append(
             {
                 "id": "default_email",
-                "label": "榛樿閭",
+                "label": "默认邮箱",
                 "channel": "email",
                 "profile_id": str(email_profiles[0].get("id") or "default"),
                 "receive_id": email_to,
@@ -1045,17 +1045,17 @@ def run_watcher_from_config(path: Path, *, data_dir: Path | None = None, ws_no_w
         channel = str(config.get("bot_channel") or "feishu").strip()
         args = build_args(config, data_dir=data_dir, ws=(channel == "feishu"), ws_no_watch=ws_no_watch)
         if nga_feishu_watch.uses_structured_routes(args) and not ws_no_watch:
-            print("姝ｅ湪鍚姩缁撴瀯鍖栧閫氶亾鐩戝惉杩涚▼銆?")
+            print("正在启动结构化多通道监听进程。")
             nga_feishu_watch.start_multi_channel(args)
             return
         if channel == "wechat":
-            print("姝ｅ湪鍚姩寰俊 Bot 闀胯疆璇㈢洃鍚繘绋嬨€?")
+            print("正在启动微信 Bot 长轮询监听进程。")
             nga_feishu_watch.start_wechat_poll(args)
         elif channel == "dingtalk":
-            print("姝ｅ湪鍚姩閽夐拤 Stream 鐩戝惉杩涚▼銆?")
+            print("正在启动钉钉 Stream 监听进程。")
             nga_feishu_watch.start_dingtalk_stream(args)
         elif channel == "email":
-            print("姝ｅ湪鍚姩閭閫氶亾鐩戝惉杩涚▼銆?")
+            print("正在启动邮箱通道监听进程。")
             service_unavailable_failures = 0
             while True:
                 round_error: Exception | None = None
@@ -1069,12 +1069,16 @@ def run_watcher_from_config(path: Path, *, data_dir: Path | None = None, ws_no_w
                         service_unavailable_failures += 1
                     else:
                         service_unavailable_failures = 0
-                    print(f"閭閫氶亾鐩戝惉寰幆澶辫触: {exc}", file=sys.stderr)
+                    print(f"邮箱通道监听循环失败: {exc}", file=sys.stderr)
                 sleep_for = nga_feishu_watch.watch_sleep_seconds(args, round_error, service_unavailable_failures)
                 time.sleep(sleep_for)
         else:
-            print("姝ｅ湪鍚姩椋炰功 WebSocket 鐩戝惉杩涚▼銆?")
+            print("正在启动飞书 WebSocket 监听进程。")
             nga_feishu_watch.start_ws(args)
-    except BaseException:
+    except KeyboardInterrupt:
+        raise
+    except SystemExit:
+        raise
+    except Exception:
         traceback.print_exc()
         raise

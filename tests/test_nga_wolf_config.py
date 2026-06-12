@@ -5,6 +5,9 @@ import json
 import sys
 import types
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 import nga_wolf_config
 
@@ -63,6 +66,26 @@ def test_load_and_save_config_round_trip(tmp_path: Path) -> None:
     assert loaded["nga_cookie"] == "cookie"
     assert loaded["interval"] == "15"
     assert loaded["email_smtp_profiles"] == config["email_smtp_profiles"]
+
+
+def test_source_does_not_contain_known_mojibake_markers() -> None:
+    text = Path(nga_wolf_config.__file__).read_text(encoding="utf-8")
+
+    assert not any(marker in text for marker in ["姝", "閭", "鐩", "鍚", "銆", "榛樿"])
+
+
+def test_run_watcher_from_config_keyboard_interrupt_does_not_print_traceback(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"nga_cookie": "cookie"}, ensure_ascii=False), encoding="utf-8")
+
+    with patch.object(nga_wolf_config.nga_feishu_watch, "uses_structured_routes", return_value=True), patch.object(
+        nga_wolf_config.nga_feishu_watch, "start_multi_channel", side_effect=KeyboardInterrupt
+    ), pytest.raises(KeyboardInterrupt):
+        nga_wolf_config.run_watcher_from_config(config_path, data_dir=tmp_path)
+
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+    assert "Traceback" not in captured.out
 
 
 def test_load_config_accepts_jsonc_comments_and_urls(tmp_path: Path) -> None:

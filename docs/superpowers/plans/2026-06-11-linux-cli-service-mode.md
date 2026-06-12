@@ -111,7 +111,7 @@ def test_validate_config_reuses_desktop_rules() -> None:
     errors = nga_wolf_config.validate_config(config)
 
     assert "NGA Cookie" in errors
-    assert any("邮箱" in item or "閭" in item for item in errors)
+    assert any("邮箱" in item for item in errors)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**

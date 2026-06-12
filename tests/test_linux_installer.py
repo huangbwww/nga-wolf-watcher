@@ -34,6 +34,8 @@ def test_linux_installer_generates_wrapper_and_systemd_service() -> None:
     assert 'SERVICE_NAME="${NGAWOLF_SERVICE_NAME:-ngawolf}"' in script
     assert "ExecStart=${BIN_PATH} run" in script
     assert "Restart=on-failure" in script
+    assert "StandardOutput=append:${LOG_DIR}/watcher.log" in script
+    assert "StandardError=append:${LOG_DIR}/watcher.log" in script
     assert "WantedBy=multi-user.target" in script
 
 
@@ -43,6 +45,15 @@ def test_linux_installer_uses_headless_requirements_when_available() -> None:
     assert "requirements-linux.txt" in script
     assert "python3 -m venv" in script
     assert 'install -r "$req_file"' in script
+
+
+def test_linux_installer_prints_background_management_commands() -> None:
+    script = INSTALLER.read_text(encoding="utf-8")
+
+    assert "sudo ngawolf start" in script
+    assert "sudo ngawolf stop" in script
+    assert "sudo ngawolf status" in script
+    assert "sudo ngawolf logs -f" in script
 
 
 def test_release_workflow_uploads_installer_asset() -> None:

@@ -202,6 +202,8 @@ Restart=on-failure
 RestartSec=10
 WorkingDirectory=${APP_DIR}
 Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:${LOG_DIR}/watcher.log
+StandardError=append:${LOG_DIR}/watcher.log
 
 [Install]
 WantedBy=multi-user.target
@@ -224,6 +226,10 @@ Command:
   sudo ngawolf mark-seen
   sudo ngawolf test-send
   sudo ngawolf run
+  sudo ngawolf start
+  sudo ngawolf stop
+  sudo ngawolf status
+  sudo ngawolf logs -f
   sudo ngawolf config
 
 Paths:

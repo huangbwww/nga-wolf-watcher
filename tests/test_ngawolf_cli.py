@@ -4,6 +4,7 @@ import argparse
 import io
 import json
 import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -499,6 +500,10 @@ def test_main_dispatches_runtime_commands(tmp_path: Path) -> None:
         ("mark-seen", "command_mark_seen"),
         ("test-send", "command_test_send"),
         ("run", "command_run"),
+        ("start", "command_start"),
+        ("stop", "command_stop"),
+        ("restart", "command_restart"),
+        ("status", "command_status"),
     ]
     for command, handler_name in cases:
         with patch.object(ngawolf_cli, "parse_args", return_value=argparse.Namespace(command=command, config=config_path, data_dir=data_dir, log_file=log_file)) as parse_args, patch.object(
@@ -509,6 +514,95 @@ def test_main_dispatches_runtime_commands(tmp_path: Path) -> None:
         parse_args.assert_called_once_with([command])
         resolve_cli_paths.assert_called_once()
         handler.assert_called_once()
+
+
+def test_main_dispatches_logs_command(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    data_dir = tmp_path / "state"
+    log_file = tmp_path / "watcher.log"
+    args = argparse.Namespace(command="logs", config=config_path, data_dir=data_dir, log_file=log_file, follow=True, lines=25)
+
+    with patch.object(ngawolf_cli, "parse_args", return_value=args), patch.object(
+        ngawolf_cli, "resolve_cli_paths", return_value=ngawolf_cli.CliPaths(config_path=config_path, data_dir=data_dir, log_file=log_file)
+    ), patch.object(ngawolf_cli, "command_logs", return_value=0) as command_logs:
+        assert ngawolf_cli.main(["logs", "--follow", "--lines", "25"]) == 0
+
+    command_logs.assert_called_once_with(
+        ngawolf_cli.CliPaths(config_path=config_path, data_dir=data_dir, log_file=log_file),
+        follow=True,
+        lines=25,
+    )
+
+
+def test_command_start_uses_systemd_when_available(tmp_path: Path) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+
+    with patch.object(ngawolf_cli, "_should_use_systemd", return_value=True), patch.object(
+        ngawolf_cli, "_run_systemctl", return_value=0
+    ) as run_systemctl:
+        assert ngawolf_cli.command_start(paths) == 0
+
+    run_systemctl.assert_called_once_with("start")
+
+
+def test_command_start_local_background_writes_pid_and_log_path(tmp_path: Path) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "logs" / "watcher.log",
+    )
+    process = SimpleNamespace(pid=12345)
+
+    with patch.object(ngawolf_cli, "_should_use_systemd", return_value=False), patch.object(
+        ngawolf_cli, "_read_pid", return_value=0
+    ), patch.object(ngawolf_cli.subprocess, "Popen", return_value=process) as popen:
+        assert ngawolf_cli.command_start(paths) == 0
+
+    assert (paths.data_dir / nga_wolf_config.WATCHER_PID_FILE).read_text(encoding="utf-8") == "12345\n"
+    assert paths.log_file.parent.exists()
+    popen.assert_called_once()
+    command = popen.call_args.args[0]
+    assert command[command.index("--log-file") + 1] == str(paths.log_file)
+
+
+def test_command_stop_local_background_removes_pid(tmp_path: Path) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+    paths.data_dir.mkdir(parents=True)
+    (paths.data_dir / nga_wolf_config.WATCHER_PID_FILE).write_text("12345\n", encoding="utf-8")
+
+    with patch.object(ngawolf_cli, "_should_use_systemd", return_value=False), patch.object(
+        ngawolf_cli, "_process_exists", return_value=True
+    ), patch.object(
+        ngawolf_cli, "_terminate_process", return_value=True
+    ) as terminate_process:
+        assert ngawolf_cli.command_stop(paths) == 0
+
+    terminate_process.assert_called_once_with(12345)
+    assert not (paths.data_dir / nga_wolf_config.WATCHER_PID_FILE).exists()
+
+
+def test_command_logs_tails_local_log_file(tmp_path: Path) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+    paths.log_file.write_text("line\n", encoding="utf-8")
+
+    with patch.object(ngawolf_cli.shutil, "which", return_value="/usr/bin/tail"), patch.object(
+        ngawolf_cli.subprocess, "run", return_value=subprocess.CompletedProcess(["tail"], 0)
+    ) as run:
+        assert ngawolf_cli.command_logs(paths, follow=True, lines=25) == 0
+
+    assert run.call_args.args[0] == ["tail", "-n", "25", "-f", str(paths.log_file)]
 
 
 def test_prompt_basic_config_keeps_existing_values_when_user_presses_enter() -> None:
