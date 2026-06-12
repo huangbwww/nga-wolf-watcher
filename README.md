@@ -347,21 +347,21 @@ sudo NGAWOLF_SOURCE_DIR=/path/to/nga-wolf bash tools/install-linux.sh
 If the server cannot reach GitHub reliably, you can use a third-party GitHub mirror. Mirrors are not official project services and may stop working; pin the version to avoid `latest` redirects failing on the mirror:
 
 ```bash
-curl -fsSL https://ghfast.top/https://github.com/huangbwww/nga-wolf-watcher/releases/latest/download/install-linux.sh \
-  | sudo NGAWOLF_VERSION=v1.3.0 NGAWOLF_GITHUB_PROXY=https://ghfast.top bash
+curl -fsSL https://ghfast.top/https://github.com/huangbwww/nga-wolf-watcher/releases/download/vX.Y.Z/install-linux.sh \
+  | sudo NGAWOLF_VERSION=vX.Y.Z NGAWOLF_GITHUB_PROXY=https://ghfast.top bash
 ```
 
 You can also provide the mirrored source archive URL directly:
 
 ```bash
-curl -fsSL https://ghfast.top/https://github.com/huangbwww/nga-wolf-watcher/releases/latest/download/install-linux.sh \
-  | sudo NGAWOLF_ARCHIVE_URL=https://ghfast.top/https://github.com/huangbwww/nga-wolf-watcher/archive/refs/tags/v1.3.0.tar.gz bash
+curl -fsSL https://ghfast.top/https://github.com/huangbwww/nga-wolf-watcher/releases/download/vX.Y.Z/install-linux.sh \
+  | sudo NGAWOLF_VERSION=vX.Y.Z NGAWOLF_ARCHIVE_URL=https://ghfast.top/https://github.com/huangbwww/nga-wolf-watcher/archive/refs/tags/vX.Y.Z.tar.gz bash
 ```
 
 For the most reliable mirrored install, download the source archive once and then install from that local directory:
 
 ```bash
-MIRROR=https://ghfast.top VERSION=v1.3.0 bash -c '
+MIRROR=https://ghfast.top VERSION=vX.Y.Z bash -c '
 set -e
 tmp=$(mktemp -d)
 curl -fL "$MIRROR/https://github.com/huangbwww/nga-wolf-watcher/archive/refs/tags/$VERSION.tar.gz" -o "$tmp/src.tar.gz"

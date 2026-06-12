@@ -349,21 +349,21 @@ sudo NGAWOLF_SOURCE_DIR=/path/to/nga-wolf bash tools/install-linux.sh
 如果服务器直连 GitHub 超时，可以用第三方 GitHub 镜像。镜像不是项目官方服务，可能随时失效；优先固定版本号，避免 `latest` 跳转在镜像站上失败：
 
 ```bash
-curl -fsSL https://ghfast.top/https://github.com/huangbwww/nga-wolf-watcher/releases/latest/download/install-linux.sh \
-  | sudo NGAWOLF_VERSION=v1.3.0 NGAWOLF_GITHUB_PROXY=https://ghfast.top bash
+curl -fsSL https://ghfast.top/https://github.com/huangbwww/nga-wolf-watcher/releases/download/vX.Y.Z/install-linux.sh \
+  | sudo NGAWOLF_VERSION=vX.Y.Z NGAWOLF_GITHUB_PROXY=https://ghfast.top bash
 ```
 
 也可以直接指定源码包镜像地址：
 
 ```bash
-curl -fsSL https://ghfast.top/https://github.com/huangbwww/nga-wolf-watcher/releases/latest/download/install-linux.sh \
-  | sudo NGAWOLF_ARCHIVE_URL=https://ghfast.top/https://github.com/huangbwww/nga-wolf-watcher/archive/refs/tags/v1.3.0.tar.gz bash
+curl -fsSL https://ghfast.top/https://github.com/huangbwww/nga-wolf-watcher/releases/download/vX.Y.Z/install-linux.sh \
+  | sudo NGAWOLF_VERSION=vX.Y.Z NGAWOLF_ARCHIVE_URL=https://ghfast.top/https://github.com/huangbwww/nga-wolf-watcher/archive/refs/tags/vX.Y.Z.tar.gz bash
 ```
 
 如果只想依赖一次镜像下载，可以先下载源码包，再走本地目录安装；这种方式最适合 GitHub 不稳定的服务器：
 
 ```bash
-MIRROR=https://ghfast.top VERSION=v1.3.0 bash -c '
+MIRROR=https://ghfast.top VERSION=vX.Y.Z bash -c '
 set -e
 tmp=$(mktemp -d)
 curl -fL "$MIRROR/https://github.com/huangbwww/nga-wolf-watcher/archive/refs/tags/$VERSION.tar.gz" -o "$tmp/src.tar.gz"
