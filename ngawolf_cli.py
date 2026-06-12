@@ -626,6 +626,27 @@ def _delete_push_target(config: dict[str, object]) -> None:
         config["bot_channel"] = "feishu"
 
 
+def _test_push_target(config: dict[str, object]) -> None:
+    targets = _json_list(config.get("push_targets"))
+    choices = [(str(target.get("id") or ""), _target_title(target)) for target in targets if str(target.get("id") or "")]
+    if not choices:
+        print("暂无可测试的推送通道。", file=sys.stderr)
+        return
+    errors = nga_wolf_config.validate_config(config, require_cookie=False)
+    if errors:
+        print_validation_errors(errors)
+        return
+    target_id = prompt_choice("选择要测试的推送通道", choices, choices[0][0])
+    args = nga_wolf_config.build_args(config)
+    target = nga_feishu_watch.find_push_target(args, target_id)
+    if target is None:
+        print("请选择有效推送通道。", file=sys.stderr)
+        return
+    title = target.label or target.id or target.receive_id or target.channel
+    print(f"正在测试推送通道：{title}")
+    nga_feishu_watch.send_test_message(nga_feishu_watch.args_for_push_target(args, target))
+
+
 def _clear_legacy_target_fields(config: dict[str, object], target: dict[str, object]) -> None:
     channel = str(target.get("channel") or "feishu").strip().lower()
     receive_id = str(target.get("receive_id") or "").strip()
@@ -685,6 +706,7 @@ def _manage_push_targets(config: dict[str, object]) -> None:
                 ("add_email", "添加 Email"),
                 ("add_wechat", "微信扫码绑定"),
                 ("add_dingtalk", "添加 DingTalk"),
+                ("test", f"测试推送通道（已配置 {len(targets)} 个）"),
                 ("delete", f"删除推送通道（已配置 {len(targets)} 个）"),
                 ("done", "完成推送通道管理"),
             ],
@@ -697,6 +719,9 @@ def _manage_push_targets(config: dict[str, object]) -> None:
             continue
         if action == "delete":
             _delete_push_target(config)
+            continue
+        if action == "test":
+            _test_push_target(config)
             continue
         _run_channel_config(config, action.removeprefix("add_"))
 

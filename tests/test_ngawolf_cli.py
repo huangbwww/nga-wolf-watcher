@@ -955,6 +955,36 @@ def test_manage_push_targets_deletes_target_and_cleans_listen_rules() -> None:
     assert config["bot_channel"] == "email"
 
 
+def test_manage_push_targets_tests_selected_target(capsys) -> None:
+    config = _valid_email_config()
+    config["push_targets"] = json.dumps(
+        [
+            {
+                "id": "email_1",
+                "label": "Ops Mail",
+                "channel": "email",
+                "profile_id": "default",
+                "receive_id": "receiver@example.com",
+                "id_type": "email",
+            }
+        ],
+        ensure_ascii=False,
+    )
+
+    with patch.object(ngawolf_cli, "prompt_choice", side_effect=["test", "email_1", "done"]), patch.object(
+        ngawolf_cli.nga_wolf_config, "validate_config", return_value=[]
+    ) as validate_config, patch.object(ngawolf_cli.nga_feishu_watch, "send_test_message", return_value=None) as send_test_message:
+        ngawolf_cli._manage_push_targets(config)
+
+    validate_config.assert_called_once_with(config, require_cookie=False)
+    send_test_message.assert_called_once()
+    scoped_args = send_test_message.call_args.args[0]
+    assert scoped_args.bot_channel == "email"
+    assert scoped_args.email_to == "receiver@example.com"
+    captured = capsys.readouterr()
+    assert "正在测试推送通道：Ops Mail" in captured.out
+
+
 def test_manage_push_targets_delete_last_target_clears_legacy_receive_field() -> None:
     config: dict[str, object] = {
         "bot_channel": "email",
