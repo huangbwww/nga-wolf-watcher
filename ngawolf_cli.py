@@ -263,13 +263,21 @@ def _configure_feishu_channel(config: dict[str, object]) -> None:
             chats = []
         options = _chat_options(chats)
         if options:
+            source_choices = [(f"chat:{option['value']}", f"群组：{option['label']}") for option in options]
+            if len(options) > 1:
+                source_choices.append(("multi", "选择多个群组"))
+            source_choices.append(("manual", "手动填写 receive ID"))
             target_source = prompt_choice(
                 "飞书发送目标",
-                [("known_chats", "从机器人可见群组中选择"), ("manual", "手动填写 receive ID")],
-                "known_chats",
+                source_choices,
+                f"chat:{options[0]['value']}",
             )
-            if target_source == "known_chats":
-                selected_chats = prompt_multi_select("选择飞书群组", options)
+            if target_source.startswith("chat:"):
+                chat_id = target_source.split(":", 1)[1]
+                selected_chats = [option for option in options if option["value"] == chat_id]
+            elif target_source == "multi":
+                selected_chats = prompt_multi_select("选择飞书群组", options, selected_values=[options[0]["value"]])
+            if selected_chats:
                 profile["chats"] = [
                     {
                         "chat_id": chat["value"],

@@ -646,7 +646,7 @@ def test_prompt_choice_uses_questionary_in_interactive_terminal(monkeypatch) -> 
     input_mock.assert_not_called()
 
 
-def test_configure_feishu_channel_asks_before_using_listed_groups() -> None:
+def test_configure_feishu_channel_can_select_a_listed_group_directly() -> None:
     config: dict[str, object] = {}
     chats = [
         {"chat_id": "oc_1", "name": "Alpha"},
@@ -654,23 +654,42 @@ def test_configure_feishu_channel_asks_before_using_listed_groups() -> None:
     ]
 
     with patch.object(ngawolf_cli, "prompt_text", side_effect=["cli_xxx", "secret"]) as prompt_text, patch.object(
-        ngawolf_cli, "prompt_choice", return_value="known_chats"
-    ) as prompt_choice, patch.object(ngawolf_cli, "prompt_multi_select", return_value=[{"value": "oc_2", "label": "Beta"}]) as prompt_multi_select, patch.object(
+        ngawolf_cli, "prompt_choice", return_value="chat:oc_2"
+    ) as prompt_choice, patch.object(ngawolf_cli, "prompt_multi_select") as prompt_multi_select, patch.object(
         ngawolf_cli.nga_feishu_watch, "list_feishu_chats", return_value=chats
     ):
         ngawolf_cli._configure_feishu_channel(config)
 
     prompt_choice.assert_called_once_with(
         "飞书发送目标",
-        [("known_chats", "从机器人可见群组中选择"), ("manual", "手动填写 receive ID")],
-        "known_chats",
+        [("chat:oc_1", "群组：Alpha"), ("chat:oc_2", "群组：Beta"), ("multi", "选择多个群组"), ("manual", "手动填写 receive ID")],
+        "chat:oc_1",
     )
+    prompt_multi_select.assert_not_called()
+    assert prompt_text.call_count == 2
+    assert config["feishu_receive_id"] == "oc_2"
+
+
+def test_configure_feishu_channel_can_select_multiple_listed_groups() -> None:
+    config: dict[str, object] = {}
+    chats = [
+        {"chat_id": "oc_1", "name": "Alpha"},
+        {"chat_id": "oc_2", "name": "Beta"},
+    ]
+
+    with patch.object(ngawolf_cli, "prompt_text", side_effect=["cli_xxx", "secret"]), patch.object(
+        ngawolf_cli, "prompt_choice", return_value="multi"
+    ), patch.object(ngawolf_cli, "prompt_multi_select", return_value=[{"value": "oc_1", "label": "Alpha"}, {"value": "oc_2", "label": "Beta"}]) as prompt_multi_select, patch.object(
+        ngawolf_cli.nga_feishu_watch, "list_feishu_chats", return_value=chats
+    ):
+        ngawolf_cli._configure_feishu_channel(config)
+
     prompt_multi_select.assert_called_once_with(
         "选择飞书群组",
         [{"value": "oc_1", "label": "Alpha"}, {"value": "oc_2", "label": "Beta"}],
+        selected_values=["oc_1"],
     )
-    assert prompt_text.call_count == 2
-    assert config["feishu_receive_id"] == "oc_2"
+    assert config["feishu_receive_id"] == "oc_1"
 
 
 def test_configure_feishu_channel_can_choose_manual_receive_id_after_listing_groups() -> None:
@@ -726,7 +745,7 @@ def test_prompt_basic_config_lists_feishu_chats_and_builds_routes() -> None:
     inputs = [
         "",
         "cli_xxx",
-        "",
+        "multi",
         "a",
         "",
         "",
