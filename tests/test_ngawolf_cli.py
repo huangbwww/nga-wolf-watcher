@@ -529,15 +529,15 @@ def test_prompt_basic_config_prompts_only_email_fields_for_email_channel() -> No
     watch_author_default = str(nga_wolf_config.DEFAULT_CONFIG["watch_author_ids"])
     preset_thread_default = str(nga_wolf_config.DEFAULT_CONFIG["preset_thread_ids"])
     assert prompts == [
-        "Bot channel [email]: ",
-        "Email to [receiver@example.com]: ",
-        "Email username [sender@example.com]: ",
-        "Watch mode [author]: ",
-        f"Watch author IDs [{watch_author_default}]: ",
-        f"Preset thread IDs [{preset_thread_default}]: ",
-        "Interval [30]: ",
-        "Jitter [20]: ",
-        "State path [.nga_seen.json]: ",
+        "推送通道 [email]: ",
+        "收件邮箱 [receiver@example.com]: ",
+        "邮箱账号 [sender@example.com]: ",
+        "监听方式 [author]: ",
+        f"监听用户 ID [{watch_author_default}]: ",
+        f"固定帖子 ID [{preset_thread_default}]: ",
+        "轮询间隔秒数 [30]: ",
+        "随机抖动秒数 [20]: ",
+        "状态文件路径 [.nga_seen.json]: ",
     ]
     assert updated["email_to"] == "receiver@example.com"
     assert updated["email_username"] == "sender@example.com"
@@ -578,14 +578,14 @@ def test_prompt_basic_config_normalizes_bot_channel_and_prompts_wechat_fields() 
 
     assert updated["bot_channel"] == "wechat"
     assert prompts == [
-        "Bot channel [feishu]: ",
-        "WeChat target user ID: ",
-        "Watch mode [author]: ",
-        "Watch author IDs [150058=狼大]: ",
-        "Preset thread IDs [45974302=自立自强，科学技术打头阵]: ",
-        "Interval [30]: ",
-        "Jitter [20]: ",
-        "State path [.nga_seen.json]: ",
+        "推送通道 [feishu]: ",
+        "WeChat 目标用户 ID: ",
+        "监听方式 [author]: ",
+        "监听用户 ID [150058=狼大]: ",
+        "固定帖子 ID [45974302=自立自强，科学技术打头阵]: ",
+        "轮询间隔秒数 [30]: ",
+        "随机抖动秒数 [20]: ",
+        "状态文件路径 [.nga_seen.json]: ",
     ]
     assert getpass_mock.call_args_list[0].args == ("NGA cookie [hidden]: ",)
     assert getpass_mock.call_args_list[1].args == ("WeChat bot token [hidden]: ",)
@@ -646,6 +646,49 @@ def test_prompt_choice_uses_questionary_in_interactive_terminal(monkeypatch) -> 
     input_mock.assert_not_called()
 
 
+def test_configure_feishu_channel_asks_before_using_listed_groups() -> None:
+    config: dict[str, object] = {}
+    chats = [
+        {"chat_id": "oc_1", "name": "Alpha"},
+        {"chat_id": "oc_2", "name": "Beta"},
+    ]
+
+    with patch.object(ngawolf_cli, "prompt_text", side_effect=["cli_xxx", "secret"]) as prompt_text, patch.object(
+        ngawolf_cli, "prompt_choice", return_value="known_chats"
+    ) as prompt_choice, patch.object(ngawolf_cli, "prompt_multi_select", return_value=[{"value": "oc_2", "label": "Beta"}]) as prompt_multi_select, patch.object(
+        ngawolf_cli.nga_feishu_watch, "list_feishu_chats", return_value=chats
+    ):
+        ngawolf_cli._configure_feishu_channel(config)
+
+    prompt_choice.assert_called_once_with(
+        "飞书发送目标",
+        [("known_chats", "从机器人可见群组中选择"), ("manual", "手动填写 receive ID")],
+        "known_chats",
+    )
+    prompt_multi_select.assert_called_once_with(
+        "选择飞书群组",
+        [{"value": "oc_1", "label": "Alpha"}, {"value": "oc_2", "label": "Beta"}],
+    )
+    assert prompt_text.call_count == 2
+    assert config["feishu_receive_id"] == "oc_2"
+
+
+def test_configure_feishu_channel_can_choose_manual_receive_id_after_listing_groups() -> None:
+    config: dict[str, object] = {}
+
+    with patch.object(ngawolf_cli, "prompt_text", side_effect=["cli_xxx", "secret", "oc_manual"]) as prompt_text, patch.object(
+        ngawolf_cli, "prompt_choice", return_value="manual"
+    ) as prompt_choice, patch.object(ngawolf_cli, "prompt_multi_select") as prompt_multi_select, patch.object(
+        ngawolf_cli.nga_feishu_watch, "list_feishu_chats", return_value=[{"chat_id": "oc_1", "name": "Alpha"}]
+    ):
+        ngawolf_cli._configure_feishu_channel(config)
+
+    prompt_choice.assert_called_once()
+    prompt_multi_select.assert_not_called()
+    assert prompt_text.call_args_list[-1].args == ("飞书 receive ID", "")
+    assert config["feishu_receive_id"] == "oc_manual"
+
+
 def test_prompt_multi_select_uses_questionary_checkbox_in_interactive_terminal(monkeypatch) -> None:
     fake = FakeQuestionary(checkbox_answer=["oc_2"])
     monkeypatch.setattr(ngawolf_cli, "questionary", fake)
@@ -683,6 +726,7 @@ def test_prompt_basic_config_lists_feishu_chats_and_builds_routes() -> None:
     inputs = [
         "",
         "cli_xxx",
+        "",
         "a",
         "",
         "",
@@ -717,7 +761,7 @@ def test_prompt_basic_config_lists_feishu_chats_and_builds_routes() -> None:
     assert profiles == [
         {
             "id": "default",
-            "label": "Default Feishu bot",
+            "label": "默认飞书机器人",
             "app_id": "cli_xxx",
             "app_secret": "secret",
             "id_type": "chat_id",

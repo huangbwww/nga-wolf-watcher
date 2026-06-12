@@ -107,7 +107,7 @@ def prompt_choice(label: str, choices: list[tuple[str, str]], current: object = 
         normalized = raw.lower()
         if normalized in values:
             return normalized
-        print(f"Please choose 1-{len(choices)} or one of: {', '.join(value for value, _ in choices)}", file=sys.stderr)
+        print(f"请选择 1-{len(choices)} 或输入其中一个值：{', '.join(value for value, _ in choices)}", file=sys.stderr)
 
 
 def prompt_multi_select(
@@ -145,7 +145,7 @@ def prompt_multi_select(
             title = str(option.get("label") or value)
             print(f"  [{checked}] {index}. {title} ({value})")
 
-        raw = input("Select numbers, 'a' all, 'n' none, Enter confirm: ").strip().lower()
+        raw = input("输入编号切换选择，a 全选，n 清空，回车确认：").strip().lower()
         if raw == "":
             return [option for option in options if str(option.get("value") or "") in selected]
         if raw == "a":
@@ -160,11 +160,11 @@ def prompt_multi_select(
             if not token:
                 continue
             if not token.isdigit():
-                print(f"Ignored invalid selection: {token}", file=sys.stderr)
+                print(f"已忽略无效选择：{token}", file=sys.stderr)
                 continue
             index = int(token)
             if not 1 <= index <= len(options):
-                print(f"Ignored out-of-range selection: {token}", file=sys.stderr)
+                print(f"已忽略超出范围的选择：{token}", file=sys.stderr)
                 continue
             value = str(options[index - 1].get("value") or "")
             if value in selected:
@@ -173,7 +173,7 @@ def prompt_multi_select(
                 selected.add(value)
             changed = True
         if not changed:
-            print("No valid selection changed.", file=sys.stderr)
+            print("没有有效选择发生变化。", file=sys.stderr)
 
 
 def _prompt_fields(config: dict[str, object], fields: list[tuple[str, str, bool]]) -> None:
@@ -238,18 +238,20 @@ def _target_ids_from_config(config: dict[str, object]) -> list[str]:
 
 
 def _configure_feishu_channel(config: dict[str, object]) -> None:
-    config["feishu_app_id"] = prompt_text("Feishu app ID", config.get("feishu_app_id", ""))
-    config["feishu_app_secret"] = prompt_text("Feishu app secret", config.get("feishu_app_secret", ""), secret=True)
+    config["feishu_app_id"] = prompt_text("飞书 App ID", config.get("feishu_app_id", ""))
+    config["feishu_app_secret"] = prompt_text("飞书 App Secret", config.get("feishu_app_secret", ""), secret=True)
 
     app_id = str(config.get("feishu_app_id") or "").strip()
     app_secret = str(config.get("feishu_app_secret") or "").strip()
+    existing_profiles = _json_list(config.get("feishu_bot_profiles"))
+    existing_profile = existing_profiles[0] if existing_profiles else {}
     profile = {
         "id": "default",
-        "label": "Default Feishu bot",
+        "label": str(existing_profile.get("label") or "默认飞书机器人"),
         "app_id": app_id,
         "app_secret": app_secret,
         "id_type": "chat_id",
-        "chats": [],
+        "chats": existing_profile.get("chats") if isinstance(existing_profile.get("chats"), list) else [],
     }
     selected_chats: list[dict[str, str]] = []
     should_list_chats = bool(app_id and app_secret) and not _current_feishu_target_ids(config)
@@ -261,16 +263,22 @@ def _configure_feishu_channel(config: dict[str, object]) -> None:
             chats = []
         options = _chat_options(chats)
         if options:
-            selected_chats = prompt_multi_select("Feishu groups visible to this bot", options)
-            profile["chats"] = [
-                {
-                    "chat_id": chat["value"],
-                    "name": chat["label"],
-                    "chat_type": "",
-                    "description": "",
-                }
-                for chat in selected_chats
-            ]
+            target_source = prompt_choice(
+                "飞书发送目标",
+                [("known_chats", "从机器人可见群组中选择"), ("manual", "手动填写 receive ID")],
+                "known_chats",
+            )
+            if target_source == "known_chats":
+                selected_chats = prompt_multi_select("选择飞书群组", options)
+                profile["chats"] = [
+                    {
+                        "chat_id": chat["value"],
+                        "name": chat["label"],
+                        "chat_type": "",
+                        "description": "",
+                    }
+                    for chat in selected_chats
+                ]
 
     if selected_chats:
         targets = []
@@ -290,7 +298,7 @@ def _configure_feishu_channel(config: dict[str, object]) -> None:
         config["feishu_receive_id"] = selected_chats[0]["value"]
         config["push_targets"] = _json_dumps(targets)
     else:
-        config["feishu_receive_id"] = prompt_text("Feishu receive ID", config.get("feishu_receive_id", ""))
+        config["feishu_receive_id"] = prompt_text("飞书 receive ID", config.get("feishu_receive_id", ""))
 
     config["feishu_id_type"] = "chat_id"
     config["feishu_bot_profiles"] = _json_dumps([profile])
@@ -310,19 +318,19 @@ def _current_wxpusher_delivery_mode(config: dict[str, object]) -> str:
 
 def _configure_wxpusher_channel(config: dict[str, object]) -> None:
     delivery_mode = prompt_choice(
-        "WxPusher delivery mode",
+        "WxPusher 推送方式",
         [
-            ("spt", "SPT simple push"),
+            ("spt", "SPT 极简推送"),
             ("uid", "App Token + UID"),
             ("topic_id", "App Token + Topic ID"),
         ],
         _current_wxpusher_delivery_mode(config),
     )
     config["wxpusher_content_type"] = prompt_choice(
-        "WxPusher content type",
+        "WxPusher 内容格式",
         [
             ("markdown", "Markdown"),
-            ("text", "Plain text"),
+            ("text", "纯文本"),
             ("html", "HTML"),
         ],
         config.get("wxpusher_content_type", "markdown"),
@@ -413,7 +421,7 @@ def prompt_basic_config(config: dict[str, object]) -> dict[str, object]:
     updated = dict(config)
     updated["bot_channel"] = _normalize_bot_channel(
         prompt_choice(
-            "Bot channel",
+            "推送通道",
             [
                 ("feishu", "Feishu"),
                 ("wxpusher", "WxPusher"),
@@ -428,18 +436,18 @@ def prompt_basic_config(config: dict[str, object]) -> dict[str, object]:
     channel = str(updated.get("bot_channel") or "feishu").strip()
     channel_fields = {
         "email": [
-            ("email_to", "Email to", False),
-            ("email_username", "Email username", False),
-            ("email_password", "Email password", True),
+            ("email_to", "收件邮箱", False),
+            ("email_username", "邮箱账号", False),
+            ("email_password", "邮箱密码或授权码", True),
         ],
         "wechat": [
             ("wechat_bot_token", "WeChat bot token", True),
-            ("wechat_bot_target_user_id", "WeChat target user ID", False),
+            ("wechat_bot_target_user_id", "WeChat 目标用户 ID", False),
         ],
         "dingtalk": [
-            ("dingtalk_client_id", "DingTalk client ID", False),
-            ("dingtalk_client_secret", "DingTalk client secret", True),
-            ("dingtalk_target_user_ids", "DingTalk target user IDs", False),
+            ("dingtalk_client_id", "DingTalk Client ID", False),
+            ("dingtalk_client_secret", "DingTalk Client Secret", True),
+            ("dingtalk_target_user_ids", "DingTalk 目标用户 ID", False),
         ],
     }
     if channel == "feishu":
@@ -449,21 +457,21 @@ def prompt_basic_config(config: dict[str, object]) -> dict[str, object]:
     else:
         _prompt_fields(updated, channel_fields.get(channel, []))
     updated["watch_mode"] = prompt_choice(
-        "Watch mode",
+        "监听方式",
         [
-            ("author", "Watch user profile replies"),
-            ("thread_author", "Watch author inside fixed thread"),
-            ("both", "Watch both"),
+            ("author", "监听用户主页回复"),
+            ("thread_author", "监听固定帖子内指定用户"),
+            ("both", "两种都监听"),
         ],
         updated.get("watch_mode", "author"),
     )
-    updated["watch_author_ids"] = prompt_text("Watch author IDs", updated.get("watch_author_ids", ""))
-    updated["preset_thread_ids"] = prompt_text("Preset thread IDs", updated.get("preset_thread_ids", ""))
+    updated["watch_author_ids"] = prompt_text("监听用户 ID", updated.get("watch_author_ids", ""))
+    updated["preset_thread_ids"] = prompt_text("固定帖子 ID", updated.get("preset_thread_ids", ""))
     if str(updated.get("watch_mode") or "author") in {"thread_author", "both"}:
-        updated["thread_author_watches"] = prompt_text("Thread author watches", updated.get("thread_author_watches", ""))
-    updated["interval"] = prompt_text("Interval", updated.get("interval", "30"))
-    updated["jitter"] = prompt_text("Jitter", updated.get("jitter", "20"))
-    updated["state_path"] = prompt_text("State path", updated.get("state_path", ".nga_seen.json"))
+        updated["thread_author_watches"] = prompt_text("帖子内指定用户监听规则", updated.get("thread_author_watches", ""))
+    updated["interval"] = prompt_text("轮询间隔秒数", updated.get("interval", "30"))
+    updated["jitter"] = prompt_text("随机抖动秒数", updated.get("jitter", "20"))
+    updated["state_path"] = prompt_text("状态文件路径", updated.get("state_path", ".nga_seen.json"))
     _sync_listen_rules(updated)
     return updated
 
