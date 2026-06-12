@@ -41,6 +41,10 @@ If you run into bugs or usage problems, please open an [Issue](https://github.co
 
 Feature ideas are also welcome. They can be related to NGA, stock-related workflows, or other adjacent personal tools. I check issues periodically and update when I have time.
 
+## 1.3.0 Linux Release
+
+Starting with `v1.3.0`, releases include a Linux server install path. On a server you can install the `ngawolf` command with one shell command, then use the terminal TUI to configure the NGA Cookie, push channels, NGA users/threads, and listen rules. The installed version creates a systemd service by default, and you can also manage background runtime and logs with `ngawolf start/stop/status/logs`.
+
 ## Use The EXE
 
 This path does not require editing code or running Python commands.
@@ -319,7 +323,7 @@ sudo systemctl restart ngawolf
 For a pinned release or local installer test, set environment variables:
 
 ```bash
-curl -fsSL https://github.com/huangbwww/nga-wolf-watcher/releases/latest/download/install-linux.sh | sudo NGAWOLF_VERSION=v1.2.3 bash
+curl -fsSL https://github.com/huangbwww/nga-wolf-watcher/releases/latest/download/install-linux.sh | sudo NGAWOLF_VERSION=v1.3.0 bash
 sudo NGAWOLF_SOURCE_DIR=/path/to/nga-wolf bash tools/install-linux.sh
 ```
 
