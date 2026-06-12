@@ -9,6 +9,8 @@ RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 CLI_SPEC = ROOT / "NGA-Wolf-Watcher-CLI.spec"
 WINDOWS_ONEDIR_SPEC = ROOT / "NGA-Wolf-Watcher-Web-Onedir.spec"
 WINDOWS_INSTALLER_SPEC = ROOT / "packaging" / "windows" / "nga-wolf-watcher.iss"
+WINDOWS_CHINESE_LANG = ROOT / "packaging" / "windows" / "ChineseSimplified.isl"
+WINDOWS_CHINESE_LANG_LICENSE = ROOT / "packaging" / "windows" / "ChineseSimplified.isl.LICENSE"
 
 
 def test_linux_installer_exposes_one_command_install_contract() -> None:
@@ -114,6 +116,8 @@ def test_release_packaging_specs_exist_and_use_standard_shapes() -> None:
     cli_spec = CLI_SPEC.read_text(encoding="utf-8")
     windows_spec = WINDOWS_ONEDIR_SPEC.read_text(encoding="utf-8")
     installer_spec = WINDOWS_INSTALLER_SPEC.read_text(encoding="utf-8")
+    chinese_lang = WINDOWS_CHINESE_LANG.read_text(encoding="utf-8")
+    chinese_lang_license = WINDOWS_CHINESE_LANG_LICENSE.read_text(encoding="utf-8")
 
     assert "COLLECT(" in cli_spec
     assert "name='ngawolf'" in cli_spec
@@ -124,5 +128,9 @@ def test_release_packaging_specs_exist_and_use_standard_shapes() -> None:
     assert "#define AppVersion" in installer_spec
     assert "DefaultDirName={localappdata}\\Programs\\NGA Wolf Watcher" in installer_spec
     assert "ArchitecturesAllowed=x64compatible" in installer_spec
-    assert "ChineseSimplified.isl" not in installer_spec
+    assert 'Name: "chinesesimplified"; MessagesFile: ".\\ChineseSimplified.isl"' in installer_spec
+    assert "compiler:Languages\\ChineseSimplified.isl" not in installer_spec
     assert "UninstallDisplayIcon={app}\\NGA-Wolf-Watcher.exe" in installer_spec
+    assert "LanguageName=简体中文" in chinese_lang
+    assert "[Messages]" in chinese_lang
+    assert "MIT License" in chinese_lang_license

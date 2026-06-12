@@ -34,6 +34,7 @@ SetupIconFile=..\..\assets\app_icon.ico
 UninstallDisplayIcon={app}\NGA-Wolf-Watcher.exe
 
 [Languages]
+Name: "chinesesimplified"; MessagesFile: ".\ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]

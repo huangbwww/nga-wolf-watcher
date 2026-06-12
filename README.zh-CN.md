@@ -60,7 +60,7 @@ SHA256SUMS
 
 Windows 的 `setup.exe` 和 `portable.zip` 会替代旧的单文件大 exe。Linux 压缩包内是无界面的 `ngawolf` CLI；`install-linux.sh` 会优先安装这些二进制包，必要时才回退到源码安装。
 
-当前 Windows Release 资产还没有做代码签名，所以 Windows SmartScreen 可能提示未知发布者。需要校验文件时，用同一个 Release 里的 `SHA256SUMS`。
+Windows 安装版支持简体中文和英文安装界面。当前 Windows Release 资产还没有做代码签名，所以 Windows SmartScreen 可能提示未知发布者。需要校验文件时，用同一个 Release 里的 `SHA256SUMS`。
 
 ## Windows 安装版或便携版
 

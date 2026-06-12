@@ -60,7 +60,7 @@ SHA256SUMS
 
 The Windows `setup.exe` and `portable.zip` replace the old single large onefile exe. The Linux archives contain the headless `ngawolf` CLI; `install-linux.sh` installs those archives first and falls back to source installation only when needed.
 
-Current Windows release assets are not code-signed, so Windows SmartScreen may show an unknown-publisher warning. Verify downloaded files with `SHA256SUMS` from the same release when needed.
+The Windows setup installer supports Simplified Chinese and English. Current Windows release assets are not code-signed, so Windows SmartScreen may show an unknown-publisher warning. Verify downloaded files with `SHA256SUMS` from the same release when needed.
 
 ## Windows Setup Or Portable
 
