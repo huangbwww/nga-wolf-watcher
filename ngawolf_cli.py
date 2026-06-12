@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import html
 import io
 import json
 import getpass
+import os
 import re
 import shutil
 import sys
@@ -474,15 +476,28 @@ def _int_config(config: dict[str, object], key: str, default: int) -> int:
 def _terminal_qr_blocks_from_matrix(matrix: list[list[bool]]) -> str:
     if not matrix:
         return ""
-    black = "\x1b[40m  "
-    white = "\x1b[47m  "
+    width = max((len(row) for row in matrix), default=0)
+    if width <= 0:
+        return ""
+    black_on_white = "\x1b[30;47m"
     reset = "\x1b[0m"
     lines: list[str] = []
-    for row in matrix:
-        if not row:
-            continue
-        cells = [black if cell else white for cell in row]
-        lines.append("".join(cells) + reset)
+    for y in range(0, len(matrix), 2):
+        top_row = matrix[y]
+        bottom_row = matrix[y + 1] if y + 1 < len(matrix) else []
+        cells: list[str] = []
+        for x in range(width):
+            top = bool(top_row[x]) if x < len(top_row) else False
+            bottom = bool(bottom_row[x]) if x < len(bottom_row) else False
+            if top and bottom:
+                cells.append("█")
+            elif top:
+                cells.append("▀")
+            elif bottom:
+                cells.append("▄")
+            else:
+                cells.append(" ")
+        lines.append(black_on_white + "".join(cells) + reset)
     return "\n".join(lines)
 
 
@@ -557,7 +572,7 @@ def _terminal_qr_text_for_image_bytes(image_bytes: bytes) -> str:
         with Image.open(io.BytesIO(image_bytes)) as image:
             grayscale = image.convert("L")
             columns = shutil.get_terminal_size((100, 24)).columns
-            max_pixels = max(24, min(80, (columns - 4) // 2))
+            max_pixels = max(24, min(72, columns - 8))
             if grayscale.width > max_pixels:
                 height = max(1, round(grayscale.height * max_pixels / grayscale.width))
                 resampling = getattr(getattr(Image, "Resampling", Image), "NEAREST", 0)
@@ -587,6 +602,47 @@ def _terminal_qr_text_for_wechat_url(qr_url: str) -> str:
     return _terminal_qr_text_for_text(qr_url)
 
 
+@contextlib.contextmanager
+def _suppress_process_stdio():
+    saved_stdout_fd = saved_stderr_fd = devnull_fd = None
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        saved_stdout_fd = os.dup(1)
+        saved_stderr_fd = os.dup(2)
+        os.dup2(devnull_fd, 1)
+        os.dup2(devnull_fd, 2)
+    except Exception:
+        for fd in (saved_stdout_fd, saved_stderr_fd, devnull_fd):
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+        yield
+        return
+    try:
+        yield
+    finally:
+        if saved_stdout_fd is not None:
+            with contextlib.suppress(OSError):
+                os.dup2(saved_stdout_fd, 1)
+        if saved_stderr_fd is not None:
+            with contextlib.suppress(OSError):
+                os.dup2(saved_stderr_fd, 2)
+        for fd in (saved_stdout_fd, saved_stderr_fd, devnull_fd):
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+
+
+def _open_wechat_qr_url(qr_url: str) -> bool:
+    try:
+        with _suppress_process_stdio():
+            return bool(webbrowser.open(qr_url))
+    except Exception:
+        return False
+
+
 def _print_wechat_qr(qr_url: str) -> None:
     print(f"微信扫码链接：{qr_url}")
     rendered = _terminal_qr_text_for_wechat_url(qr_url)
@@ -604,10 +660,7 @@ def _configure_wechat_channel(config: dict[str, object]) -> None:
     qr = wechat_bot.begin_qr_login(base_url, route_tag=route_tag, timeout=timeout)
     qr_url = str(qr["qr_url"])
     _print_wechat_qr(qr_url)
-    try:
-        webbrowser.open(qr_url)
-    except Exception:
-        pass
+    _open_wechat_qr_url(qr_url)
     print("请用微信扫码并确认，确认后 CLI 会自动继续。")
     result = wechat_bot.poll_qr_login(
         str(qr["qr_key"]),

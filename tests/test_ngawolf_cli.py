@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -782,8 +783,35 @@ def test_terminal_qr_text_for_wechat_url_renders_image_inside_html(monkeypatch) 
     rendered = ngawolf_cli._terminal_qr_text_for_wechat_url("https://qr.example/page")
 
     assert calls == ["https://qr.example/page", "https://qr.example/assets/qrcode.png"]
-    assert "\x1b[40m" in rendered
-    assert "\x1b[47m" in rendered
+    assert "\x1b[30;47m" in rendered
+
+
+def test_terminal_qr_blocks_pairs_rows_for_compact_output() -> None:
+    matrix = [
+        [False, False, False, False],
+        [False, True, True, False],
+        [False, True, False, False],
+        [False, False, True, False],
+        [False, True, True, False],
+        [False, False, False, False],
+    ]
+
+    rendered = ngawolf_cli._terminal_qr_blocks_from_matrix(matrix)
+
+    assert len(rendered.splitlines()) == 3
+
+
+def test_open_wechat_qr_url_suppresses_system_opener_stderr(monkeypatch, capfd) -> None:
+    def noisy_open(url: str) -> bool:
+        os.write(2, b"gio: Operation not supported\n")
+        return False
+
+    monkeypatch.setattr(ngawolf_cli.webbrowser, "open", noisy_open)
+
+    assert ngawolf_cli._open_wechat_qr_url("https://qr.example/code") is False
+
+    captured = capfd.readouterr()
+    assert "Operation not supported" not in captured.err
 
 
 def test_prompt_multi_select_supports_all_and_confirm() -> None:
