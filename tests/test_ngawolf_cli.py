@@ -375,6 +375,43 @@ def test_command_test_send_sends_each_structured_push_target(tmp_path: Path) -> 
     assert [call.args[0] for call in send_test_message.call_args_list] == scoped_args
 
 
+def test_command_test_send_reports_target_failure_and_continues(tmp_path: Path, capsys) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+    config = _valid_email_config()
+    config["push_targets"] = json.dumps(
+        [
+            {"id": "wechat_1", "label": "WeChat", "channel": "wechat", "receive_id": "wechat-user"},
+            {"id": "email_1", "label": "Ops Mail", "channel": "email", "receive_id": "ops@example.com"},
+        ],
+        ensure_ascii=False,
+    )
+    base_args = argparse.Namespace(push_targets=config["push_targets"])
+    scoped_args = [argparse.Namespace(target_id="wechat_1"), argparse.Namespace(target_id="email_1")]
+    targets = [
+        nga_feishu_watch.PushTarget(id="wechat_1", label="WeChat", channel="wechat", receive_id="wechat-user"),
+        nga_feishu_watch.PushTarget(id="email_1", label="Ops Mail", channel="email", receive_id="ops@example.com"),
+    ]
+    error = RuntimeError("微信用户 wechat-user 尚未建立 context_token。请先让该用户给机器人发一条消息。")
+
+    with patch.object(ngawolf_cli, "load_service_config", return_value=config), patch.object(
+        ngawolf_cli.nga_wolf_config, "validate_config", return_value=[]
+    ), patch.object(ngawolf_cli, "build_service_args", return_value=base_args), patch.object(
+        ngawolf_cli.nga_feishu_watch, "configured_push_targets", return_value=targets
+    ), patch.object(ngawolf_cli.nga_feishu_watch, "args_for_push_target", side_effect=scoped_args), patch.object(
+        ngawolf_cli.nga_feishu_watch, "send_test_message", side_effect=[error, None]
+    ) as send_test_message:
+        assert ngawolf_cli.command_test_send(paths) == 2
+
+    assert send_test_message.call_count == 2
+    captured = capsys.readouterr()
+    assert "请先用目标微信给机器人发一条消息，再回来测试。" in captured.err
+    assert "正在测试推送通道：Ops Mail" in captured.out
+
+
 def test_command_run_once_validates_and_runs_once(tmp_path: Path) -> None:
     paths = ngawolf_cli.CliPaths(
         config_path=tmp_path / "config.json",
@@ -983,6 +1020,38 @@ def test_manage_push_targets_tests_selected_target(capsys) -> None:
     assert scoped_args.email_to == "receiver@example.com"
     captured = capsys.readouterr()
     assert "正在测试推送通道：Ops Mail" in captured.out
+
+
+def test_manage_push_targets_reports_wechat_context_token_error_without_crashing(capsys) -> None:
+    config = dict(nga_wolf_config.DEFAULT_CONFIG)
+    config["wechat_bot_profiles"] = json.dumps(
+        [
+            {
+                "id": "wx",
+                "label": "WeChat",
+                "token": "token",
+                "target_user_id": "wechat-user",
+                "account_id": "default",
+            }
+        ],
+        ensure_ascii=False,
+    )
+    config["push_targets"] = json.dumps(
+        [{"id": "wechat_1", "label": "WeChat", "channel": "wechat", "profile_id": "wx", "receive_id": "wechat-user"}],
+        ensure_ascii=False,
+    )
+    error = RuntimeError("微信用户 wechat-user 尚未建立 context_token。请先让该用户给机器人发一条消息。")
+
+    with patch.object(ngawolf_cli, "prompt_choice", side_effect=["test", "wechat_1", "done"]), patch.object(
+        ngawolf_cli.nga_wolf_config, "validate_config", return_value=[]
+    ), patch.object(ngawolf_cli.nga_feishu_watch, "args_for_push_target", return_value=argparse.Namespace(bot_channel="wechat")), patch.object(
+        ngawolf_cli.nga_feishu_watch, "send_test_message", side_effect=error
+    ):
+        ngawolf_cli._manage_push_targets(config)
+
+    captured = capsys.readouterr()
+    assert "请先用目标微信给机器人发一条消息，再回来测试。" in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_manage_push_targets_delete_last_target_clears_legacy_receive_field() -> None:

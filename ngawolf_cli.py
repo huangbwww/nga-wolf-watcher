@@ -644,7 +644,23 @@ def _test_push_target(config: dict[str, object]) -> None:
         return
     title = target.label or target.id or target.receive_id or target.channel
     print(f"正在测试推送通道：{title}")
-    nga_feishu_watch.send_test_message(nga_feishu_watch.args_for_push_target(args, target))
+    _send_test_message_safely(nga_feishu_watch.args_for_push_target(args, target))
+
+
+def _test_send_error_message(exc: Exception) -> str:
+    message = str(exc).strip()
+    if "尚未建立 context_token" in message:
+        return "微信主动推送还没有建立 context_token。请先用目标微信给机器人发一条消息，再回来测试。"
+    return f"测试发送失败：{message or exc.__class__.__name__}"
+
+
+def _send_test_message_safely(args: argparse.Namespace) -> bool:
+    try:
+        nga_feishu_watch.send_test_message(args)
+    except Exception as exc:
+        print(_test_send_error_message(exc), file=sys.stderr)
+        return False
+    return True
 
 
 def _clear_legacy_target_fields(config: dict[str, object], target: dict[str, object]) -> None:
@@ -1258,13 +1274,14 @@ def command_test_send(paths: CliPaths) -> int:
         if not targets:
             print("未找到可测试的推送通道。", file=sys.stderr)
             return 2
+        has_failure = False
         for target in targets:
             title = target.label or target.id or target.receive_id or target.channel
             print(f"正在测试推送通道：{title}")
-            nga_feishu_watch.send_test_message(nga_feishu_watch.args_for_push_target(args, target))
-        return 0
-    nga_feishu_watch.send_test_message(args)
-    return 0
+            if not _send_test_message_safely(nga_feishu_watch.args_for_push_target(args, target)):
+                has_failure = True
+        return 2 if has_failure else 0
+    return 0 if _send_test_message_safely(args) else 2
 
 
 def command_run(paths: CliPaths, once: bool = False) -> int:
