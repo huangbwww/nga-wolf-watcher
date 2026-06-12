@@ -352,6 +352,33 @@ python ngawolf_cli.py --config /etc/ngawolf/config.json --data-dir /var/lib/ngaw
 
 相对状态路径会解析到 `--data-dir` 下。`init` 用于首次创建配置，`config` 会读取已有配置并逐项提示修改；留空会保留当前值，方便后续改 Cookie、监听规则或推送目标。
 
+#### 配置文件和手动编辑
+
+实际配置文件路径取决于运行方式：
+
+- Linux 一行安装版：`/etc/ngawolf/config.json`；状态目录默认是 `/var/lib/ngawolf`；日志默认是 `/var/log/ngawolf/watcher.log`。
+- 源码/普通 CLI：默认配置文件是 `~/.config/ngawolf/config.json`；状态和日志默认在 `~/.local/state/ngawolf/`。
+- Windows GUI：默认配置文件是 `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`；旧版 `nga_wolf_config.json` 会自动迁移。
+
+配置文件是 JSONC 风格，支持 `//` 和 `/* ... */` 注释。`ngawolf init` / `ngawolf config` 或 Windows GUI 保存时会自动写入中文说明和常用格式样例；再次保存会重新生成内置注释，手写的额外注释不保证保留。手动编辑后建议执行 `sudo ngawolf check`，源码运行则执行 `python ngawolf_cli.py check`。
+
+常用字段规则：
+
+- `nga_cookie`：NGA 登录 Cookie，必填，通常包含 `ngaPassportUid`、`ngaPassportCid` 等字段。
+- `watch_author_ids`：用户主页监听资源，每行一个 `用户ID=备注`，例如 `150058=狼大`。
+- `preset_thread_ids`：帖子资源，每行一个 `帖子ID=备注`，例如 `45974302=自立自强，科学技术打头阵`。
+- `push_targets`：推送目标列表，当前为 JSON 字符串；每个目标需要有 `id`，`channel` 可选 `feishu`、`wechat`、`dingtalk`、`email`、`wxpusher`。
+- `listen_rules`：监听规则列表，当前为 JSON 字符串；`mode=author` 表示监听用户主页，`mode=thread_author` 表示监听指定帖子里的指定用户，`target_ids` 引用 `push_targets` 里的 `id`，可同时推送到多个通道。
+
+结构化字段为了兼容旧配置，当前仍保存为“JSON 字符串”，手写时要保留外层引号并转义内部双引号；不确定时先用 TUI 添加一条，再照着配置文件里的中文注释和样例改：
+
+```json
+{
+  "push_targets": "[{\"id\":\"feishu_main\",\"label\":\"主飞书群\",\"channel\":\"feishu\",\"profile_id\":\"default\",\"receive_id\":\"oc_xxx\",\"id_type\":\"chat_id\"}]",
+  "listen_rules": "[{\"id\":\"thread_author:45974302:150058\",\"label\":\"帖子内狼大\",\"mode\":\"thread_author\",\"tid\":\"45974302\",\"author_id\":\"150058\",\"target_ids\":[\"feishu_main\"]}]"
+}
+```
+
 设置必填环境变量：
 
 ```powershell

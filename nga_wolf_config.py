@@ -119,6 +119,67 @@ DEFAULT_CONFIG = {
     "web_close_behavior": "ask",
 }
 
+CONFIG_HEADER_COMMENTS = [
+    "NGA Wolf 配置文件（支持 JSONC 注释，程序保存时会重新生成这些说明）。",
+    "Linux 一行安装默认路径：/etc/ngawolf/config.json；源码/普通 CLI 默认路径：~/.config/ngawolf/config.json；Windows GUI 默认路径：%LOCALAPPDATA%\\NGA Wolf Watcher\\config.json。",
+    "建议优先使用 ngawolf config / GUI / Web 管理台修改；手动编辑后运行 ngawolf check 检查配置。",
+    "TUI/GUI 保存时会重新生成内置注释；手写的额外注释不保证保留，重要备注建议写到 label 或备注字段里。",
+    "Cookie、Token、Secret、邮箱授权码都属于敏感信息，不要公开或提交到仓库。",
+    "结构化字段 feishu_bot_profiles、wechat_bot_profiles、dingtalk_bot_profiles、email_smtp_profiles、wxpusher_profiles、push_targets、listen_rules 是 JSON 字符串；手动编辑时要保持字符串内部 JSON 合法。",
+]
+
+CONFIG_FIELD_COMMENTS = {
+    "nga_cookie": [
+        "NGA 登录 Cookie，必填。通常包含 ngaPassportUid、ngaPassportCid 等字段。",
+    ],
+    "feishu_bot_profiles": [
+        "飞书机器人配置组，JSON 字符串。格式样例：",
+        '[{"id":"default","label":"默认飞书","app_id":"cli_xxx","app_secret":"xxx","id_type":"chat_id","chats":[{"chat_id":"oc_xxx","name":"群名"}]}]',
+    ],
+    "wechat_bot_profiles": [
+        "微信机器人配置组，JSON 字符串。建议用 TUI/GUI 扫码绑定生成，不建议手填 token。",
+    ],
+    "dingtalk_bot_profiles": [
+        "钉钉机器人配置组，JSON 字符串。通常由 Client ID / Client Secret / Robot Code 组成。",
+    ],
+    "email_smtp_profiles": [
+        "邮箱 SMTP 配置组，JSON 字符串。格式样例：",
+        '[{"id":"default","label":"默认邮箱","smtp_host":"smtp.gmail.com","smtp_port":"587","smtp_security":"starttls","username":"sender@example.com","password":"授权码","from_email":"sender@example.com","from_name":"NGA Wolf Watcher"}]',
+    ],
+    "wxpusher_profiles": [
+        "WxPusher 配置组，JSON 字符串。SPT 极简推送样例：",
+        '[{"id":"default","label":"WxPusher","spts":"SPT_xxx","content_type":"markdown"}]',
+    ],
+    "watch_author_ids": [
+        "用户主页监听资源，每行一个。格式：用户ID=备注，例如：150058=狼大。",
+    ],
+    "preset_thread_ids": [
+        "帖子资源，每行一个。格式：帖子ID=备注，例如：45974302=自立自强，科学技术打头阵。",
+    ],
+    "push_targets": [
+        "push_targets 格式样例（JSON 字符串，监听规则通过 id 引用这些推送目标）：",
+        '[{"id":"feishu_1","label":"飞书群","channel":"feishu","profile_id":"default","receive_id":"oc_xxx","id_type":"chat_id"},{"id":"wxpusher_1","label":"WxPusher","channel":"wxpusher","profile_id":"default","receive_id":"","id_type":"spt"}]',
+        "channel 可选：feishu、wechat、dingtalk、email、wxpusher。receive_id 对应飞书群 chat_id、微信/钉钉用户 ID、邮箱收件人、WxPusher UID/Topic；SPT 模式可留空。",
+    ],
+    "listen_rules": [
+        "listen_rules 格式样例（JSON 字符串，决定监听什么以及推送到哪些通道）：",
+        '[{"id":"author:150058","label":"狼大主页","mode":"author","author_id":"150058","tid":"","target_ids":["feishu_1","wxpusher_1"]},{"id":"thread_author:45974302:150058","label":"帖子内狼大","mode":"thread_author","tid":"45974302","author_id":"150058","target_ids":["feishu_1"]}]',
+        "mode=author 表示监听用户主页；mode=thread_author 表示监听指定帖子里的指定用户；target_ids 必须引用 push_targets 里的 id，可多选。",
+    ],
+    "interval": [
+        "轮询间隔秒数。Linux CLI 默认 30 秒。",
+    ],
+    "jitter": [
+        "随机抖动秒数，用于错开请求。Linux CLI 默认 5 秒。",
+    ],
+    "state_path": [
+        "已读/已处理状态文件。相对路径会解析到 --data-dir 下；Linux 安装版默认数据目录是 /var/lib/ngawolf。",
+    ],
+    "ai_enabled": [
+        "AI 功能开关。需要先安装并登录对应 provider 的 CLI，例如 codex、claude、codewhale。",
+    ],
+}
+
 
 def linux_config_path() -> Path:
     root = os.getenv("XDG_CONFIG_HOME")
@@ -132,13 +193,58 @@ def linux_data_dir() -> Path:
     return base / "ngawolf"
 
 
+def strip_json_comments(text: str) -> str:
+    result: list[str] = []
+    index = 0
+    in_string = False
+    escape = False
+    while index < len(text):
+        char = text[index]
+        next_char = text[index + 1] if index + 1 < len(text) else ""
+        if in_string:
+            result.append(char)
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            result.append(char)
+            index += 1
+            continue
+        if char == "/" and next_char == "/":
+            index += 2
+            while index < len(text) and text[index] not in "\r\n":
+                index += 1
+            continue
+        if char == "/" and next_char == "*":
+            index += 2
+            while index + 1 < len(text) and not (text[index] == "*" and text[index + 1] == "/"):
+                if text[index] in "\r\n":
+                    result.append(text[index])
+                index += 1
+            index += 2 if index + 1 < len(text) else 0
+            continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
+def load_jsonc(text: str) -> Any:
+    return json.loads(strip_json_comments(text))
+
+
 def load_config(path: Path, defaults: dict[str, object] | None = None) -> dict[str, object]:
     base = dict(DEFAULT_CONFIG if defaults is None else defaults)
     if not path.exists():
         return base
     try:
         with path.open("r", encoding="utf-8-sig") as handle:
-            loaded = json.load(handle)
+            loaded = load_jsonc(handle.read())
     except Exception:
         return base
     if isinstance(loaded, dict):
@@ -146,12 +252,11 @@ def load_config(path: Path, defaults: dict[str, object] | None = None) -> dict[s
     return base
 
 
-def write_json(path: Path, value: dict[str, object]) -> None:
+def _write_text_atomic(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8") as handle:
-        json.dump(value, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
+        handle.write(text)
     last_exc: PermissionError | None = None
     for attempt in range(1, 8):
         try:
@@ -164,20 +269,45 @@ def write_json(path: Path, value: dict[str, object]) -> None:
         raise last_exc
 
 
+def write_json(path: Path, value: dict[str, object]) -> None:
+    _write_text_atomic(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+
+
+def commented_config_text(config: dict[str, object]) -> str:
+    raw = json.dumps(config, ensure_ascii=False, indent=2)
+    lines = raw.splitlines()
+    rendered: list[str] = []
+    for line in lines:
+        rendered.append(line)
+        if line == "{":
+            rendered.extend(f"  // {comment}" for comment in CONFIG_HEADER_COMMENTS)
+            continue
+        match = re.match(r'(\s*)"([^"]+)":', line)
+        if not match:
+            continue
+        indent, key = match.groups()
+        comments = CONFIG_FIELD_COMMENTS.get(key)
+        if comments:
+            rendered[-1:-1] = [f"{indent}// {comment}" for comment in comments]
+    return "\n".join(rendered) + "\n"
+
+
 def save_config(config: dict[str, object], path: Path) -> None:
-    write_json(path, config)
+    _write_text_atomic(path, commented_config_text(config))
+
+
+def json_list_value(raw: object) -> list[Any]:
+    if isinstance(raw, list):
+        return raw
+    try:
+        value = load_jsonc(str(raw or "[]"))
+    except Exception:
+        value = []
+    return value if isinstance(value, list) else []
 
 
 def json_list_config(config: dict[str, object], key: str) -> list[dict[str, Any]]:
-    raw = config.get(key)
-    if isinstance(raw, list):
-        items = raw
-    else:
-        try:
-            value = json.loads(str(raw or "[]"))
-        except json.JSONDecodeError:
-            value = []
-        items = value if isinstance(value, list) else []
+    items = json_list_value(config.get(key))
     return [dict(item) for item in items if isinstance(item, dict)]
 
 
@@ -902,7 +1032,10 @@ def validate_config(
 
 def run_watcher_from_config(path: Path, *, data_dir: Path | None = None, ws_no_watch: bool = False) -> None:
     with path.open("r", encoding="utf-8-sig") as handle:
-        config = json.load(handle)
+        loaded = load_jsonc(handle.read())
+    if not isinstance(loaded, dict):
+        raise ValueError(f"配置文件必须是 JSON 对象: {path}")
+    config = dict(loaded)
     log_file = str(config.get("_log_path") or "")
     if log_file:
         log_handle = open(log_file, "a", encoding="utf-8", buffering=1)

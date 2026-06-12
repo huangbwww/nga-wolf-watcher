@@ -1331,7 +1331,11 @@ def test_command_init_creates_config_file_when_missing(tmp_path: Path) -> None:
     with patch.object(ngawolf_cli, "prompt_basic_config", return_value=expected_config):
         assert ngawolf_cli.command_init(paths) == 0
 
-    assert json.loads(config_path.read_text(encoding="utf-8")) == expected_config
+    saved_text = config_path.read_text(encoding="utf-8")
+    assert "// NGA Wolf 配置文件" in saved_text
+    saved_config = nga_wolf_config.load_config(config_path)
+    assert saved_config["bot_channel"] == "email"
+    assert saved_config["nga_cookie"] == "cookie"
 
 
 def test_command_config_updates_existing_config(tmp_path: Path) -> None:
@@ -1351,7 +1355,11 @@ def test_command_config_updates_existing_config(tmp_path: Path) -> None:
     with patch.object(ngawolf_cli, "prompt_basic_config", return_value=updated_config):
         assert ngawolf_cli.command_config(paths) == 0
 
-    assert json.loads(config_path.read_text(encoding="utf-8")) == updated_config
+    saved_text = config_path.read_text(encoding="utf-8")
+    assert "// NGA Wolf 配置文件" in saved_text
+    saved_config = nga_wolf_config.load_config(config_path)
+    assert saved_config["bot_channel"] == "wechat"
+    assert saved_config["wechat_bot_target_user_id"] == "new-user"
 
 
 def test_command_config_rejects_malformed_json_without_overwriting(tmp_path: Path) -> None:

@@ -350,6 +350,33 @@ python ngawolf_cli.py --config /etc/ngawolf/config.json --data-dir /var/lib/ngaw
 
 Relative state paths are resolved under `--data-dir`. Use `init` for the first config, then `config` for guided edits; pressing Enter keeps the current value, which makes Cookie, listen rule, and target updates easier later.
 
+#### Config File And Manual Edits
+
+The actual config path depends on how you run the app:
+
+- One-command Linux install: `/etc/ngawolf/config.json`; runtime state defaults to `/var/lib/ngawolf`; logs default to `/var/log/ngawolf/watcher.log`.
+- Source or regular CLI: config defaults to `~/.config/ngawolf/config.json`; state and logs default to `~/.local/state/ngawolf/`.
+- Windows GUI: config defaults to `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`; the older `nga_wolf_config.json` is migrated automatically.
+
+The config file uses JSONC-style JSON, so `//` and `/* ... */` comments are allowed. `ngawolf init`, `ngawolf config`, and the Windows GUI write Chinese comments plus common format examples into the file; saving again regenerates the built-in comments, so extra hand-written comments are not guaranteed to be preserved. After manual edits, run `sudo ngawolf check`; when running from source, use `python ngawolf_cli.py check`.
+
+Common field rules:
+
+- `nga_cookie`: required NGA login Cookie, usually including `ngaPassportUid` and `ngaPassportCid`.
+- `watch_author_ids`: author resources, one `author_id=label` per line, for example `150058=wolf`.
+- `preset_thread_ids`: thread resources, one `tid=label` per line, for example `45974302=main thread`.
+- `push_targets`: push target list stored as a JSON string; each target needs an `id`, and `channel` can be `feishu`, `wechat`, `dingtalk`, `email`, or `wxpusher`.
+- `listen_rules`: listen rule list stored as a JSON string; `mode=author` watches an author page, `mode=thread_author` watches an author inside a specific thread, and `target_ids` references one or more `push_targets` ids.
+
+For compatibility with older config loading, structured route fields are still saved as JSON strings. When editing by hand, keep the outer quotes and escape inner quotes. If unsure, add one item with the TUI first, then follow the comments and examples written into the config file:
+
+```json
+{
+  "push_targets": "[{\"id\":\"feishu_main\",\"label\":\"main Feishu group\",\"channel\":\"feishu\",\"profile_id\":\"default\",\"receive_id\":\"oc_xxx\",\"id_type\":\"chat_id\"}]",
+  "listen_rules": "[{\"id\":\"thread_author:45974302:150058\",\"label\":\"wolf in thread\",\"mode\":\"thread_author\",\"tid\":\"45974302\",\"author_id\":\"150058\",\"target_ids\":[\"feishu_main\"]}]"
+}
+```
+
 Set required environment variables:
 
 ```powershell

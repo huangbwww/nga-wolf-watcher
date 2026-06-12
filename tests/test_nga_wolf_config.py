@@ -65,6 +65,51 @@ def test_load_and_save_config_round_trip(tmp_path: Path) -> None:
     assert loaded["email_smtp_profiles"] == config["email_smtp_profiles"]
 
 
+def test_load_config_accepts_jsonc_comments_and_urls(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        """
+{
+  // 行注释可以写中文说明
+  "nga_cookie": "cookie",
+  "wechat_bot_base_url": "https://ilinkai.weixin.qq.com",
+  /*
+    块注释也可以保留在配置文件里。
+  */
+  "interval": "45"
+}
+""",
+        encoding="utf-8",
+    )
+
+    loaded = nga_wolf_config.load_config(path)
+
+    assert loaded["nga_cookie"] == "cookie"
+    assert loaded["wechat_bot_base_url"] == "https://ilinkai.weixin.qq.com"
+    assert loaded["interval"] == "45"
+
+
+def test_save_config_writes_chinese_comments_and_examples(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    config = {
+        "nga_cookie": "cookie",
+        "watch_author_ids": "150058=狼大",
+        "push_targets": "[]",
+        "listen_rules": "[]",
+    }
+
+    nga_wolf_config.save_config(config, path)
+
+    text = path.read_text(encoding="utf-8")
+    loaded = nga_wolf_config.load_config(path)
+
+    assert "// NGA Wolf 配置文件" in text
+    assert "push_targets 格式样例" in text
+    assert "listen_rules 格式样例" in text
+    assert loaded["nga_cookie"] == "cookie"
+    assert loaded["watch_author_ids"] == "150058=狼大"
+
+
 def test_build_args_resolves_state_and_ai_work_dir_under_data_dir(tmp_path: Path) -> None:
     config = dict(nga_wolf_config.DEFAULT_CONFIG)
     config.update(

@@ -1128,7 +1128,7 @@ def prompt_basic_config(config: dict[str, object]) -> dict[str, object]:
 def load_existing_config_for_edit(path: Path) -> dict[str, object] | None:
     try:
         with path.open("r", encoding="utf-8-sig") as handle:
-            loaded = json.load(handle)
+            loaded = nga_wolf_config.load_jsonc(handle.read())
     except Exception:
         return None
     if not isinstance(loaded, dict):

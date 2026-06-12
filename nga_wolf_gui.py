@@ -4070,7 +4070,7 @@ def main() -> None:
         return
     if len(sys.argv) == 3 and sys.argv[1] == "--self-test-config":
         with Path(sys.argv[2]).open("r", encoding="utf-8-sig") as f:
-            config = json.load(f)
+            config = nga_wolf_config.load_jsonc(f.read())
         config["_log_path"] = str(log_path())
         runtime_path = watcher_config_path()
         save_runtime_config(config)
