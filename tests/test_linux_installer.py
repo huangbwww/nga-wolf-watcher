@@ -124,4 +124,5 @@ def test_release_packaging_specs_exist_and_use_standard_shapes() -> None:
     assert "#define AppVersion" in installer_spec
     assert "DefaultDirName={localappdata}\\Programs\\NGA Wolf Watcher" in installer_spec
     assert "ArchitecturesAllowed=x64compatible" in installer_spec
+    assert "ChineseSimplified.isl" not in installer_spec
     assert "UninstallDisplayIcon={app}\\NGA-Wolf-Watcher.exe" in installer_spec
