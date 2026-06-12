@@ -226,7 +226,7 @@ def read_json_config(path: Path) -> dict[str, Any]:
         return {}
     try:
         with path.open("r", encoding="utf-8-sig") as f:
-            data = json.load(f)
+            data = legacy.nga_wolf_config.load_jsonc(f.read())
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
@@ -818,7 +818,7 @@ def main() -> None:
         return
     if len(sys.argv) == 3 and sys.argv[1] == "--self-test-config":
         with Path(sys.argv[2]).open("r", encoding="utf-8-sig") as f:
-            config = json.load(f)
+            config = legacy.nga_wolf_config.load_jsonc(f.read())
         errors = legacy.validate_config(config)
         if errors:
             print("\n".join(errors), file=sys.stderr)

@@ -41,6 +41,10 @@ If you run into bugs or usage problems, please open an [Issue](https://github.co
 
 Feature ideas are also welcome. They can be related to NGA, stock-related workflows, or other adjacent personal tools. I check issues periodically and update when I have time.
 
+## 1.3.0 Linux Release
+
+Starting with `v1.3.0`, releases include a Linux server install path. On a server you can install the `ngawolf` command with one shell command, then use the terminal TUI to configure the NGA Cookie, push channels, NGA users/threads, and listen rules. The installed version creates a systemd service by default, and you can also manage background runtime and logs with `ngawolf start/stop/status/logs`.
+
 ## Use The EXE
 
 This path does not require editing code or running Python commands.
@@ -267,13 +271,126 @@ Copy `start_local.example.bat` to `start_local.bat`, fill the empty `NGA_COOKIE`
 
 The BAT installs `lark-oapi` automatically. On the first run, if `.nga_seen.json` does not exist, it runs `--mark-seen` before starting the watcher to avoid pushing old replies.
 
+### One-Command Linux Install
+
+On a Linux server, install the `ngawolf` command without cloning the repository:
+
+```bash
+curl -fsSL https://github.com/huangbwww/nga-wolf-watcher/releases/latest/download/install-linux.sh | sudo bash
+```
+
+The installer puts the app under `/opt/ngawolf`, stores config at `/etc/ngawolf/config.json`, stores runtime state under `/var/lib/ngawolf`, and creates `/usr/local/bin/ngawolf`. First-time setup opens a terminal wizard with arrow-key selection. In Feishu mode, after you enter the App ID / Secret, it lists visible groups so you can move with Up/Down, toggle with Space, then press Enter to confirm. WeChat binding prints both a terminal QR code and the original link. If the terminal TUI dependency is unavailable, the CLI falls back to the older numeric prompts:
+
+```bash
+sudo ngawolf init
+sudo ngawolf check
+sudo ngawolf mark-seen
+sudo ngawolf test-send
+```
+
+Run in foreground:
+
+```bash
+sudo ngawolf run
+```
+
+If the server uses systemd, the installer writes `ngawolf.service`. After config and `mark-seen` look correct, start the service:
+
+```bash
+sudo systemctl enable --now ngawolf
+sudo systemctl status ngawolf
+```
+
+You can also use the CLI wrapper to manage the background watcher and logs:
+
+```bash
+sudo ngawolf start
+sudo ngawolf status
+sudo ngawolf logs -f
+sudo ngawolf restart
+sudo ngawolf stop
+```
+
+The installed log file defaults to `/var/log/ngawolf/watcher.log`. If systemd is unavailable, `ngawolf start` falls back to a local background process and writes its PID to `/var/lib/ngawolf/watcher.pid`.
+
+To edit config later:
+
+```bash
+sudo ngawolf config
+sudo systemctl restart ngawolf
+```
+
+For a pinned release or local installer test, set environment variables:
+
+```bash
+curl -fsSL https://github.com/huangbwww/nga-wolf-watcher/releases/latest/download/install-linux.sh | sudo NGAWOLF_VERSION=v1.3.0 bash
+sudo NGAWOLF_SOURCE_DIR=/path/to/nga-wolf bash tools/install-linux.sh
+```
+
 ### Run From Source
 
 Install dependencies:
 
 ```powershell
 cd D:\nga-wolf
-python -m pip install lark-oapi customtkinter
+python -m pip install lark-oapi customtkinter questionary Pillow qrcode
+```
+
+On a Linux server, use the interactive CLI instead of starting the desktop GUI or web manager. Feishu mode can list visible groups and generate push targets plus listen rules automatically; use Up/Down to move, Space to select groups, and Enter to confirm. WeChat binding tries to print the QR code directly in the terminal and always keeps the copyable original link. WxPusher setup defaults to the SPT simple-push mode, so the wizard only needs the SPT unless you choose the App Token + UID/Topic modes:
+
+```bash
+python ngawolf_cli.py init
+```
+
+To update an existing config later:
+
+```bash
+python ngawolf_cli.py config
+```
+
+Common checks and runtime commands:
+
+```bash
+python ngawolf_cli.py check
+python ngawolf_cli.py mark-seen
+python ngawolf_cli.py test-send
+python ngawolf_cli.py run
+python ngawolf_cli.py run --once
+```
+
+The default config file is `~/.config/ngawolf/config.json`; default runtime state and logs live under `~/.local/state/ngawolf/`. For systemd, Docker, or another process manager, keep the watcher in foreground mode:
+
+```bash
+python ngawolf_cli.py --config /etc/ngawolf/config.json --data-dir /var/lib/ngawolf run
+```
+
+Relative state paths are resolved under `--data-dir`. Use `init` for the first config, then `config` for guided edits; pressing Enter keeps the current value, which makes Cookie, listen rule, and target updates easier later.
+
+#### Config File And Manual Edits
+
+The actual config path depends on how you run the app:
+
+- One-command Linux install: `/etc/ngawolf/config.json`; runtime state defaults to `/var/lib/ngawolf`; logs default to `/var/log/ngawolf/watcher.log`.
+- Source or regular CLI: config defaults to `~/.config/ngawolf/config.json`; state and logs default to `~/.local/state/ngawolf/`.
+- Windows GUI: config defaults to `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`; the older `nga_wolf_config.json` is migrated automatically.
+
+The config file uses JSONC-style JSON, so `//` and `/* ... */` comments are allowed. `ngawolf init`, `ngawolf config`, and the Windows GUI write Chinese comments plus common format examples into the file; saving again regenerates the built-in comments, so extra hand-written comments are not guaranteed to be preserved. After manual edits, run `sudo ngawolf check`; when running from source, use `python ngawolf_cli.py check`.
+
+Common field rules:
+
+- `nga_cookie`: required NGA login Cookie, usually including `ngaPassportUid` and `ngaPassportCid`.
+- `watch_author_ids`: author resources, one `author_id=label` per line, for example `150058=wolf`.
+- `preset_thread_ids`: thread resources, one `tid=label` per line, for example `45974302=main thread`.
+- `push_targets`: push target list stored as a JSON string; each target needs an `id`, and `channel` can be `feishu`, `wechat`, `dingtalk`, `email`, or `wxpusher`.
+- `listen_rules`: listen rule list stored as a JSON string; `mode=author` watches an author page, `mode=thread_author` watches an author inside a specific thread, and `target_ids` references one or more `push_targets` ids.
+
+For compatibility with older config loading, structured route fields are still saved as JSON strings. When editing by hand, keep the outer quotes and escape inner quotes. If unsure, add one item with the TUI first, then follow the comments and examples written into the config file:
+
+```json
+{
+  "push_targets": "[{\"id\":\"feishu_main\",\"label\":\"main Feishu group\",\"channel\":\"feishu\",\"profile_id\":\"default\",\"receive_id\":\"oc_xxx\",\"id_type\":\"chat_id\"}]",
+  "listen_rules": "[{\"id\":\"thread_author:45974302:150058\",\"label\":\"wolf in thread\",\"mode\":\"thread_author\",\"tid\":\"45974302\",\"author_id\":\"150058\",\"target_ids\":[\"feishu_main\"]}]"
+}
 ```
 
 Set required environment variables:

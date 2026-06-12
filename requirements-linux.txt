@@ -1,7 +1,4 @@
 lark-oapi
-customtkinter
-pywebview
-pystray
 Pillow
 qrcode
 pycryptodome
