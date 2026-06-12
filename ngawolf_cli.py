@@ -47,12 +47,50 @@ def _questionary_choice(client, title: str, value: str, *, checked: bool | None 
     return item
 
 
+def _questionary_style(client):
+    style_cls = getattr(client, "Style", None)
+    if style_cls is None:
+        return None
+    try:
+        return style_cls(
+            [
+                ("qmark", "fg:#888888"),
+                ("question", "bold"),
+                ("answer", "fg:#00afff bold"),
+                ("pointer", "fg:#00afff bold"),
+                ("highlighted", "fg:#00afff bold"),
+                ("selected", "fg:#00af00"),
+                ("separator", "fg:#888888"),
+                ("instruction", "fg:#888888"),
+                ("text", ""),
+                ("disabled", "fg:#888888 italic"),
+            ]
+        )
+    except Exception:
+        return None
+
+
+def _questionary_prompt(factory, *args, style=None, **kwargs):
+    if style is not None:
+        kwargs["style"] = style
+    try:
+        return factory(*args, **kwargs)
+    except TypeError:
+        kwargs.pop("style", None)
+        return factory(*args, **kwargs)
+
+
 def prompt_text(label: str, current: object = "", *, secret: bool = False) -> str:
     current_text = "" if current is None else str(current)
     client = _questionary_client()
     if client is not None:
         try:
-            prompt = client.password(label) if secret else client.text(label, default=current_text)
+            style = _questionary_style(client)
+            prompt = (
+                _questionary_prompt(client.password, label, style=style)
+                if secret
+                else _questionary_prompt(client.text, label, default=current_text, style=style)
+            )
             value = prompt.ask()
         except Exception:
             value = None
@@ -83,10 +121,12 @@ def prompt_choice(label: str, choices: list[tuple[str, str]], current: object = 
     default = current_text if current_text in values else choices[0][0]
     client = _questionary_client()
     if client is not None:
-        answer = client.select(
+        answer = _questionary_prompt(
+            client.select,
             label,
             choices=[_questionary_choice(client, title, value) for value, title in choices],
             default=default,
+            style=_questionary_style(client),
         ).ask()
         if answer is None:
             return default
@@ -120,7 +160,8 @@ def prompt_multi_select(
     selected = {value for value in selected if value in value_to_option}
     client = _questionary_client()
     if client is not None:
-        answers = client.checkbox(
+        answers = _questionary_prompt(
+            client.checkbox,
             label,
             choices=[
                 _questionary_choice(
@@ -131,6 +172,7 @@ def prompt_multi_select(
                 )
                 for option in options
             ],
+            style=_questionary_style(client),
         ).ask()
         if answers is None:
             answers = selected
@@ -391,6 +433,72 @@ def _configure_wxpusher_channel(config: dict[str, object]) -> None:
     )
 
 
+def _split_config_entries(value: object) -> list[str]:
+    if not value:
+        return []
+    return [line.strip() for line in str(value).splitlines() if line.strip()]
+
+
+def _entry_with_label(value: str, label: str) -> str:
+    value = value.strip()
+    label = label.strip()
+    return f"{value}={label}" if label else value
+
+
+def _clear_default_entries(entries: list[str], key: str) -> None:
+    default_entries = _split_config_entries(nga_wolf_config.DEFAULT_CONFIG.get(key, ""))
+    if entries == default_entries:
+        entries.clear()
+
+
+def _configure_watch_settings(config: dict[str, object]) -> None:
+    author_entries = _split_config_entries(config.get("watch_author_ids"))
+    thread_entries = _split_config_entries(config.get("preset_thread_ids"))
+    thread_author_entries = _split_config_entries(config.get("thread_author_watches"))
+
+    while True:
+        default_action = "done" if (author_entries or thread_entries or thread_author_entries) else "author"
+        action = prompt_choice(
+            "监听配置",
+            [
+                ("author", "添加监听用户 ID"),
+                ("thread", "添加固定帖子 ID"),
+                ("thread_author", "添加帖子内指定用户监听"),
+                ("done", "完成监听配置"),
+            ],
+            default_action,
+        )
+        if action == "done":
+            break
+        if action == "author":
+            _clear_default_entries(author_entries, "watch_author_ids")
+            author_id = prompt_text("监听用户 ID", "")
+            if author_id:
+                author_entries.append(_entry_with_label(author_id, prompt_text("备注名称（可空）", "")))
+        elif action == "thread":
+            _clear_default_entries(thread_entries, "preset_thread_ids")
+            tid = prompt_text("固定帖子 ID", "")
+            if tid:
+                thread_entries.append(_entry_with_label(tid, prompt_text("备注名称（可空）", "")))
+        elif action == "thread_author":
+            tid = prompt_text("帖子 ID", "")
+            author_id = prompt_text("用户 ID", "")
+            if tid and author_id:
+                thread_author_entries.append(_entry_with_label(f"{tid}:{author_id}", prompt_text("备注名称（可空）", "")))
+
+    config["watch_author_ids"] = "\n".join(author_entries)
+    config["preset_thread_ids"] = "\n".join(thread_entries)
+    config["thread_author_watches"] = "\n".join(thread_author_entries)
+    has_author = bool(author_entries)
+    has_thread_author = bool(thread_author_entries)
+    if has_author and has_thread_author:
+        config["watch_mode"] = "both"
+    elif has_thread_author:
+        config["watch_mode"] = "thread_author"
+    else:
+        config["watch_mode"] = "author"
+
+
 def _sync_listen_rules(config: dict[str, object]) -> None:
     target_ids = _target_ids_from_config(config)
     if not target_ids:
@@ -464,22 +572,12 @@ def prompt_basic_config(config: dict[str, object]) -> dict[str, object]:
         _configure_wxpusher_channel(updated)
     else:
         _prompt_fields(updated, channel_fields.get(channel, []))
-    updated["watch_mode"] = prompt_choice(
-        "监听方式",
-        [
-            ("author", "监听用户主页回复"),
-            ("thread_author", "监听固定帖子内指定用户"),
-            ("both", "两种都监听"),
-        ],
-        updated.get("watch_mode", "author"),
-    )
-    updated["watch_author_ids"] = prompt_text("监听用户 ID", updated.get("watch_author_ids", ""))
-    updated["preset_thread_ids"] = prompt_text("固定帖子 ID", updated.get("preset_thread_ids", ""))
-    if str(updated.get("watch_mode") or "author") in {"thread_author", "both"}:
-        updated["thread_author_watches"] = prompt_text("帖子内指定用户监听规则", updated.get("thread_author_watches", ""))
-    updated["interval"] = prompt_text("轮询间隔秒数", updated.get("interval", "30"))
-    updated["jitter"] = prompt_text("随机抖动秒数", updated.get("jitter", "20"))
-    updated["state_path"] = prompt_text("状态文件路径", updated.get("state_path", ".nga_seen.json"))
+    _configure_watch_settings(updated)
+    updated["interval"] = str(updated.get("interval") or "30").strip() or "30"
+    current_jitter = str(updated.get("jitter") or "").strip()
+    default_jitter = str(nga_wolf_config.DEFAULT_CONFIG.get("jitter") or "20").strip()
+    updated["jitter"] = current_jitter if current_jitter and current_jitter != default_jitter else "5"
+    updated["state_path"] = str(updated.get("state_path") or ".nga_seen.json").strip() or ".nga_seen.json"
     _sync_listen_rules(updated)
     return updated
 

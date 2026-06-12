@@ -481,13 +481,17 @@ def test_prompt_basic_config_updates_values_when_user_enters_replacements() -> N
     inputs = [
         "wechat",
         "new-user-id",
+        "author",
+        "10",
+        "alpha",
+        "thread",
+        "20",
+        "beta",
         "thread_author",
-        "10=alpha",
-        "20=beta",
-        "20:10=alpha in thread",
-        "45",
-        "9",
-        "runtime/state.json",
+        "20",
+        "10",
+        "alpha in thread",
+        "done",
     ]
 
     with patch("builtins.input", side_effect=inputs), patch("getpass.getpass", side_effect=["new-cookie", "new-token"]):
@@ -497,13 +501,13 @@ def test_prompt_basic_config_updates_values_when_user_enters_replacements() -> N
     assert updated["nga_cookie"] == "new-cookie"
     assert updated["wechat_bot_token"] == "new-token"
     assert updated["wechat_bot_target_user_id"] == "new-user-id"
-    assert updated["watch_mode"] == "thread_author"
+    assert updated["watch_mode"] == "both"
     assert updated["watch_author_ids"] == "10=alpha"
     assert updated["preset_thread_ids"] == "20=beta"
     assert updated["thread_author_watches"] == "20:10=alpha in thread"
-    assert updated["interval"] == "45"
-    assert updated["jitter"] == "9"
-    assert updated["state_path"] == "runtime/state.json"
+    assert updated["interval"] == "30"
+    assert updated["jitter"] == "5"
+    assert updated["state_path"] == ".nga_seen.json"
 
 
 def test_prompt_basic_config_prompts_only_email_fields_for_email_channel() -> None:
@@ -526,23 +530,42 @@ def test_prompt_basic_config_prompts_only_email_fields_for_email_channel() -> No
     with patch("builtins.input", side_effect=record_prompt), patch("getpass.getpass", side_effect=["cookie", "secret"]) as getpass_mock:
         updated = ngawolf_cli.prompt_basic_config(config)
 
-    watch_author_default = str(nga_wolf_config.DEFAULT_CONFIG["watch_author_ids"])
-    preset_thread_default = str(nga_wolf_config.DEFAULT_CONFIG["preset_thread_ids"])
     assert prompts == [
         "推送通道 [email]: ",
         "收件邮箱 [receiver@example.com]: ",
         "邮箱账号 [sender@example.com]: ",
-        "监听方式 [author]: ",
-        f"监听用户 ID [{watch_author_default}]: ",
-        f"固定帖子 ID [{preset_thread_default}]: ",
-        "轮询间隔秒数 [30]: ",
-        "随机抖动秒数 [20]: ",
-        "状态文件路径 [.nga_seen.json]: ",
+        "监听配置 [done]: ",
     ]
     assert updated["email_to"] == "receiver@example.com"
     assert updated["email_username"] == "sender@example.com"
     assert updated["email_password"] == "secret"
     assert getpass_mock.call_count == 2
+
+
+def test_prompt_basic_config_uses_runtime_defaults_without_prompting_runtime_fields() -> None:
+    config = dict(nga_wolf_config.DEFAULT_CONFIG)
+    config.update(
+        {
+            "bot_channel": "email",
+            "nga_cookie": "cookie",
+            "email_to": "receiver@example.com",
+            "email_username": "sender@example.com",
+            "email_password": "secret",
+        }
+    )
+    prompts: list[str] = []
+
+    def record_prompt(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return "done" if prompt.startswith("监听配置") else ""
+
+    with patch("builtins.input", side_effect=record_prompt), patch("getpass.getpass", side_effect=["", ""]):
+        updated = ngawolf_cli.prompt_basic_config(config)
+
+    assert not any("轮询间隔" in prompt or "随机抖动" in prompt or "状态文件路径" in prompt for prompt in prompts)
+    assert updated["interval"] == "30"
+    assert updated["jitter"] == "5"
+    assert updated["state_path"] == ".nga_seen.json"
 
 
 def test_prompt_text_uses_getpass_for_secret_input_and_trims_value() -> None:
@@ -580,12 +603,7 @@ def test_prompt_basic_config_normalizes_bot_channel_and_prompts_wechat_fields() 
     assert prompts == [
         "推送通道 [feishu]: ",
         "WeChat 目标用户 ID: ",
-        "监听方式 [author]: ",
-        "监听用户 ID [150058=狼大]: ",
-        "固定帖子 ID [45974302=自立自强，科学技术打头阵]: ",
-        "轮询间隔秒数 [30]: ",
-        "随机抖动秒数 [20]: ",
-        "状态文件路径 [.nga_seen.json]: ",
+        "监听配置 [done]: ",
     ]
     assert getpass_mock.call_args_list[0].args == ("NGA cookie [hidden]: ",)
     assert getpass_mock.call_args_list[1].args == ("WeChat bot token [hidden]: ",)
@@ -617,13 +635,18 @@ class FakeQuestionary:
         self.checkbox_answer = checkbox_answer
         self.select_calls = []
         self.checkbox_calls = []
+        self.styles = []
 
-    def select(self, message, choices, default=None):
-        self.select_calls.append({"message": message, "choices": choices, "default": default})
+    def Style(self, rules):
+        self.styles.append(rules)
+        return {"rules": rules}
+
+    def select(self, message, choices, default=None, **kwargs):
+        self.select_calls.append({"message": message, "choices": choices, "default": default, **kwargs})
         return FakeQuestionaryPrompt(self.select_answer)
 
-    def checkbox(self, message, choices):
-        self.checkbox_calls.append({"message": message, "choices": choices})
+    def checkbox(self, message, choices, **kwargs):
+        self.checkbox_calls.append({"message": message, "choices": choices, **kwargs})
         return FakeQuestionaryPrompt(self.checkbox_answer)
 
 
@@ -641,8 +664,10 @@ def test_prompt_choice_uses_questionary_in_interactive_terminal(monkeypatch) -> 
             "message": "Bot channel",
             "choices": [{"name": "Feishu", "value": "feishu"}, {"name": "Email", "value": "email"}],
             "default": "feishu",
+            "style": {"rules": fake.styles[0]},
         }
     ]
+    assert ("highlighted", "fg:#00afff bold") in fake.styles[0]
     input_mock.assert_not_called()
 
 
@@ -708,6 +733,22 @@ def test_configure_feishu_channel_can_choose_manual_receive_id_after_listing_gro
     assert config["feishu_receive_id"] == "oc_manual"
 
 
+def test_configure_watch_settings_adds_entries_and_derives_watch_mode() -> None:
+    config: dict[str, object] = {}
+
+    with patch.object(ngawolf_cli, "prompt_choice", side_effect=["author", "thread", "thread_author", "done"]), patch.object(
+        ngawolf_cli,
+        "prompt_text",
+        side_effect=["123", "Alice", "456", "Thread", "456", "123", "Alice in thread"],
+    ):
+        ngawolf_cli._configure_watch_settings(config)
+
+    assert config["watch_author_ids"] == "123=Alice"
+    assert config["preset_thread_ids"] == "456=Thread"
+    assert config["thread_author_watches"] == "456:123=Alice in thread"
+    assert config["watch_mode"] == "both"
+
+
 def test_prompt_multi_select_uses_questionary_checkbox_in_interactive_terminal(monkeypatch) -> None:
     fake = FakeQuestionary(checkbox_answer=["oc_2"])
     monkeypatch.setattr(ngawolf_cli, "questionary", fake)
@@ -728,8 +769,10 @@ def test_prompt_multi_select_uses_questionary_checkbox_in_interactive_terminal(m
                 {"name": "Alpha", "value": "oc_1", "checked": True},
                 {"name": "Beta", "value": "oc_2", "checked": False},
             ],
+            "style": {"rules": fake.styles[0]},
         }
     ]
+    assert ("highlighted", "fg:#00afff bold") in fake.styles[0]
     input_mock.assert_not_called()
 
 
@@ -816,7 +859,7 @@ def test_prompt_basic_config_lists_feishu_chats_and_builds_routes() -> None:
     assert rules == [
         {
             "id": "author:150058",
-            "label": "wolf",
+            "label": "狼大",
             "mode": "author",
             "author_id": "150058",
             "tid": "",
@@ -877,7 +920,7 @@ def test_prompt_basic_config_builds_wxpusher_spt_profile_and_routes(monkeypatch)
     assert json.loads(str(updated["listen_rules"])) == [
         {
             "id": "author:150058",
-            "label": "wolf",
+            "label": "狼大",
             "mode": "author",
             "author_id": "150058",
             "tid": "",
