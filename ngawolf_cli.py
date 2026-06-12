@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import html
+import io
 import json
 import getpass
 import re
+import shutil
 import sys
+import urllib.parse
+import urllib.request
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
@@ -465,13 +471,139 @@ def _int_config(config: dict[str, object], key: str, default: int) -> int:
         return default
 
 
+def _terminal_qr_blocks_from_matrix(matrix: list[list[bool]]) -> str:
+    if not matrix:
+        return ""
+    black = "\x1b[40m  "
+    white = "\x1b[47m  "
+    reset = "\x1b[0m"
+    lines: list[str] = []
+    for row in matrix:
+        if not row:
+            continue
+        cells = [black if cell else white for cell in row]
+        lines.append("".join(cells) + reset)
+    return "\n".join(lines)
+
+
+def _terminal_qr_text_for_text(value: str) -> str:
+    try:
+        import qrcode
+    except Exception:
+        return ""
+    try:
+        qr = qrcode.QRCode(border=2)
+        qr.add_data(value)
+        qr.make(fit=True)
+        matrix = [[bool(cell) for cell in row] for row in qr.get_matrix()]
+    except Exception:
+        return ""
+    return _terminal_qr_blocks_from_matrix(matrix)
+
+
+def _looks_like_image(data: bytes) -> bool:
+    return data.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"RIFF"))
+
+
+def _data_uri_bytes(uri: str) -> bytes:
+    header, _, payload = uri.partition(",")
+    if not payload:
+        return b""
+    if ";base64" in header.lower():
+        return base64.b64decode(payload)
+    return urllib.parse.unquote_to_bytes(payload)
+
+
+def _download_bytes(url: str, timeout: int = 10) -> tuple[bytes, str]:
+    req = urllib.request.Request(url, headers={"User-Agent": "NGA Wolf Watcher CLI"}, method="GET")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read(4 * 1024 * 1024 + 1), str(resp.headers.get("content-type") or "")
+
+
+def _first_image_src_from_html(page: str) -> str:
+    matches = re.findall(r"<img\b[^>]*\bsrc\s*=\s*['\"]([^'\"]+)['\"]", page, flags=re.IGNORECASE)
+    if not matches:
+        return ""
+    return html.unescape(next((src for src in matches if "qr" in src.lower() or "qrcode" in src.lower()), matches[0]))
+
+
+def _image_bytes_from_url_or_page(url: str, *, depth: int = 0) -> bytes:
+    value = str(url or "").strip()
+    if not value:
+        return b""
+    if value.lower().startswith("data:image/"):
+        return _data_uri_bytes(value)
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme not in {"http", "https"}:
+        return b""
+    data, content_type = _download_bytes(value)
+    if _looks_like_image(data) or content_type.lower().startswith("image/"):
+        return data
+    if depth >= 1:
+        return b""
+    page = data.decode("utf-8", errors="replace")
+    image_src = _first_image_src_from_html(page)
+    if not image_src:
+        return b""
+    return _image_bytes_from_url_or_page(urllib.parse.urljoin(value, image_src), depth=depth + 1)
+
+
+def _terminal_qr_text_for_image_bytes(image_bytes: bytes) -> str:
+    try:
+        from PIL import Image
+    except Exception:
+        return ""
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            grayscale = image.convert("L")
+            columns = shutil.get_terminal_size((100, 24)).columns
+            max_pixels = max(24, min(80, (columns - 4) // 2))
+            if grayscale.width > max_pixels:
+                height = max(1, round(grayscale.height * max_pixels / grayscale.width))
+                resampling = getattr(getattr(Image, "Resampling", Image), "NEAREST", 0)
+                grayscale = grayscale.resize((max_pixels, height), resampling)
+            border = 2
+            matrix: list[list[bool]] = [[False] * (grayscale.width + border * 2) for _ in range(border)]
+            for y in range(grayscale.height):
+                row = [False] * border
+                row.extend(grayscale.getpixel((x, y)) < 160 for x in range(grayscale.width))
+                row.extend([False] * border)
+                matrix.append(row)
+            matrix.extend([[False] * (grayscale.width + border * 2) for _ in range(border)])
+    except Exception:
+        return ""
+    return _terminal_qr_blocks_from_matrix(matrix)
+
+
+def _terminal_qr_text_for_wechat_url(qr_url: str) -> str:
+    try:
+        image_bytes = _image_bytes_from_url_or_page(qr_url)
+        if image_bytes:
+            rendered = _terminal_qr_text_for_image_bytes(image_bytes)
+            if rendered:
+                return rendered
+    except Exception:
+        pass
+    return _terminal_qr_text_for_text(qr_url)
+
+
+def _print_wechat_qr(qr_url: str) -> None:
+    print(f"微信扫码链接：{qr_url}")
+    rendered = _terminal_qr_text_for_wechat_url(qr_url)
+    if rendered:
+        print("微信扫码二维码：")
+        print(rendered)
+    else:
+        print("未能在终端渲染二维码，请复制上面的链接到浏览器打开。")
+
+
 def _configure_wechat_channel(config: dict[str, object]) -> None:
     base_url = str(config.get("wechat_bot_base_url") or wechat_bot.DEFAULT_WECHAT_BASE_URL).strip()
     route_tag = str(config.get("wechat_bot_route_tag") or "").strip()
     timeout = max(_int_config(config, "timeout", 20), 40)
     qr = wechat_bot.begin_qr_login(base_url, route_tag=route_tag, timeout=timeout)
     qr_url = str(qr["qr_url"])
-    print(f"微信扫码链接：{qr_url}")
+    _print_wechat_qr(qr_url)
     try:
         webbrowser.open(qr_url)
     except Exception:

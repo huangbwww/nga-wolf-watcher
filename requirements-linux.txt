@@ -1,4 +1,6 @@
 lark-oapi
+Pillow
+qrcode
 pycryptodome
 dingtalk-stream
 questionary

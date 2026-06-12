@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -690,6 +691,8 @@ def test_run_channel_config_wechat_uses_qr_binding_instead_of_token_prompts(monk
     )
     monkeypatch.setattr(ngawolf_cli, "wechat_bot", fake_wechat, raising=False)
     monkeypatch.setattr(ngawolf_cli, "webbrowser", SimpleNamespace(open=Mock(return_value=True)), raising=False)
+    render_qr = Mock(return_value="QR BLOCKS")
+    monkeypatch.setattr(ngawolf_cli, "_terminal_qr_text_for_wechat_url", render_qr, raising=False)
 
     with patch.object(ngawolf_cli, "prompt_text") as prompt_text:
         ngawolf_cli._run_channel_config(config, "wechat")
@@ -697,7 +700,10 @@ def test_run_channel_config_wechat_uses_qr_binding_instead_of_token_prompts(monk
     prompt_text.assert_not_called()
     fake_wechat.begin_qr_login.assert_called_once_with("https://ilinkai.weixin.qq.com", route_tag="", timeout=40)
     fake_wechat.poll_qr_login.assert_called_once_with("qr-key", "https://ilinkai.weixin.qq.com", route_tag="", timeout_seconds=60)
+    render_qr.assert_called_once_with("https://qr.example/code")
     captured = capsys.readouterr()
+    assert "微信扫码二维码：" in captured.out
+    assert "QR BLOCKS" in captured.out
     assert "微信扫码链接：https://qr.example/code" in captured.out
     assert config["bot_channel"] == "wechat"
     assert config["wechat_bot_token"] == "bot-token"
@@ -737,6 +743,47 @@ def test_run_channel_config_wechat_uses_qr_binding_instead_of_token_prompts(monk
             "default_tid": "45974302",
         }
     ]
+
+
+def test_print_wechat_qr_keeps_link_when_terminal_render_fails(monkeypatch, capsys) -> None:
+    render_qr = Mock(return_value="")
+    monkeypatch.setattr(ngawolf_cli, "_terminal_qr_text_for_wechat_url", render_qr, raising=False)
+
+    ngawolf_cli._print_wechat_qr("https://qr.example/code")
+
+    captured = capsys.readouterr()
+    render_qr.assert_called_once_with("https://qr.example/code")
+    assert "微信扫码链接：https://qr.example/code" in captured.out
+    assert "未能在终端渲染二维码" in captured.out
+
+
+def test_terminal_qr_text_for_wechat_url_renders_image_inside_html(monkeypatch) -> None:
+    from PIL import Image
+
+    image = Image.new("L", (6, 6), 255)
+    for x in range(1, 5):
+        for y in range(1, 5):
+            image.putpixel((x, y), 0)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    png_bytes = buffer.getvalue()
+    calls: list[str] = []
+
+    def fake_download(url: str, timeout: int = 10) -> tuple[bytes, str]:
+        calls.append(url)
+        if url == "https://qr.example/page":
+            return b'<html><body><img alt="wechat qrcode" src="/assets/qrcode.png"></body></html>', "text/html"
+        if url == "https://qr.example/assets/qrcode.png":
+            return png_bytes, "image/png"
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(ngawolf_cli, "_download_bytes", fake_download)
+
+    rendered = ngawolf_cli._terminal_qr_text_for_wechat_url("https://qr.example/page")
+
+    assert calls == ["https://qr.example/page", "https://qr.example/assets/qrcode.png"]
+    assert "\x1b[40m" in rendered
+    assert "\x1b[47m" in rendered
 
 
 def test_prompt_multi_select_supports_all_and_confirm() -> None:

@@ -3,6 +3,7 @@ customtkinter
 pywebview
 pystray
 Pillow
+qrcode
 pycryptodome
 dingtalk-stream
 questionary

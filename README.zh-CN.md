@@ -277,7 +277,7 @@ Linux 服务器可以直接安装为 `ngawolf` 命令，不需要克隆源码：
 curl -fsSL https://github.com/huangbwww/nga-wolf-watcher/releases/latest/download/install-linux.sh | sudo bash
 ```
 
-安装脚本会把程序放到 `/opt/ngawolf`，把配置放到 `/etc/ngawolf/config.json`，把运行状态放到 `/var/lib/ngawolf`，并生成 `/usr/local/bin/ngawolf`。首次配置会进入终端 TUI 向导；飞书模式下输入 App ID / Secret 后会自动查询机器人可见群组，可以用上下键移动、空格勾选、回车确认。如果终端 TUI 依赖不可用，CLI 会自动退回旧的数字提示：
+安装脚本会把程序放到 `/opt/ngawolf`，把配置放到 `/etc/ngawolf/config.json`，把运行状态放到 `/var/lib/ngawolf`，并生成 `/usr/local/bin/ngawolf`。首次配置会进入终端 TUI 向导；飞书模式下输入 App ID / Secret 后会自动查询机器人可见群组，可以用上下键移动、空格勾选、回车确认；微信扫码绑定会同时打印终端二维码和原始链接。如果终端 TUI 依赖不可用，CLI 会自动退回旧的数字提示：
 
 ```bash
 sudo ngawolf init
@@ -319,10 +319,10 @@ sudo NGAWOLF_SOURCE_DIR=/path/to/nga-wolf bash tools/install-linux.sh
 
 ```powershell
 cd D:\nga-wolf
-python -m pip install lark-oapi customtkinter questionary
+python -m pip install lark-oapi customtkinter questionary Pillow qrcode
 ```
 
-Linux 服务器推荐使用交互式 CLI 配置，不需要启动桌面 GUI 或 Web 管理台。飞书模式会自动查询可见群组并生成发送目标和监听规则；可以用上下键移动、空格勾选群组、回车确认。WxPusher 默认走 SPT 极简推送模式，除非你主动选择 App Token + UID/Topic 模式，否则向导只需要填写 SPT：
+Linux 服务器推荐使用交互式 CLI 配置，不需要启动桌面 GUI 或 Web 管理台。飞书模式会自动查询可见群组并生成发送目标和监听规则；可以用上下键移动、空格勾选群组、回车确认。微信扫码绑定会尝试直接在终端打印二维码，并始终保留可复制的原始链接。WxPusher 默认走 SPT 极简推送模式，除非你主动选择 App Token + UID/Topic 模式，否则向导只需要填写 SPT：
 
 ```bash
 python ngawolf_cli.py init
