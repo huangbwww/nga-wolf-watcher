@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import ngawolf_cli
+import nga_feishu_watch
 import nga_wolf_config
 
 
@@ -333,6 +334,45 @@ def test_command_test_send_validates_without_cookie_and_sends_test_message(tmp_p
     validate_config.assert_called_once_with(config, require_cookie=False)
     build_service_args.assert_called_once_with(paths, config, mark_seen=False)
     send_test_message.assert_called_once_with(args)
+
+
+def test_command_test_send_sends_each_structured_push_target(tmp_path: Path) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+    config = _valid_email_config()
+    config["push_targets"] = json.dumps(
+        [
+            {"id": "feishu_1", "label": "Alpha", "channel": "feishu", "receive_id": "oc_1"},
+            {"id": "email_1", "label": "ops@example.com", "channel": "email", "receive_id": "ops@example.com"},
+            {"id": "wxpusher_1", "label": "WxPusher", "channel": "wxpusher", "id_type": "spt"},
+        ],
+        ensure_ascii=False,
+    )
+    base_args = argparse.Namespace(push_targets=config["push_targets"])
+    scoped_args = [argparse.Namespace(target_id="feishu_1"), argparse.Namespace(target_id="email_1"), argparse.Namespace(target_id="wxpusher_1")]
+    targets = [
+        nga_feishu_watch.PushTarget(id="feishu_1", label="Alpha", channel="feishu", receive_id="oc_1"),
+        nga_feishu_watch.PushTarget(id="email_1", label="ops@example.com", channel="email", receive_id="ops@example.com"),
+        nga_feishu_watch.PushTarget(id="wxpusher_1", label="WxPusher", channel="wxpusher", id_type="spt"),
+    ]
+
+    with patch.object(ngawolf_cli, "load_service_config", return_value=config), patch.object(
+        ngawolf_cli.nga_wolf_config, "validate_config", return_value=[]
+    ), patch.object(ngawolf_cli, "build_service_args", return_value=base_args), patch.object(
+        ngawolf_cli.nga_feishu_watch, "configured_push_targets", return_value=targets
+    ) as configured_push_targets, patch.object(
+        ngawolf_cli.nga_feishu_watch, "args_for_push_target", side_effect=scoped_args
+    ) as args_for_push_target, patch.object(
+        ngawolf_cli.nga_feishu_watch, "send_test_message", return_value=None
+    ) as send_test_message:
+        assert ngawolf_cli.command_test_send(paths) == 0
+
+    configured_push_targets.assert_called_once_with(base_args)
+    assert [call.args for call in args_for_push_target.call_args_list] == [(base_args, targets[0]), (base_args, targets[1]), (base_args, targets[2])]
+    assert [call.args[0] for call in send_test_message.call_args_list] == scoped_args
 
 
 def test_command_run_once_validates_and_runs_once(tmp_path: Path) -> None:
@@ -717,6 +757,7 @@ def test_prompt_choice_uses_questionary_in_interactive_terminal(monkeypatch) -> 
             "message": "Bot channel",
             "choices": [{"name": "Feishu", "value": "feishu"}, {"name": "Email", "value": "email"}],
             "default": "feishu",
+            "instruction": "（使用方向键选择，回车确认）",
             "style": {"rules": fake.styles[0]},
         }
     ]
@@ -991,6 +1032,7 @@ def test_prompt_multi_select_uses_questionary_checkbox_in_interactive_terminal(m
                 {"name": "Alpha", "value": "oc_1", "checked": True},
                 {"name": "Beta", "value": "oc_2", "checked": False},
             ],
+            "instruction": "（使用方向键移动，空格选择/取消，回车确认）",
             "style": {"rules": fake.styles[0]},
         }
     ]

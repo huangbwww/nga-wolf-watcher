@@ -78,6 +78,7 @@ def _questionary_prompt(factory, *args, style=None, **kwargs):
     try:
         return factory(*args, **kwargs)
     except TypeError:
+        kwargs.pop("instruction", None)
         kwargs.pop("style", None)
         return factory(*args, **kwargs)
 
@@ -89,9 +90,9 @@ def prompt_text(label: str, current: object = "", *, secret: bool = False) -> st
         try:
             style = _questionary_style(client)
             prompt = (
-                _questionary_prompt(client.password, label, style=style)
+                _questionary_prompt(client.password, label, instruction="（输入后回车确认）", style=style)
                 if secret
-                else _questionary_prompt(client.text, label, default=current_text, style=style)
+                else _questionary_prompt(client.text, label, default=current_text, instruction="（输入后回车确认）", style=style)
             )
             value = prompt.ask()
         except Exception:
@@ -128,6 +129,7 @@ def prompt_choice(label: str, choices: list[tuple[str, str]], current: object = 
             label,
             choices=[_questionary_choice(client, title, value) for value, title in choices],
             default=default,
+            instruction="（使用方向键选择，回车确认）",
             style=_questionary_style(client),
         ).ask()
         if answer is None:
@@ -174,6 +176,7 @@ def prompt_multi_select(
                 )
                 for option in options
             ],
+            instruction="（使用方向键移动，空格选择/取消，回车确认）",
             style=_questionary_style(client),
         ).ask()
         if answers is None:
@@ -1225,6 +1228,16 @@ def command_test_send(paths: CliPaths) -> int:
         print_validation_errors(errors)
         return 2
     args = build_service_args(paths, config, mark_seen=False)
+    if nga_feishu_watch.parse_push_targets(getattr(args, "push_targets", "")):
+        targets = nga_feishu_watch.configured_push_targets(args)
+        if not targets:
+            print("未找到可测试的推送通道。", file=sys.stderr)
+            return 2
+        for target in targets:
+            title = target.label or target.id or target.receive_id or target.channel
+            print(f"正在测试推送通道：{title}")
+            nga_feishu_watch.send_test_message(nga_feishu_watch.args_for_push_target(args, target))
+        return 0
     nga_feishu_watch.send_test_message(args)
     return 0
 
