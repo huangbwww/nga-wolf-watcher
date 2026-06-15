@@ -6793,15 +6793,16 @@ def collect_thread_tail(
 ) -> list[NgaPost]:
     author_id = str(author_id or "").strip()
     label_prefix = f"NGA 帖子 {tid} 作者 {author_id}" if author_id else f"NGA 帖子 {tid}"
+    page_count_author_id = author_id if author_id else ""
     page_count_payload = with_retries(
-        f"NGA 帖子 {tid} 页数",
+        f"{label_prefix} 页数",
         attempts,
         retry_initial_delay,
         retry_delay,
-        lambda: fetch_nga_thread_page(tid, 1, cookie, timeout, request_min_interval, cache_ttl),
+        lambda: fetch_nga_thread_page(tid, 1, cookie, timeout, request_min_interval, cache_ttl, page_count_author_id),
     )
     last_page = thread_page_count(page_count_payload)
-    if author_id or last_page > 1:
+    if last_page > 1:
         first_payload = with_retries(
             f"{label_prefix} 最新页",
             attempts,
@@ -6855,12 +6856,13 @@ def collect_thread_in_natural_days(
 ) -> list[NgaPost]:
     author_id = str(author_id or "").strip()
     label_prefix = f"NGA 帖子 {tid} 作者 {author_id}" if author_id else f"NGA 帖子 {tid}"
+    page_count_author_id = author_id if author_id else ""
     page_count_payload = with_retries(
-        f"NGA 帖子 {tid} 页数",
+        f"{label_prefix} 页数",
         attempts,
         retry_initial_delay,
         retry_delay,
-        lambda: fetch_nga_thread_page(tid, 1, cookie, timeout, request_min_interval, cache_ttl),
+        lambda: fetch_nga_thread_page(tid, 1, cookie, timeout, request_min_interval, cache_ttl, page_count_author_id),
     )
     last_page = thread_page_count(page_count_payload)
     posts: list[NgaPost] = []
@@ -6870,7 +6872,7 @@ def collect_thread_in_natural_days(
         if checked_pages >= max_pages:
             break
         checked_pages += 1
-        if page == 1 and not author_id:
+        if page == 1:
             payload = page_count_payload
         else:
             if checked_pages > 1:
