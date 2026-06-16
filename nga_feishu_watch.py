@@ -166,6 +166,11 @@ def is_nga_service_unavailable(exc: Exception) -> bool:
     return nga_status_code(exc) == 503
 
 
+def is_nga_content_missing(exc: Exception) -> bool:
+    text = str(exc)
+    return any(marker in text for marker in ("找不到内容", "没有更多页了", "没有符合条件的结果"))
+
+
 @dataclass(frozen=True)
 class FeishuFileRef:
     file_key: str
@@ -1708,7 +1713,7 @@ def fetch_nga_page(
 
 def fetch_nga_thread_page(
     tid: str,
-    page: int,
+    page: int | str,
     cookie: str,
     timeout: int,
     request_min_interval: float = DEFAULT_NGA_REQUEST_MIN_INTERVAL,
@@ -1821,7 +1826,7 @@ def is_truncated_nga_response_error(exc: BaseException | None) -> bool:
     return False
 
 
-def fetch_nga_thread_html_page(tid: str, page: int, cookie: str, timeout: int, referer: str = "https://bbs.nga.cn/", author_id: str = "") -> dict[str, Any]:
+def fetch_nga_thread_html_page(tid: str, page: int | str, cookie: str, timeout: int, referer: str = "https://bbs.nga.cn/", author_id: str = "") -> dict[str, Any]:
     params = {"tid": tid, "page": str(page)}
     author_id = str(author_id or "").strip()
     if author_id and author_id != "0":
@@ -1849,13 +1854,17 @@ def fetch_nga_thread_html_page(tid: str, page: int, cookie: str, timeout: int, r
     return parse_nga_thread_html_page(raw.decode(charset, errors="replace"), tid, page)
 
 
-def parse_nga_thread_html_page(text: str, tid: str, page: int) -> dict[str, Any]:
+def parse_nga_thread_html_page(text: str, tid: str, page: int | str) -> dict[str, Any]:
     title_match = re.search(r"<title[^>]*>(.*?)</title>", text, flags=re.I | re.S)
     subject = ""
     if title_match:
         subject = strip_markup(html.unescape(title_match.group(1)))
         subject = re.split(r"[-_]\s*NGA", subject, maxsplit=1)[0].strip()
-    max_page = page
+    try:
+        current_page = max(1, int(page))
+    except (TypeError, ValueError):
+        current_page = 1
+    max_page = current_page
     for value in re.findall(r"[?&]page=(\d+)", text):
         try:
             max_page = max(max_page, int(value))
@@ -1914,9 +1923,10 @@ def parse_nga_thread_html_page(text: str, tid: str, page: int) -> dict[str, Any]
             "__U": users,
             "__R": replies,
             "__T": {"tid": str(tid), "subject": subject},
-            "__PAGE": int(page),
-            "__ROWS": max(max_page, page) * 20,
+            "__PAGE": current_page,
+            "__ROWS": max(max_page, current_page) * 20,
             "__R__ROWS_PAGE": 20,
+            "__HTML_FALLBACK": True,
         }
     }
 
@@ -2321,6 +2331,21 @@ def thread_page_count(payload: dict[str, Any]) -> int:
         page_size = 20
     if rows > 0 and page_size > 0:
         return max(1, (rows + page_size - 1) // page_size)
+    try:
+        return max(1, int(data.get("__PAGE", 1) or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def is_html_fallback_thread_payload(payload: dict[str, Any]) -> bool:
+    data = payload.get("data", {}) if isinstance(payload, dict) else {}
+    return isinstance(data, dict) and bool(data.get("__HTML_FALLBACK"))
+
+
+def thread_current_page(payload: dict[str, Any]) -> int:
+    data = payload.get("data", {}) if isinstance(payload, dict) else {}
+    if not isinstance(data, dict):
+        return 1
     try:
         return max(1, int(data.get("__PAGE", 1) or 1))
     except (TypeError, ValueError):
@@ -6793,26 +6818,44 @@ def collect_thread_tail(
 ) -> list[NgaPost]:
     author_id = str(author_id or "").strip()
     label_prefix = f"NGA 帖子 {tid} 作者 {author_id}" if author_id else f"NGA 帖子 {tid}"
-    page_count_payload = with_retries(
-        f"NGA 帖子 {tid} 页数",
-        attempts,
-        retry_initial_delay,
-        retry_delay,
-        lambda: fetch_nga_thread_page(tid, 1, cookie, timeout, request_min_interval, cache_ttl),
-    )
-    last_page = thread_page_count(page_count_payload)
-    if author_id or last_page > 1:
-        first_payload = with_retries(
-            f"{label_prefix} 最新页",
+    if author_id:
+        try:
+            first_payload = with_retries(
+                f"{label_prefix} 最新页",
+                attempts,
+                retry_initial_delay,
+                retry_delay,
+                lambda: fetch_nga_thread_page(tid, "e", cookie, timeout, request_min_interval, cache_ttl, author_id),
+            )
+        except Exception as exc:
+            if is_nga_content_missing(exc):
+                print(f"{label_prefix} 没有找到作者筛选回复，跳过。", file=sys.stderr)
+                return []
+            raise
+        last_page = thread_current_page(first_payload) if is_html_fallback_thread_payload(first_payload) else thread_page_count(first_payload)
+    else:
+        page_count_payload = with_retries(
+            f"{label_prefix} 页数",
             attempts,
             retry_initial_delay,
             retry_delay,
-            lambda: fetch_nga_thread_page(tid, last_page, cookie, timeout, request_min_interval, cache_ttl, author_id),
+            lambda: fetch_nga_thread_page(tid, 1, cookie, timeout, request_min_interval, cache_ttl),
         )
-    else:
-        first_payload = page_count_payload
+        last_page = thread_page_count(page_count_payload)
+        if last_page > 1:
+            first_payload = with_retries(
+                f"{label_prefix} 最新页",
+                attempts,
+                retry_initial_delay,
+                retry_delay,
+                lambda: fetch_nga_thread_page(tid, last_page, cookie, timeout, request_min_interval, cache_ttl),
+            )
+        else:
+            first_payload = page_count_payload
     first_posts, _ = extract_thread_posts(first_payload)
     first_posts = filter_posts_by_author(first_posts, author_id)
+    if author_id and is_html_fallback_thread_payload(first_payload):
+        return first_posts[-count:]
 
     posts_by_page: list[NgaPost] = list(first_posts)
     page = last_page - 1
@@ -6829,6 +6872,8 @@ def collect_thread_tail(
         except Exception as exc:
             if allow_partial and posts_by_page and is_nga_temporary_unavailable(exc):
                 print(f"NGA 帖子 {tid} 第 {page} 页临时不可用，返回已抓到的 {len(posts_by_page)} 条。", file=sys.stderr)
+                break
+            if author_id and posts_by_page and is_nga_content_missing(exc):
                 break
             raise
         page_posts, _ = extract_thread_posts(payload)
@@ -6855,14 +6900,31 @@ def collect_thread_in_natural_days(
 ) -> list[NgaPost]:
     author_id = str(author_id or "").strip()
     label_prefix = f"NGA 帖子 {tid} 作者 {author_id}" if author_id else f"NGA 帖子 {tid}"
-    page_count_payload = with_retries(
-        f"NGA 帖子 {tid} 页数",
-        attempts,
-        retry_initial_delay,
-        retry_delay,
-        lambda: fetch_nga_thread_page(tid, 1, cookie, timeout, request_min_interval, cache_ttl),
-    )
-    last_page = thread_page_count(page_count_payload)
+    latest_payload: dict[str, Any] | None = None
+    if author_id:
+        try:
+            latest_payload = with_retries(
+                f"{label_prefix} 最新页",
+                attempts,
+                retry_initial_delay,
+                retry_delay,
+                lambda: fetch_nga_thread_page(tid, "e", cookie, timeout, request_min_interval, cache_ttl, author_id),
+            )
+        except Exception as exc:
+            if is_nga_content_missing(exc):
+                print(f"{label_prefix} 没有找到作者筛选回复，跳过。", file=sys.stderr)
+                return []
+            raise
+        last_page = thread_current_page(latest_payload) if is_html_fallback_thread_payload(latest_payload) else thread_page_count(latest_payload)
+    else:
+        page_count_payload = with_retries(
+            f"{label_prefix} 页数",
+            attempts,
+            retry_initial_delay,
+            retry_delay,
+            lambda: fetch_nga_thread_page(tid, 1, cookie, timeout, request_min_interval, cache_ttl),
+        )
+        last_page = thread_page_count(page_count_payload)
     posts: list[NgaPost] = []
     max_pages = max(1, int(max_pages))
     checked_pages = 0
@@ -6870,7 +6932,9 @@ def collect_thread_in_natural_days(
         if checked_pages >= max_pages:
             break
         checked_pages += 1
-        if page == 1 and not author_id:
+        if latest_payload is not None and page == last_page:
+            payload = latest_payload
+        elif not author_id and page == 1:
             payload = page_count_payload
         else:
             if checked_pages > 1:
@@ -6887,12 +6951,16 @@ def collect_thread_in_natural_days(
                 if allow_partial and posts and is_nga_temporary_unavailable(exc):
                     print(f"NGA 帖子 {tid} 第 {page} 页临时不可用，返回已抓到的 {len(posts)} 条。", file=sys.stderr)
                     break
+                if author_id and posts and is_nga_content_missing(exc):
+                    break
                 raise
         page_posts, _ = extract_thread_posts(payload)
         page_posts = filter_posts_by_author(page_posts, author_id)
         matched = posts_in_natural_days(page_posts, days)
         posts = matched + posts
         print(f"日打包帖子 {tid} 第 {page}/{last_page} 页：命中 {len(matched)}/{len(page_posts)} 条，累计 {len(posts)} 条。")
+        if latest_payload is not None and is_html_fallback_thread_payload(latest_payload):
+            break
         if page_reaches_before_natural_days(page_posts, days):
             break
     else:
