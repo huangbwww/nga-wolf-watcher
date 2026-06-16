@@ -86,7 +86,7 @@ class Issue18ThreadWatchTests(unittest.TestCase):
         self.assertEqual([post.author_id for post in posts], ["150058", "123456"])
         self.assertEqual(counts, [("wolf(45974302:150058)", 1), ("other(45974302:123456)", 1)])
 
-    def test_thread_author_tail_uses_author_filtered_page_count_then_author_filtered_last_page(self) -> None:
+    def test_thread_author_tail_uses_author_filtered_end_page_directly(self) -> None:
         requested: list[tuple[str, str]] = []
 
         def fake_fetch(url: str, *_args, **_kwargs) -> dict:
@@ -95,8 +95,14 @@ class Issue18ThreadWatchTests(unittest.TestCase):
             author_id = query.get("authorid", [""])[0]
             requested.append((page, author_id))
             self.assertEqual(author_id, "150058")
-            if page == "3":
-                return thread_payload(query["tid"][0], author_id, "pid-latest")
+            if page == "2":
+                raise AssertionError("author-filtered scan should not trust a truncated HTML page count")
+            if page == "e":
+                payload = thread_payload(query["tid"][0], author_id, "pid-latest")
+                payload["data"]["__PAGE"] = 3
+                payload["data"]["__ROWS"] = 60
+                payload["data"]["__R__ROWS_PAGE"] = 20
+                return payload
             payload = thread_payload(query["tid"][0], author_id, "pid-initial")
             payload["data"]["__ROWS"] = 60
             payload["data"]["__R__ROWS_PAGE"] = 20
@@ -122,7 +128,7 @@ class Issue18ThreadWatchTests(unittest.TestCase):
                 [nga_feishu_watch.ThreadAuthorWatch("45974302", "150058", "wolf")],
             )
 
-        self.assertEqual(requested, [("1", "150058"), ("3", "150058")])
+        self.assertEqual(requested, [("e", "150058")])
         self.assertEqual([post.canonical_key for post in posts], ["pid-latest"])
         self.assertEqual(counts, [("wolf(45974302:150058)", 1)])
 
@@ -136,12 +142,11 @@ class Issue18ThreadWatchTests(unittest.TestCase):
             author_id = query.get("authorid", [""])[0]
             requested.append((tid, page, author_id))
             if not author_id:
-                payload = thread_payload(tid, "150058", f"main-{tid}")
-                payload["data"]["__ROWS"] = 1188 * 20
-                payload["data"]["__R__ROWS_PAGE"] = 20
-                return payload
+                raise AssertionError("thread-author scan should always use the author-filtered URL")
             if page == "1188":
                 raise AssertionError("author-filtered scan should not request the main thread last page")
+            if page == "2":
+                raise AssertionError("author-filtered scan should not trust a truncated HTML page count")
             return thread_payload(tid, author_id, f"pid-{tid}")
 
         args = Namespace(
@@ -166,11 +171,83 @@ class Issue18ThreadWatchTests(unittest.TestCase):
         with patch.object(nga_feishu_watch, "fetch_nga_json", side_effect=fake_fetch):
             posts, counts = nga_feishu_watch.collect_thread_author_watch_posts(args, watches)
 
-        self.assertEqual(requested, [("40795363", "1", "150058"), ("45974302", "1", "150058")])
+        self.assertEqual(requested, [("40795363", "e", "150058"), ("45974302", "e", "150058")])
         self.assertEqual([post.canonical_key for post in posts], ["pid-40795363", "pid-45974302"])
         self.assertEqual(counts, [("wolf-a(40795363:150058)", 1), ("wolf-b(45974302:150058)", 1)])
 
-    def test_thread_author_day_pack_uses_author_filtered_page_count_then_author_filtered_last_page(self) -> None:
+    def test_thread_author_tail_does_not_walk_back_from_html_fallback_page_count(self) -> None:
+        requested: list[str] = []
+
+        def fake_fetch(tid: str, page: int | str, *_args, **_kwargs) -> dict:
+            requested.append(str(page))
+            if str(page) != "e":
+                raise AssertionError("HTML fallback page count is inferred and must not drive backfill pages")
+            payload = thread_payload(tid, "150058", "pid-latest")
+            payload["data"]["__PAGE"] = 1
+            payload["data"]["__ROWS"] = 40
+            payload["data"]["__R__ROWS_PAGE"] = 20
+            payload["data"]["__HTML_FALLBACK"] = True
+            return payload
+
+        with patch.object(nga_feishu_watch, "fetch_nga_thread_page", side_effect=fake_fetch):
+            posts = nga_feishu_watch.collect_thread_tail(
+                "45974302",
+                20,
+                "cookie",
+                10,
+                attempts=1,
+                retry_initial_delay=0,
+                retry_delay=0,
+                page_delay=0,
+                request_min_interval=0,
+                cache_ttl=0,
+                allow_partial=True,
+                author_id="150058",
+            )
+
+        self.assertEqual(requested, ["e"])
+        self.assertEqual([post.canonical_key for post in posts], ["pid-latest"])
+
+    def test_thread_author_watch_skips_missing_author_thread_without_blocking_other_threads(self) -> None:
+        requested: list[tuple[str, str, str]] = []
+
+        def fake_fetch(url: str, *_args, **_kwargs) -> dict:
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            tid = query["tid"][0]
+            page = query["page"][0]
+            author_id = query.get("authorid", [""])[0]
+            requested.append((tid, page, author_id))
+            if tid == "40795363":
+                raise RuntimeError("NGA 在 帖子 40795363 作者 150058 最新页 返回错误：2048:找不到内容 或 没有更多页了")
+            return thread_payload(tid, author_id, f"pid-{tid}")
+
+        args = Namespace(
+            cookie="cookie",
+            timeout=10,
+            retries=1,
+            retry_initial_delay=0,
+            retry_delay=0,
+            nga_page_delay=0,
+            nga_request_min_interval=0,
+            nga_cache_ttl=0,
+            thread_watch_tail_count=1,
+            nga_target_min_delay=0,
+            nga_target_max_delay=0,
+        )
+
+        watches = [
+            nga_feishu_watch.ThreadAuthorWatch("40795363", "150058", "wolf-a"),
+            nga_feishu_watch.ThreadAuthorWatch("45974302", "150058", "wolf-b"),
+        ]
+
+        with patch.object(nga_feishu_watch, "fetch_nga_json", side_effect=fake_fetch):
+            posts, counts = nga_feishu_watch.collect_thread_author_watch_posts(args, watches)
+
+        self.assertEqual(requested, [("40795363", "e", "150058"), ("45974302", "e", "150058")])
+        self.assertEqual([post.canonical_key for post in posts], ["pid-45974302"])
+        self.assertEqual(counts, [("wolf-a(40795363:150058)", 0), ("wolf-b(45974302:150058)", 1)])
+
+    def test_thread_author_day_pack_uses_author_filtered_end_page_directly(self) -> None:
         requested: list[tuple[str, str]] = []
         today = time.strftime("%Y-%m-%d 10:00:00", time.localtime())
         old_day = time.strftime("%Y-%m-%d 10:00:00", time.localtime(time.time() - 14 * 86400))
@@ -181,8 +258,12 @@ class Issue18ThreadWatchTests(unittest.TestCase):
             author_id = query.get("authorid", [""])[0]
             requested.append((page, author_id))
             self.assertEqual(author_id, "150058")
-            if page == "3":
-                return thread_payload_at(query["tid"][0], author_id, "pid-latest", today)
+            if page == "e":
+                payload = thread_payload_at(query["tid"][0], author_id, "pid-latest", today)
+                payload["data"]["__PAGE"] = 3
+                payload["data"]["__ROWS"] = 60
+                payload["data"]["__R__ROWS_PAGE"] = 20
+                return payload
             payload = thread_payload_at(query["tid"][0], author_id, f"pid-old-{page}", old_day)
             payload["data"]["__ROWS"] = 60
             payload["data"]["__R__ROWS_PAGE"] = 20
@@ -202,7 +283,7 @@ class Issue18ThreadWatchTests(unittest.TestCase):
         with patch.object(nga_feishu_watch, "fetch_nga_json", side_effect=fake_fetch):
             posts = nga_feishu_watch.collect_thread_in_days_with_retries(args, "45974302", 1, "150058")
 
-        self.assertEqual(requested, [("1", "150058"), ("3", "150058"), ("2", "150058")])
+        self.assertEqual(requested, [("e", "150058"), ("2", "150058")])
         self.assertEqual([post.key for post in posts], ["pid-latest"])
 
     def test_startup_catchup_uses_author_filtered_thread_url(self) -> None:
@@ -235,6 +316,7 @@ class Issue18ThreadWatchTests(unittest.TestCase):
 
         content_query = urllib.parse.parse_qs(urllib.parse.urlparse(requested_urls[0]).query)
         self.assertEqual(content_query["tid"], ["45974302"])
+        self.assertEqual(content_query["page"], ["e"])
         self.assertEqual(content_query["authorid"], ["150058"])
         self.assertEqual([post.author_id for post in posts], ["150058"])
         self.assertEqual(counts, [("wolf(45974302:150058) 启动补抓", 1)])
@@ -279,6 +361,7 @@ class Issue18ThreadWatchTests(unittest.TestCase):
 
         content_query = urllib.parse.parse_qs(urllib.parse.urlparse(requested_urls[0]).query)
         self.assertEqual(content_query["tid"], ["45974302"])
+        self.assertEqual(content_query["page"], ["e"])
         self.assertEqual(content_query["authorid"], ["150058"])
         push_posts.assert_called_once()
         self.assertEqual(push_posts.call_args.args[1][0].author_id, "150058")
