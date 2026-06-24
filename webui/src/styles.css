@@ -1255,6 +1255,7 @@ textarea:focus {
 }
 
 .stock-topline {
+  flex: 0 0 auto;
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
@@ -1289,6 +1290,7 @@ textarea:focus {
 }
 
 .market-strip {
+  flex: 0 0 auto;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
@@ -1347,6 +1349,7 @@ textarea:focus {
 
 .stock-command-panel {
   position: relative;
+  flex: 0 0 auto;
   display: grid;
   grid-template-columns: minmax(320px, 1fr) auto;
   gap: 10px;
@@ -1492,6 +1495,7 @@ textarea:focus {
 }
 
 .stock-message {
+  flex: 0 0 auto;
   margin-bottom: 10px;
   padding: 9px 11px;
   border-radius: 8px;
@@ -1551,6 +1555,8 @@ textarea:focus {
 }
 
 .stock-board-tabs {
+  flex: 0 0 auto;
+  min-height: 36px;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -1582,6 +1588,8 @@ textarea:focus {
 }
 
 .stock-group-bar {
+  flex: 0 0 auto;
+  min-height: 38px;
   display: flex;
   align-items: center;
   gap: 7px;
