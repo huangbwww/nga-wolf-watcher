@@ -65,9 +65,10 @@ DEFAULT_MEMORY = """# NGA Wolf Watcher local memory
 - NGA 来源索引：`events/source_index.json`，记录“狼大”“海”等备注对应的来源 ID 和历史文件
 - NGA 按来源历史：`events/by_source/author_<id>.jsonl`，当用户点名某个备注或用户时优先读取对应文件
 - NGA 回复图片：事件 JSON 里的 `image_urls` 是原图链接，`image_paths` 是已下载到本地的图片文件
-- 我的持仓信息：`context/positions.json`
+- 股票看板源数据：提示词里的 `stock dashboard source` 路径，直接读取 `stock_watchlist.json`
 - 行情信息：需要时实时查询公开网页或公开 API
-- 接下来重点观察：`context/watchlist.md`
+- 重点关注：股票看板里分组为 `重点关注` 的自选
+- 我的持仓信息：股票看板里填写了 `cost`、`shares` 或 `buyDate` 的自选
 - 其他补充笔记：`context/notes.md`
 
 使用偏好：
@@ -75,6 +76,7 @@ DEFAULT_MEMORY = """# NGA Wolf Watcher local memory
 - 普通聊天直接回答用户问题。
 - 自动分析和定时分析按对应提示词执行即可，不需要输出复杂固定模板。
 - 可以给观察重点、风险提示、仓位和操作思路，但不要替用户做最终买卖决定，也不要声称已经下单。
+- 可以建议修改重点关注或持仓信息，但写入前应明确向用户确认。
 - 不要暴露 Cookie、飞书密钥、账号凭证或完整私密文件。
 """
 
@@ -91,6 +93,13 @@ def bool_value(value: Any) -> bool:
     if value is None:
         return False
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def stock_watchlist_source_path(work_dir: Path) -> Path:
+    raw = os.getenv("NGA_STOCK_WATCHLIST_PATH", "").strip()
+    if raw:
+        return Path(raw)
+    return work_dir.parent / "stock_watchlist.json"
 
 
 def safe_int(value: Any, default: int, minimum: int | None = None) -> int:
@@ -709,6 +718,9 @@ def ensure_workspace(config: AIConfig) -> None:
         agents_md.write_text(
             "Use `context/memory.md` as optional local memory for this workspace. "
             "Do not inject it into every answer; read it only when useful for the user's request.\n"
+            "Use the `stock dashboard source` path from the task prompt for local holdings and focus-watch context. "
+            "The source is `stock_watchlist.json`; holdings are rows with `cost`, `shares`, or `buyDate`, and focus-watch rows have group `重点关注`. "
+            "Suggest position or focus-watch updates only after user confirmation.\n"
             "When current A-share quotes are needed, query public web pages or public APIs in real time.\n"
             "When the user names a monitored NGA source label such as 狼大 or 海, use `events/source_index.json` "
             "to resolve the label and read the matching `events/by_source/*.jsonl` history first.\n",
@@ -721,6 +733,13 @@ def ensure_workspace(config: AIConfig) -> None:
                 f.write(
                     "\nWhen current A-share quotes are needed, query public web pages or public APIs in real time.\n"
                 )
+        if "stock dashboard source" not in existing_agents and "stock_watchlist.json" not in existing_agents:
+            with agents_md.open("a", encoding="utf-8") as f:
+                f.write(
+                    "\nUse the `stock dashboard source` path from the task prompt for local holdings and focus-watch context. "
+                    "The source is `stock_watchlist.json`; holdings are rows with `cost`, `shares`, or `buyDate`, and focus-watch rows have group `重点关注`. "
+                    "Suggest position or focus-watch updates only after user confirmation.\n"
+                )
         if "source_index.json" not in existing_agents:
             with agents_md.open("a", encoding="utf-8") as f:
                 f.write(
@@ -730,7 +749,8 @@ def ensure_workspace(config: AIConfig) -> None:
     readme = work_dir / "context" / "README.md"
     if not readme.exists():
         readme.write_text(
-            "Put optional local context here. Supported files: positions.json, watchlist.md, notes.md.\n"
+            "Put optional local context here. Stock holdings and focus-watch context are read from the stock dashboard source path in the task prompt.\n"
+            "Supported extra file: notes.md.\n"
             "Do not put credentials, cookies, or Feishu secrets in this directory.\n",
             encoding="utf-8",
         )
@@ -2146,10 +2166,13 @@ class AIManager:
         return self.config.work_dir / "analysis" / f"{timestamp}_{safe_key(task_type)}_{safe_key(key)}.md"
 
     def local_history_context(self) -> str:
+        stock_watchlist_path = stock_watchlist_source_path(self.config.work_dir)
         lines = [
             "Local NGA context files:",
             f"- latest event: {self.latest_event_path.resolve()}",
             f"- global history: {self.history_file.resolve()}",
+            f"- stock dashboard source: {stock_watchlist_path.resolve()}",
+            "- stock dashboard rules: holdings are rows with cost/shares/buyDate; focus-watch rows have group `重点关注`; suggest changes only after user confirmation.",
         ]
         summary = source_index_summary(self.config.work_dir)
         if summary:

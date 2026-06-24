@@ -15,6 +15,7 @@ from typing import Any
 
 import ai_analysis
 import nga_wolf_gui as legacy
+import stock_quotes
 import wechat_bot
 
 
@@ -783,6 +784,105 @@ class PreviewApi:
             return {"ok": True, "path": str(path)}
         except Exception as exc:
             return {"ok": False, "error": str(exc), "path": str(path)}
+
+    def stock_bootstrap(self) -> dict[str, Any]:
+        try:
+            return stock_quotes.bootstrap(legacy.data_dir())
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def stock_search(self, query: str = "", limit: int = 12) -> dict[str, Any]:
+        try:
+            watchlist = stock_quotes.load_watchlist(legacy.data_dir())
+            results = stock_quotes.search_symbols(query, current_items=watchlist.get("items", []), limit=int(limit or 12))
+            return {"ok": True, "results": results}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "results": []}
+
+    def stock_add_codes(self, codes: list[Any] | str, group: str = "") -> dict[str, Any]:
+        try:
+            code_list = codes if isinstance(codes, list) else str(codes or "").replace("\n", ",").split(",")
+            return stock_quotes.add_codes(legacy.data_dir(), code_list, group=group)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def stock_refresh(self, include_kline: bool = True) -> dict[str, Any]:
+        try:
+            return stock_quotes.refresh_watchlist(legacy.data_dir(), include_kline=bool(include_kline))
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def stock_reload(self, include_indexes: bool = False) -> dict[str, Any]:
+        try:
+            return stock_quotes.reload_watchlist(legacy.data_dir(), include_indexes=bool(include_indexes))
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def stock_update_item(self, code: str, patch: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            return stock_quotes.update_item(legacy.data_dir(), code, patch if isinstance(patch, dict) else {})
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def stock_delete_item(self, code: str) -> dict[str, Any]:
+        try:
+            return stock_quotes.delete_item(legacy.data_dir(), code)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def stock_recalculate(self, code: str) -> dict[str, Any]:
+        try:
+            return stock_quotes.recalculate(legacy.data_dir(), code)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def stock_chart(self, code: str, period: str = "day") -> dict[str, Any]:
+        try:
+            return stock_quotes.chart_data(legacy.data_dir(), code, period=str(period or "day"))
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def stock_market_chart(self, code: str, period: str = "minute") -> dict[str, Any]:
+        try:
+            return stock_quotes.market_chart(code, period=str(period or "minute"))
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def stock_update_groups(self, groups: list[Any] | None = None, active_group: str = "__all__") -> dict[str, Any]:
+        try:
+            return stock_quotes.update_groups(legacy.data_dir(), groups if isinstance(groups, list) else [], active_group)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def stock_clear_watchlist(self) -> dict[str, Any]:
+        try:
+            return stock_quotes.clear_watchlist(legacy.data_dir())
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def stock_accept_disclaimer(self) -> dict[str, Any]:
+        try:
+            return stock_quotes.accept_disclaimer(legacy.data_dir())
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def stock_reorder_items(self, ordered_codes: list[Any] | None = None) -> dict[str, Any]:
+        try:
+            return stock_quotes.reorder_items(legacy.data_dir(), ordered_codes if isinstance(ordered_codes, list) else [])
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def stock_export_csv(self) -> dict[str, Any]:
+        try:
+            return stock_quotes.export_csv(legacy.data_dir())
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def stock_import_csv(self, text: str = "") -> dict[str, Any]:
+        try:
+            return stock_quotes.import_csv(legacy.data_dir(), text)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
 
 def run_preview() -> None:

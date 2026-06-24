@@ -122,6 +122,14 @@ Typical uses:
 
 AI output is for information organization, risk notes, and discussion only. It is not investment advice and the app never trades automatically. See [Local AI Agent Enhancement](docs/ai.md).
 
+## Stock Dashboard And Bull Strategy
+
+Since v1.5.0, the Windows desktop app includes a stock dashboard and single-stock workbench inspired by bull stock calculator ideas shared in the NGA community. The feature integrates calculator experience shared by [Atanvardo_1](https://bbs.nga.cn/nuke.php?func=ucp&uid=8096803), Nami, Xhox, and other contributors, then adapts it to this app's local AI Agent context, position list, and focus-watch list.
+
+The dashboard supports watchlists, focus-watch stocks, positions, custom groups, code/name search, fuzzy search, CSV import/export, clearing the list, drag ordering, and 3-second quote refreshes. The market strip includes Shanghai, Shenzhen, ChiNext, and STAR 50 indexes; clicking an index opens the yellow/white intraday line view.
+
+The single-stock workbench supports fast stock switching, intraday/K-line charts, volume, MA/BOLL overlays, swing high/low, Fibonacci retracement, intraday pressure/support, position profit and loss, and bull strategy signals. Swing high/low values are auto-filled from daily K-line and MACD swing logic when possible, but can still be edited manually. Strategy output is for observation and review only. It is not investment advice.
+
 ## Default Paths
 
 | Runtime | Config | State And Logs |

@@ -25,12 +25,20 @@ import {
   Users,
   X,
 } from "lucide-react";
+import StockDashboard from "./StockDashboard.jsx";
 import "./styles.css";
 
 const api = () => window.pywebview?.api;
 let closingFlag = false;
 const isClosing = () => closingFlag;
 const hasApiMethod = (method) => typeof api()?.[method] === "function";
+const CONFIG_HASHES = new Set(["#channel", "#ai", "#quiet", "#runtime", "#advanced", "#logs"]);
+const pageForHash = (hash = "") => {
+  if (hash === "#stock-dashboard" || hash === "") return "stock";
+  if (hash === "#quick") return "quick";
+  if (CONFIG_HASHES.has(hash)) return "config";
+  return "config";
+};
 const DEFAULT_AI_ANALYSIS_PROMPT = "根据最新的 NGA 回复历史、我目前的持仓信息和观察列表，并实时查询公开 A 股行情信息，分析盘面变化、机会与风险，给出接下来需要重点观察的方向和操作建议。";
 const DEFAULT_SCHEDULE_WINDOWS = "weekday:09:30-11:30,13:00-15:00";
 const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
@@ -2128,6 +2136,8 @@ function App() {
   const [closeRequest, setCloseRequest] = useState(null);
   const [validationHint, setValidationHint] = useState(null);
   const [cookieCheck, setCookieCheck] = useState(null);
+  const [activePage, setActivePage] = useState(() => pageForHash(window.location.hash));
+  const [activeHash, setActiveHash] = useState(() => window.location.hash || "#stock-dashboard");
   const logOffsetRef = useRef(0);
   const bootstrappedRef = useRef(false);
 
@@ -2297,6 +2307,30 @@ function App() {
     });
   };
   const runningText = status.running ? `运行中 PID ${status.pids?.join(", ")}` : "未启动";
+  const openConfigSection = (hash, block = "start") => {
+    const section = String(hash || "").replace(/^#/, "");
+    if (!section) return;
+    const target = document.querySelector(`#${section}`);
+    const details = document.getElementById(`section-${section}`) || target?.closest("details");
+    if (details && "open" in details) details.open = true;
+    (target || details)?.scrollIntoView({ behavior: "smooth", block });
+  };
+  const navigateTo = (hash, event) => {
+    event?.preventDefault();
+    const nextHash = hash || "#stock-dashboard";
+    if (window.location.hash !== nextHash) window.history.pushState(null, "", nextHash);
+    const nextPage = pageForHash(nextHash);
+    setActivePage(nextPage);
+    setActiveHash(nextHash);
+    window.setTimeout(() => {
+      if (nextPage === "stock" || nextPage === "quick") {
+        document.querySelector(".content")?.scrollTo({ top: 0, behavior: "smooth" });
+        window.scrollTo({ top: 0, behavior: "smooth" });
+        return;
+      }
+      openConfigSection(nextHash);
+    }, 0);
+  };
 
   const refresh = async () => {
     if (!hasApiMethod("bootstrap") || isClosing()) return;
@@ -2387,6 +2421,20 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    const syncPageFromLocation = () => {
+      const hash = window.location.hash || "#stock-dashboard";
+      setActiveHash(hash);
+      setActivePage(pageForHash(hash));
+    };
+    window.addEventListener("hashchange", syncPageFromLocation);
+    window.addEventListener("popstate", syncPageFromLocation);
+    return () => {
+      window.removeEventListener("hashchange", syncPageFromLocation);
+      window.removeEventListener("popstate", syncPageFromLocation);
+    };
+  }, []);
+
   const openCloseDialog = async (options = {}) => {
     const forceExit = Boolean(options.forceExit);
     const behavior = forceExit ? "exit" : String(config.web_close_behavior || "ask");
@@ -2411,16 +2459,20 @@ function App() {
     const channelForError = validationChannelForError(firstError);
     const hintText = firstError;
     if (channelForError) setSelectedChannel(channelForError);
+    setActivePage(section === "quick" ? "quick" : "config");
+    setActiveHash(section === "quick" ? "#quick" : `#${section}`);
     setValidationHint({ section, target, text: hintText, token: Date.now() });
     setMessage(firstError);
     setMessageKind("error");
     window.setTimeout(() => {
-      const details = document.getElementById(`section-${section}`);
-      if (details && "open" in details) details.open = true;
       const targetElement = document.querySelector(`[data-validation-target="${target}"]`);
       const parentDetails = targetElement?.closest("details");
       if (parentDetails && "open" in parentDetails) parentDetails.open = true;
-      (targetElement || details || document.getElementById(section))?.scrollIntoView({ behavior: "smooth", block: "center" });
+      if (targetElement) {
+        targetElement.scrollIntoView({ behavior: "smooth", block: "center" });
+      } else {
+        openConfigSection(`#${section}`, "center");
+      }
     }, 50);
   };
 
@@ -2638,27 +2690,31 @@ function App() {
           <span>{runningText}</span>
         </div>
         <nav>
-          <a href="#quick">快速开始</a>
-          <a href="#channel">消息通道</a>
-          <a href="#ai">AI 分析</a>
-          <a href="#quiet">免打扰</a>
-          <a href="#runtime">运行参数</a>
-          <a href="#advanced">高级配置</a>
-          <a href="#logs">日志</a>
+          <a href="#stock-dashboard" className={activeHash === "#stock-dashboard" ? "active" : ""} onClick={(event) => navigateTo("#stock-dashboard", event)}>股票看板</a>
+          <a href="#quick" className={activeHash === "#quick" ? "active" : ""} onClick={(event) => navigateTo("#quick", event)}>快速开始</a>
+          <a href="#channel" className={activeHash === "#channel" ? "active" : ""} onClick={(event) => navigateTo("#channel", event)}>消息通道</a>
+          <a href="#ai" className={activeHash === "#ai" ? "active" : ""} onClick={(event) => navigateTo("#ai", event)}>AI 分析</a>
+          <a href="#quiet" className={activeHash === "#quiet" ? "active" : ""} onClick={(event) => navigateTo("#quiet", event)}>免打扰</a>
+          <a href="#runtime" className={activeHash === "#runtime" ? "active" : ""} onClick={(event) => navigateTo("#runtime", event)}>运行参数</a>
+          <a href="#advanced" className={activeHash === "#advanced" ? "active" : ""} onClick={(event) => navigateTo("#advanced", event)}>高级配置</a>
+          <a href="#logs" className={activeHash === "#logs" ? "active" : ""} onClick={(event) => navigateTo("#logs", event)}>日志</a>
         </nav>
       </aside>
 
-      <section className="content">
+      <section className={`content page-${activePage}`}>
         <button id="nga-close-request-trigger" className="visually-hidden" type="button" onClick={openCloseDialog}>
           request close
         </button>
         <button id="nga-tray-exit-trigger" className="visually-hidden" type="button" onClick={() => openCloseDialog({ forceExit: true })}>
           request tray exit
         </button>
+        {activePage === "stock" ? <StockDashboard api={api} /> : null}
+        {activePage !== "stock" ? (
+          <>
         <header>
           <div>
             <div className="title-row">
-              <h1>监听配置</h1>
+              <h1>{activePage === "quick" ? "快速开始" : "监听配置"}</h1>
               {isDirty ? (
                 <span className="dirty-pill">
                   <AlertTriangle size={15} />
@@ -2666,7 +2722,7 @@ function App() {
                 </span>
               ) : null}
             </div>
-            <p>配置消息通道、NGA Cookie、监听规则和 AI 分析。</p>
+            <p>{activePage === "quick" ? "首次使用按顺序完成通道、NGA Cookie、用户/帖子和监听规则。" : "配置消息通道、NGA Cookie、监听规则和 AI 分析。"}</p>
           </div>
           <div className="actions">
             <ActionButton icon={Save} kind="primary" disabled={busy} onClick={() => run("保存配置", () => api().save_config(config))}>
@@ -2688,6 +2744,8 @@ function App() {
           </div>
         ) : null}
         <Notice message={message} kind={messageKind} />
+        {activePage === "quick" ? (
+          <>
         <SetupOverview
           channel={channel}
           authorCount={authorRows.length}
@@ -2696,7 +2754,7 @@ function App() {
           profileCount={channel === "wechat" ? wechatProfiles.length : channel === "dingtalk" ? dingtalkProfiles.length : channel === "email" ? emailProfiles.length : channel === "wxpusher" ? wxpusherProfiles.length : feishuProfiles.length}
         />
 
-        <Section icon={ShieldCheck} title="快速开始" description="首次使用按顺序完成：通道配置、NGA Cookie、用户/帖子、监听规则。" defaultOpen sectionId="quick" hint={sectionHint("quick")}>
+        <Section icon={ShieldCheck} title="配置步骤" description="按顺序完成：通道配置、NGA Cookie、用户/帖子、监听规则。" defaultOpen sectionId="quick" hint={sectionHint("quick")}>
           <div id="quick" className="grid" data-validation-target="quick-start">
             <ChannelPicker config={config} setConfig={setConfig} channel={channel} onChannelChange={setSelectedChannel} />
             {channel === "wechat" ? (
@@ -2721,7 +2779,11 @@ function App() {
             ))}
           </div>
         </Section>
+          </>
+        ) : null}
 
+        {activePage === "config" ? (
+          <>
         <Section
           icon={MessageSquare}
           title="消息通道"
@@ -2807,6 +2869,10 @@ function App() {
         <Section icon={TerminalSquare} title="日志" description={status.logPath || ""} defaultOpen>
           <pre id="logs" className="logs">{logs || "暂无日志"}</pre>
         </Section>
+          </>
+        ) : null}
+          </>
+        ) : null}
         <CloseConfirmModal
           step={resolveCloseStep()}
           request={closeRequest}
