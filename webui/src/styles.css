@@ -138,6 +138,8 @@ nav a.active {
 }
 
 .content.page-stock {
+  min-height: 0;
+  overflow: hidden;
   padding-bottom: 24px;
 }
 
@@ -1241,10 +1243,14 @@ textarea:focus {
 }
 
 .stock-dashboard {
-  margin-bottom: 20px;
-  max-height: calc(100vh - 48px);
-  overflow: auto;
-  padding-right: 4px;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 0;
+  overflow: hidden;
+  padding-right: 0;
   color: #132238;
 }
 
@@ -1413,6 +1419,10 @@ textarea:focus {
   color: #ffffff;
 }
 
+.stock-command.primary svg {
+  color: #ffffff;
+}
+
 .stock-command.danger {
   border-color: #f3c1b8;
   background: #fff4f1;
@@ -1577,17 +1587,24 @@ textarea:focus {
   gap: 7px;
   margin-bottom: 12px;
   overflow-x: auto;
-  padding-bottom: 2px;
+  padding: 1px 0 3px;
 }
 
 .stock-group-bar > button {
+  height: 34px;
   min-height: 34px;
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
   border: 1px solid #cbd7e6;
   border-radius: 7px;
   background: #ffffff;
   color: #334155;
   padding: 0 11px;
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -1595,10 +1612,10 @@ textarea:focus {
   border-color: #116b62;
   background: #116b62;
   color: #ffffff;
+  box-shadow: 0 0 0 1px rgba(17, 107, 98, 0.08);
 }
 
 .stock-group-bar span {
-  margin-left: 4px;
   font-size: 12px;
   opacity: 0.78;
 }
@@ -1607,18 +1624,25 @@ textarea:focus {
   min-width: 188px;
   flex: 0 0 auto;
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) 30px;
+  grid-template-columns: 18px minmax(0, 1fr) 34px;
   align-items: center;
   gap: 6px;
+  height: 34px;
   min-height: 34px;
-  padding: 0 4px 0 9px;
+  padding: 0 0 0 9px;
   border: 1px solid #cbd7e6;
   border-radius: 7px;
   background: #ffffff;
+  overflow: hidden;
+}
+
+.stock-group-editor > svg {
+  color: #4f6580;
 }
 
 .stock-group-editor input {
-  height: 30px;
+  min-width: 0;
+  height: 32px;
   padding: 0;
   border: 0;
 }
@@ -1627,19 +1651,48 @@ textarea:focus {
   box-shadow: none;
 }
 
+.stock-group-editor button {
+  width: 34px;
+  height: 34px;
+  min-height: 34px;
+  border: 0;
+  border-left: 1px solid #d8e1ec;
+  border-radius: 0;
+  background: #f8fafc;
+  color: #20354d;
+}
+
+.stock-group-editor button:hover {
+  background: #e9f8f5;
+  color: #0f766e;
+}
+
 .stock-workspace {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: 12px;
-  align-items: start;
+  align-items: stretch;
+  overflow: hidden;
 }
 
 .stock-table-shell,
 .stock-chart-panel {
+  min-width: 0;
   border: 1px solid #d8e1ec;
   border-radius: 8px;
   background: #ffffff;
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.055);
+}
+
+.stock-table-shell {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .stock-table-header {
@@ -1658,8 +1711,14 @@ textarea:focus {
 }
 
 .stock-table-scroll {
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  max-width: 100%;
   overflow: auto;
-  max-height: max(320px, min(560px, calc(100vh - 360px)));
+  max-height: none;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .stock-table {
@@ -1940,12 +1999,16 @@ textarea:focus {
 }
 
 .position-board {
+  min-width: 0;
+  min-height: 0;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 12px;
+  overflow: hidden;
 }
 
 .position-board .stock-table-scroll {
-  max-height: max(300px, min(500px, calc(100vh - 430px)));
+  max-height: none;
 }
 
 .position-summary-grid {

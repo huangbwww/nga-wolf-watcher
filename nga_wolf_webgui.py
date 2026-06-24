@@ -124,6 +124,13 @@ def _stop_tray_icon() -> None:
             pass
 
 
+def _start_tray_icon_when_ready(api: "PreviewApi") -> None:
+    try:
+        _ensure_tray_icon(api)
+    except Exception:
+        logging.getLogger(__name__).debug("Failed to initialize tray icon on startup", exc_info=True)
+
+
 def _pid_has_watcher_config(pid: int) -> bool:
     if pid <= 0 or pid == os.getpid():
         return False
@@ -905,6 +912,8 @@ def run_preview() -> None:
     window.events.closed += lambda: _set_active_window(None)
     icon_path = app_icon_path()
     webview.start(
+        _start_tray_icon_when_ready,
+        args=(api,),
         debug=bool(os.getenv("NGA_WEBGUI_DEBUG")),
         icon=str(icon_path) if icon_path.exists() else None,
         private_mode=False,
