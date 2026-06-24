@@ -10,6 +10,7 @@ nga_wolf_runtime_config.json
 nga_wolf_gui.log
 __pycache__/
 *.pyc
+build_version.py
 webui/node_modules/
 webui/dist/
 webui/vite.*.log

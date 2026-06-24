@@ -51,6 +51,7 @@ aside {
   display: flex;
   flex-direction: column;
   gap: 18px;
+  overflow: auto;
 }
 
 .brand {
@@ -126,6 +127,129 @@ nav a.active {
   background: #e9f8f5;
   color: #0f766e;
   font-weight: 800;
+}
+
+.sidebar-version {
+  margin-top: auto;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #293548;
+  border-radius: 10px;
+  background: #111c2e;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.16);
+}
+
+.sidebar-version.has-update {
+  border-color: #2dd4bf;
+  box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.2), 0 10px 26px rgba(0, 0, 0, 0.16);
+}
+
+.sidebar-github-link,
+.sidebar-version-check,
+.sidebar-version-release {
+  width: 100%;
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.sidebar-github-link {
+  justify-content: space-between;
+  border: 1px solid #334155;
+  background: #0b1220;
+  color: #e2e8f0;
+  padding: 0 10px;
+}
+
+.sidebar-github-link span {
+  margin-right: auto;
+  font-weight: 700;
+}
+
+.sidebar-github-link:hover,
+.sidebar-version-check:hover {
+  border-color: #64748b;
+  background: #172033;
+}
+
+.sidebar-version-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.sidebar-version-row strong {
+  min-width: 0;
+  color: #f8fafc;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-version-check {
+  border: 1px solid #334155;
+  background: transparent;
+  color: #cbd5e1;
+  font-size: 13px;
+}
+
+.sidebar-version-check:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.sidebar-version-status {
+  min-height: 18px;
+  margin: 0;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 1.4;
+  display: -webkit-box;
+  overflow: hidden;
+  word-break: break-word;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.sidebar-version-status.success {
+  color: #99f6e4;
+  font-weight: 700;
+}
+
+.sidebar-version-status.error {
+  color: #fecaca;
+}
+
+.sidebar-version-release {
+  border: 1px solid #14b8a6;
+  background: #0f766e;
+  color: white;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.sidebar-version-release:hover {
+  background: #0d9488;
+}
+
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .content {
@@ -2687,6 +2811,10 @@ textarea:focus {
   .channel-switch-card {
     grid-template-columns: 1fr;
     align-items: stretch;
+  }
+
+  .sidebar-version {
+    margin-top: 0;
   }
 
   .segmented {

@@ -124,6 +124,11 @@ jobs:
           npm ci
           npm run build
 
+      - name: Stamp app version
+        shell: pwsh
+        run: |
+          Set-Content -Path build_version.py -Value "APP_VERSION = '$env:TAG'" -Encoding UTF8
+
       - name: Build Windows app folder
         run: python -m PyInstaller --clean --noconfirm NGA-Wolf-Watcher-Web-Onedir.spec
 

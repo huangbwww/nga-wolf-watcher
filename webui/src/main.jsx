@@ -9,7 +9,9 @@ import {
   CircleStop,
   Database,
   Edit3,
+  ExternalLink,
   FolderOpen,
+  Github,
   ListChecks,
   MessageSquare,
   Plus,
@@ -988,6 +990,52 @@ function IconButton({ icon: Icon, label, onClick, kind = "default", disabled = f
 function Notice({ message, kind = "info" }) {
   if (!message) return null;
   return <div className={`notice ${kind}`}>{message}</div>;
+}
+
+function SidebarVersionPanel({ info, currentVersion, busy, onCheck, onOpenLatest, onOpenRepo }) {
+  const latestVersion = info?.latestVersion || "";
+  const hasResult = info && !info.loading;
+  const isError = info?.kind === "error" || info?.ok === false;
+  const hasUpdate = hasResult && !isError && Boolean(info?.hasUpdate);
+  const checkedAt = info?.checkedAt
+    ? new Date(info.checkedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
+    : "";
+  const statusText = info?.loading
+    ? "正在检测新版本..."
+    : isError
+      ? info?.error || "检查更新失败"
+      : hasResult
+        ? hasUpdate
+          ? `发现新版本 ${latestVersion}`
+          : `已是最新${checkedAt ? ` · ${checkedAt}` : ""}`
+        : "启动后自动检测，也可手动检查";
+
+  return (
+    <div className={`sidebar-version ${hasUpdate ? "has-update" : ""}`}>
+      <button className="sidebar-github-link" type="button" onClick={onOpenRepo} title="打开 GitHub 项目主页">
+        <Github size={16} />
+        <span>GitHub</span>
+        <ExternalLink size={13} />
+      </button>
+      <div className="sidebar-version-row">
+        <span>版本</span>
+        <strong>{currentVersion || "--"}</strong>
+      </div>
+      <button className="sidebar-version-check" type="button" disabled={busy} onClick={onCheck}>
+        <RefreshCw size={14} className={info?.loading ? "spin" : ""} />
+        <span>{info?.loading ? "检测中" : "检测更新"}</span>
+      </button>
+      <p className={`sidebar-version-status ${isError ? "error" : hasUpdate ? "success" : ""}`} title={statusText}>
+        {statusText}
+      </p>
+      {hasUpdate ? (
+        <button className="sidebar-version-release" type="button" onClick={onOpenLatest}>
+          <ExternalLink size={14} />
+          <span>打开最新版</span>
+        </button>
+      ) : null}
+    </div>
+  );
 }
 
 function ChannelPicker({ config, setConfig, channel, onChannelChange }) {
@@ -2136,10 +2184,13 @@ function App() {
   const [closeRequest, setCloseRequest] = useState(null);
   const [validationHint, setValidationHint] = useState(null);
   const [cookieCheck, setCookieCheck] = useState(null);
+  const [updateInfo, setUpdateInfo] = useState(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
   const [activePage, setActivePage] = useState(() => pageForHash(window.location.hash));
   const [activeHash, setActiveHash] = useState(() => window.location.hash || "#stock-dashboard");
   const logOffsetRef = useRef(0);
   const bootstrappedRef = useRef(false);
+  const updateCheckInFlightRef = useRef(false);
 
   const channel = selectedChannel === "wechat" ? "wechat" : selectedChannel === "dingtalk" ? "dingtalk" : selectedChannel === "email" ? "email" : selectedChannel === "wxpusher" ? "wxpusher" : "feishu";
   const feishuProfiles = useMemo(() => parseProfiles(config, "feishu_bot_profiles"), [config]);
@@ -2576,6 +2627,77 @@ function App() {
   const queryDraftChats = (profile) => api().query_feishu_chats_for_profile(profile);
   const recentDingtalkUser = (profile) => api().recent_dingtalk_user_for_profile(profile);
   const sendTestTarget = (targetId) => run("发送测试消息", () => api().send_test_target(config, targetId));
+  const runUpdateCheck = async ({ manual = false } = {}) => {
+    if (updateCheckInFlightRef.current) return null;
+    if (!api()?.check_update) {
+      if (manual) setUpdateInfo({ ok: false, kind: "error", error: "当前版本不支持检查更新" });
+      return null;
+    }
+    updateCheckInFlightRef.current = true;
+    if (manual) setUpdateBusy(true);
+    setUpdateInfo((current) => ({ ...(current || {}), loading: true }));
+    try {
+      const result = await api().check_update();
+      const checkedAt = Date.now();
+      const next = result?.ok
+        ? { ...result, checkedAt }
+        : { ...(result || {}), ok: false, kind: "error", error: result?.error || "检查更新失败", checkedAt };
+      setUpdateInfo(next);
+      return next;
+    } catch (error) {
+      const next = { ok: false, kind: "error", error: String(error?.message || error), checkedAt: Date.now() };
+      setUpdateInfo(next);
+      return next;
+    } finally {
+      updateCheckInFlightRef.current = false;
+      if (manual) setUpdateBusy(false);
+    }
+  };
+  const checkUpdate = () => runUpdateCheck({ manual: true });
+  const openLatestReleasePage = async () => {
+    const url = updateInfo?.releaseUrl || "";
+    if (api()?.open_latest_release_page) {
+      const result = await api().open_latest_release_page(url);
+      if (!result?.ok) {
+        setUpdateInfo((current) => ({ ...(current || {}), ok: false, kind: "error", error: result?.error || "打开最新版页面失败" }));
+      }
+      return;
+    }
+    window.open(url || "https://github.com/huangbwww/nga-wolf-watcher/releases/latest", "_blank", "noopener,noreferrer");
+  };
+  const openRepositoryPage = async () => {
+    if (api()?.open_repository_page) {
+      const result = await api().open_repository_page();
+      if (!result?.ok) {
+        setUpdateInfo((current) => ({ ...(current || {}), ok: false, kind: "error", error: result?.error || "打开 GitHub 主页失败" }));
+      }
+      return;
+    }
+    window.open("https://github.com/huangbwww/nga-wolf-watcher", "_blank", "noopener,noreferrer");
+  };
+  useEffect(() => {
+    let stopped = false;
+    let didInitialCheck = false;
+    let startupTimer = 0;
+    const tryInitialCheck = () => {
+      if (stopped || didInitialCheck || isClosing()) return;
+      if (!bootstrappedRef.current || !hasApiMethod("check_update")) return;
+      didInitialCheck = true;
+      window.clearInterval(startupTimer);
+      runUpdateCheck({ manual: false });
+    };
+    startupTimer = window.setInterval(tryInitialCheck, 2000);
+    const periodicTimer = window.setInterval(() => {
+      if (stopped || isClosing() || !bootstrappedRef.current || !hasApiMethod("check_update")) return;
+      runUpdateCheck({ manual: false });
+    }, 6 * 60 * 60 * 1000);
+    tryInitialCheck();
+    return () => {
+      stopped = true;
+      window.clearInterval(startupTimer);
+      window.clearInterval(periodicTimer);
+    };
+  }, []);
   const checkNgaCookie = async () => {
     if (!api()?.check_nga_cookie) {
       setCookieCheck({ kind: "error", text: "pywebview API 未就绪" });
@@ -2699,6 +2821,14 @@ function App() {
           <a href="#advanced" className={activeHash === "#advanced" ? "active" : ""} onClick={(event) => navigateTo("#advanced", event)}>高级配置</a>
           <a href="#logs" className={activeHash === "#logs" ? "active" : ""} onClick={(event) => navigateTo("#logs", event)}>日志</a>
         </nav>
+        <SidebarVersionPanel
+          info={updateInfo}
+          currentVersion={updateInfo?.currentVersion || status.appVersion}
+          busy={updateBusy}
+          onCheck={checkUpdate}
+          onOpenLatest={openLatestReleasePage}
+          onOpenRepo={openRepositoryPage}
+        />
       </aside>
 
       <section className={`content page-${activePage}`}>

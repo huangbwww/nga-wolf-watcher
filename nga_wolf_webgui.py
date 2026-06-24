@@ -12,14 +12,25 @@ import traceback
 import webbrowser
 from pathlib import Path
 from typing import Any
+from urllib.request import Request, urlopen
 
 import ai_analysis
 import nga_wolf_gui as legacy
 import stock_quotes
 import wechat_bot
 
+try:
+    from build_version import APP_VERSION
+except Exception:
+    APP_VERSION = "v1.5.2-dev"
+
 
 APP_TITLE = "NGA Wolf Watcher"
+GITHUB_REPO = "huangbwww/nga-wolf-watcher"
+REPO_PAGE_URL = f"https://github.com/{GITHUB_REPO}"
+LATEST_RELEASE_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+LATEST_RELEASE_PAGE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
+RELEASE_PAGE_PREFIX = f"https://github.com/{GITHUB_REPO}/releases/"
 _ACTIVE_WINDOW: Any | None = None
 _CLOSE_CONFIRMED = False
 _TRAY_ICON: Any | None = None
@@ -129,6 +140,38 @@ def _start_tray_icon_when_ready(api: "PreviewApi") -> None:
         _ensure_tray_icon(api)
     except Exception:
         logging.getLogger(__name__).debug("Failed to initialize tray icon on startup", exc_info=True)
+
+
+def _version_tuple(value: Any) -> tuple[int, int, int]:
+    text = str(value or "").strip().lower()
+    if text.startswith("v"):
+        text = text[1:]
+    text = text.split("-", 1)[0].split("+", 1)[0]
+    parts: list[int] = []
+    for part in text.split("."):
+        digits = "".join(ch for ch in part if ch.isdigit())
+        parts.append(int(digits or "0"))
+        if len(parts) == 3:
+            break
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3])
+
+
+def _is_newer_version(latest: Any, current: Any) -> bool:
+    return _version_tuple(latest) > _version_tuple(current)
+
+
+def _fetch_latest_release() -> dict[str, Any]:
+    request = Request(
+        LATEST_RELEASE_API_URL,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"NGA-Wolf-Watcher/{APP_VERSION}",
+        },
+    )
+    with urlopen(request, timeout=8) as response:
+        return json.loads(response.read().decode("utf-8"))
 
 
 def _pid_has_watcher_config(pid: int) -> bool:
@@ -443,6 +486,7 @@ class PreviewApi:
         return {
             "running": bool(pids),
             "pids": pids,
+            "appVersion": APP_VERSION,
             "configPath": str(legacy.config_path()),
             "runtimeConfigPath": str(legacy.watcher_config_path()),
             "statePath": str(legacy.resolved_state_path(legacy.load_config())),
@@ -454,6 +498,7 @@ class PreviewApi:
         return {
             "config": self._merged_config(),
             "defaults": dict(legacy.DEFAULT_CONFIG),
+            "appVersion": APP_VERSION,
             "status": self._status(),
             "options": {
                 "botChannels": ["feishu", "wechat"],
@@ -791,6 +836,38 @@ class PreviewApi:
             return {"ok": True, "path": str(path)}
         except Exception as exc:
             return {"ok": False, "error": str(exc), "path": str(path)}
+
+    def check_update(self) -> dict[str, Any]:
+        try:
+            release = _fetch_latest_release()
+        except Exception as exc:
+            return {"ok": False, "error": f"检查更新失败：{exc}", "currentVersion": APP_VERSION}
+        latest_version = str(release.get("tag_name") or "").strip()
+        release_url = str(release.get("html_url") or "").strip() or LATEST_RELEASE_PAGE_URL
+        return {
+            "ok": True,
+            "currentVersion": APP_VERSION,
+            "latestVersion": latest_version,
+            "hasUpdate": _is_newer_version(latest_version, APP_VERSION),
+            "releaseUrl": release_url,
+            "releaseName": str(release.get("name") or latest_version),
+            "publishedAt": str(release.get("published_at") or ""),
+        }
+
+    def open_latest_release_page(self, url: str = "") -> dict[str, Any]:
+        target = str(url or "").strip() or LATEST_RELEASE_PAGE_URL
+        if not target.startswith(RELEASE_PAGE_PREFIX):
+            target = LATEST_RELEASE_PAGE_URL
+        try:
+            return {"ok": bool(webbrowser.open(target)), "url": target}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "url": target}
+
+    def open_repository_page(self) -> dict[str, Any]:
+        try:
+            return {"ok": bool(webbrowser.open(REPO_PAGE_URL)), "url": REPO_PAGE_URL}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "url": REPO_PAGE_URL}
 
     def stock_bootstrap(self) -> dict[str, Any]:
         try:
