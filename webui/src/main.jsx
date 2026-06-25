@@ -992,23 +992,27 @@ function Notice({ message, kind = "info" }) {
   return <div className={`notice ${kind}`}>{message}</div>;
 }
 
-function SidebarVersionPanel({ info, currentVersion, busy, onCheck, onOpenLatest, onOpenRepo }) {
+function updateErrorMessage(error) {
+  const text = String(error?.message || error || "检查更新失败");
+  if (text.includes("403")) return "GitHub API 限流，稍后再试";
+  if (text.includes("timed out") || text.includes("timeout")) return "连接 GitHub 超时，稍后再试";
+  return text;
+}
+
+function SidebarVersionPanel({ info, currentVersion, busy, toast, onCheck, onOpenLatest, onOpenRepo }) {
   const latestVersion = info?.latestVersion || "";
-  const hasResult = info && !info.loading;
-  const isError = info?.kind === "error" || info?.ok === false;
-  const hasUpdate = hasResult && !isError && Boolean(info?.hasUpdate);
+  const hasResult = info && !info.loading && info.ok !== false;
+  const hasUpdate = hasResult && Boolean(info?.hasUpdate);
   const checkedAt = info?.checkedAt
     ? new Date(info.checkedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
     : "";
   const statusText = info?.loading
     ? "正在检测新版本..."
-    : isError
-      ? info?.error || "检查更新失败"
-      : hasResult
-        ? hasUpdate
-          ? `发现新版本 ${latestVersion}`
-          : `已是最新${checkedAt ? ` · ${checkedAt}` : ""}`
-        : "启动后自动检测，也可手动检查";
+    : hasResult
+      ? hasUpdate
+        ? `发现新版本 ${latestVersion}`
+        : `已是最新${checkedAt ? ` · ${checkedAt}` : ""}`
+      : "启动后自动检测，也可手动检查";
 
   return (
     <div className={`sidebar-version ${hasUpdate ? "has-update" : ""}`}>
@@ -1025,9 +1029,10 @@ function SidebarVersionPanel({ info, currentVersion, busy, onCheck, onOpenLatest
         <RefreshCw size={14} className={info?.loading ? "spin" : ""} />
         <span>{info?.loading ? "检测中" : "检测更新"}</span>
       </button>
-      <p className={`sidebar-version-status ${isError ? "error" : hasUpdate ? "success" : ""}`} title={statusText}>
+      <p className={`sidebar-version-status ${hasUpdate ? "success" : ""}`} title={statusText}>
         {statusText}
       </p>
+      {toast?.text ? <div className={`sidebar-version-toast ${toast.kind || "info"}`} role="status">{toast.text}</div> : null}
       {hasUpdate ? (
         <button className="sidebar-version-release" type="button" onClick={onOpenLatest}>
           <ExternalLink size={14} />
@@ -2186,11 +2191,13 @@ function App() {
   const [cookieCheck, setCookieCheck] = useState(null);
   const [updateInfo, setUpdateInfo] = useState(null);
   const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateToast, setUpdateToast] = useState(null);
   const [activePage, setActivePage] = useState(() => pageForHash(window.location.hash));
   const [activeHash, setActiveHash] = useState(() => window.location.hash || "#stock-dashboard");
   const logOffsetRef = useRef(0);
   const bootstrappedRef = useRef(false);
   const updateCheckInFlightRef = useRef(false);
+  const updateToastTimerRef = useRef(0);
 
   const channel = selectedChannel === "wechat" ? "wechat" : selectedChannel === "dingtalk" ? "dingtalk" : selectedChannel === "email" ? "email" : selectedChannel === "wxpusher" ? "wxpusher" : "feishu";
   const feishuProfiles = useMemo(() => parseProfiles(config, "feishu_bot_profiles"), [config]);
@@ -2627,10 +2634,25 @@ function App() {
   const queryDraftChats = (profile) => api().query_feishu_chats_for_profile(profile);
   const recentDingtalkUser = (profile) => api().recent_dingtalk_user_for_profile(profile);
   const sendTestTarget = (targetId) => run("发送测试消息", () => api().send_test_target(config, targetId));
+  const showUpdateToast = (text, kind = "error") => {
+    if (!text) return;
+    window.clearTimeout(updateToastTimerRef.current);
+    setUpdateToast({ text, kind });
+    updateToastTimerRef.current = window.setTimeout(() => setUpdateToast(null), 3600);
+  };
+  const clearTransientUpdateLoading = () => {
+    setUpdateInfo((current) => {
+      if (!current?.loading) return current;
+      const { loading: _loading, ...rest } = current;
+      return rest.latestVersion || rest.currentVersion || rest.releaseUrl || typeof rest.hasUpdate === "boolean"
+        ? rest
+        : null;
+    });
+  };
   const runUpdateCheck = async ({ manual = false } = {}) => {
     if (updateCheckInFlightRef.current) return null;
     if (!api()?.check_update) {
-      if (manual) setUpdateInfo({ ok: false, kind: "error", error: "当前版本不支持检查更新" });
+      if (manual) showUpdateToast("当前版本不支持检查更新");
       return null;
     }
     updateCheckInFlightRef.current = true;
@@ -2639,15 +2661,18 @@ function App() {
     try {
       const result = await api().check_update();
       const checkedAt = Date.now();
-      const next = result?.ok
-        ? { ...result, checkedAt }
-        : { ...(result || {}), ok: false, kind: "error", error: result?.error || "检查更新失败", checkedAt };
+      if (!result?.ok) {
+        if (manual) showUpdateToast(updateErrorMessage(result?.error || "检查更新失败"));
+        clearTransientUpdateLoading();
+        return result;
+      }
+      const next = { ...result, checkedAt };
       setUpdateInfo(next);
       return next;
     } catch (error) {
-      const next = { ok: false, kind: "error", error: String(error?.message || error), checkedAt: Date.now() };
-      setUpdateInfo(next);
-      return next;
+      if (manual) showUpdateToast(updateErrorMessage(error));
+      clearTransientUpdateLoading();
+      return null;
     } finally {
       updateCheckInFlightRef.current = false;
       if (manual) setUpdateBusy(false);
@@ -2659,7 +2684,7 @@ function App() {
     if (api()?.open_latest_release_page) {
       const result = await api().open_latest_release_page(url);
       if (!result?.ok) {
-        setUpdateInfo((current) => ({ ...(current || {}), ok: false, kind: "error", error: result?.error || "打开最新版页面失败" }));
+        showUpdateToast(updateErrorMessage(result?.error || "打开最新版页面失败"));
       }
       return;
     }
@@ -2669,7 +2694,7 @@ function App() {
     if (api()?.open_repository_page) {
       const result = await api().open_repository_page();
       if (!result?.ok) {
-        setUpdateInfo((current) => ({ ...(current || {}), ok: false, kind: "error", error: result?.error || "打开 GitHub 主页失败" }));
+        showUpdateToast(updateErrorMessage(result?.error || "打开 GitHub 主页失败"));
       }
       return;
     }
@@ -2698,6 +2723,7 @@ function App() {
       window.clearInterval(periodicTimer);
     };
   }, []);
+  useEffect(() => () => window.clearTimeout(updateToastTimerRef.current), []);
   const checkNgaCookie = async () => {
     if (!api()?.check_nga_cookie) {
       setCookieCheck({ kind: "error", text: "pywebview API 未就绪" });
@@ -2824,7 +2850,8 @@ function App() {
         <SidebarVersionPanel
           info={updateInfo}
           currentVersion={updateInfo?.currentVersion || status.appVersion}
-          busy={updateBusy}
+          busy={updateBusy || Boolean(updateInfo?.loading)}
+          toast={updateToast}
           onCheck={checkUpdate}
           onOpenLatest={openLatestReleasePage}
           onOpenRepo={openRepositoryPage}

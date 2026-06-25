@@ -319,8 +319,8 @@ export default function StockDashboard({ api }) {
       return wanted === "__all__" || wanted === "__none__" || nextGroups.includes(wanted) ? wanted : "__all__";
     });
     const nextItems = Array.isArray(next.items) ? next.items : [];
-    if (!chartTarget && nextItems[0]) {
-      setChartTarget({ type: "stock", code: nextItems[0].fullCode, name: nextItems[0].name });
+    if (nextItems[0]) {
+      setChartTarget((current) => current || { type: "stock", code: nextItems[0].fullCode, name: nextItems[0].name });
     }
   };
 

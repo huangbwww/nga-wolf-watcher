@@ -130,6 +130,7 @@ nav a.active {
 }
 
 .sidebar-version {
+  position: relative;
   margin-top: auto;
   display: grid;
   gap: 8px;
@@ -228,6 +229,27 @@ nav a.active {
 
 .sidebar-version-status.error {
   color: #fecaca;
+}
+
+.sidebar-version-toast {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  padding: 9px 10px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #172033;
+  color: #e2e8f0;
+  font-size: 12px;
+  line-height: 1.4;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
+}
+
+.sidebar-version-toast.error {
+  border-color: #fca5a5;
+  background: #3b1820;
+  color: #fee2e2;
 }
 
 .sidebar-version-release {
