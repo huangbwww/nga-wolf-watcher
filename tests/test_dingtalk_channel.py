@@ -200,7 +200,8 @@ class DingTalkChannelTests(unittest.TestCase):
 
         self.assertIn("## NGA 用户 最新 1 条", markdown)
         self.assertIn("- 时间: 2026-06-01 14:34:18", markdown)
-        self.assertIn("引用 stephanie1P（2026-06-01 14:31）：", markdown)
+        self.assertIn("\u3010stephanie1P\u3011\u88ab\u56de\u590d\u5185\u5bb9\uff1a", markdown)
+        self.assertIn("\u3010150058\u3011\u56de\u590d\u5185\u5bb9\uff1a", markdown)
         self.assertNotIn("[pid=", markdown)
         self.assertNotIn("Reply[/pid]", markdown)
 

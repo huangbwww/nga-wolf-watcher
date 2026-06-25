@@ -294,9 +294,69 @@ class WxPusherChannelTests(unittest.TestCase):
         self.assertIn("**第 1 条：自立自强，科学技术打头阵**", markdown)
         self.assertIn("**第 2 条：自立自强，科学技术打头阵**", markdown)
         self.assertNotIn("\n1. 自立自强", markdown)
-        self.assertIn('style="color:#d93025;font-weight:700;"', markdown)
+        self.assertIn("\u3010user\u3011\u88ab\u56de\u590d\u5185\u5bb9\uff1a", markdown)
+        self.assertIn("\u3010150058\u3011\u56de\u590d\u5185\u5bb9\uff1a", markdown)
+        self.assertNotIn('style="color:#d93025;font-weight:700;"', markdown)
         self.assertIn("\\# reply heading", markdown)
         self.assertIn("1\\. reply list", markdown)
+
+    def test_new_reply_title_uses_author_name_when_source_has_no_label(self) -> None:
+        post = nga_feishu_watch.NgaPost(
+            key="p1",
+            subject="\u81ea\u7acb\u81ea\u5f3a\uff0c\u79d1\u5b66\u6280\u672f\u6253\u5934\u9635",
+            content="plain reply",
+            url="https://bbs.nga.cn/read.php?tid=1&pid=1",
+            post_time="2026-06-11 16:50:06",
+            author="\u72fc\u5927",
+            author_id="150058",
+            source_type="author",
+            source_id="150058",
+        )
+
+        self.assertEqual(
+            nga_feishu_watch.new_reply_title(post),
+            "\u3010\u72fc\u5927\u3011\u5728\u3010\u81ea\u7acb\u81ea\u5f3a\uff0c\u79d1\u5b66\u6280\u672f\u6253\u5934\u9635\u3011\u65b0\u56de\u590d",
+        )
+
+    def test_new_reply_title_keeps_configured_source_label_first(self) -> None:
+        post = nga_feishu_watch.NgaPost(
+            key="p1",
+            subject="\u81ea\u7acb\u81ea\u5f3a\uff0c\u79d1\u5b66\u6280\u672f\u6253\u5934\u9635",
+            content="plain reply",
+            url="https://bbs.nga.cn/read.php?tid=1&pid=1",
+            post_time="2026-06-11 16:50:06",
+            author="\u72fc\u5927",
+            author_id="150058",
+            source_type="author",
+            source_id="150058",
+            source_label="\u91cd\u70b9\u7528\u6237",
+        )
+
+        self.assertEqual(
+            nga_feishu_watch.new_reply_title(post),
+            "\u3010\u91cd\u70b9\u7528\u6237\u3011\u5728\u3010\u81ea\u7acb\u81ea\u5f3a\uff0c\u79d1\u5b66\u6280\u672f\u6253\u5934\u9635\u3011\u65b0\u56de\u590d",
+        )
+
+    def test_new_reply_title_uses_thread_label_before_subject(self) -> None:
+        post = nga_feishu_watch.NgaPost(
+            key="p1",
+            subject="\u81ea\u7acb\u81ea\u5f3a\uff0c\u79d1\u5b66\u6280\u672f\u6253\u5934\u9635",
+            content="plain reply",
+            url="https://bbs.nga.cn/read.php?tid=45974302&pid=1",
+            post_time="2026-06-11 16:50:06",
+            author="150058",
+            author_id="150058",
+            source_type="thread_author",
+            source_id="45974302:150058",
+            source_label="\u72fc\u5927",
+            thread_id="45974302",
+            thread_label="\u4e3b\u8d34\u5907\u6ce8",
+        )
+
+        self.assertEqual(
+            nga_feishu_watch.new_reply_title(post),
+            "\u3010\u72fc\u5927\u3011\u5728\u3010\u4e3b\u8d34\u5907\u6ce8\u3011\u65b0\u56de\u590d",
+        )
 
     def test_push_channel_posts_uses_wxpusher_markdown_formatter(self) -> None:
         args = Namespace(
@@ -331,6 +391,7 @@ class WxPusherChannelTests(unittest.TestCase):
 
         self.assertEqual(captured["title"], "狼大最近 1 条回复")
         self.assertIn("**第 1 条：自立自强，科学技术打头阵**", captured["content"])
+        self.assertIn("\u3010150058\u3011\u56de\u590d\u5185\u5bb9\uff1a", captured["content"])
         self.assertNotIn("Generated at:", captured["content"])
         self.assertNotIn("\n1. 自立自强", captured["content"])
 

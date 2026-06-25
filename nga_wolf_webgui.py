@@ -22,7 +22,7 @@ import wechat_bot
 try:
     from build_version import APP_VERSION
 except Exception:
-    APP_VERSION = "v1.5.2-dev"
+    APP_VERSION = "v1.5.5"
 
 
 APP_TITLE = "NGA Wolf Watcher"

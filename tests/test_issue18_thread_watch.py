@@ -366,6 +366,23 @@ class Issue18ThreadWatchTests(unittest.TestCase):
         push_posts.assert_called_once()
         self.assertEqual(push_posts.call_args.args[1][0].author_id, "150058")
 
+    def test_thread_author_watch_inherits_author_and_thread_labels(self) -> None:
+        args = Namespace(
+            watch_mode="thread_author",
+            default_author_id="",
+            default_tid="",
+            watch_author_ids="150058=\u72fc\u5927",
+            preset_thread_ids="45974302=\u4e3b\u8d34\u5907\u6ce8",
+            listen_rules='[{"id":"r1","mode":"thread_author","tid":"45974302","author_id":"150058","target_ids":[]}]',
+            thread_author_watches="",
+        )
+
+        watches = nga_feishu_watch.thread_author_watches_for_watch(args)
+
+        self.assertEqual(len(watches), 1)
+        self.assertEqual(watches[0].label, "\u72fc\u5927")
+        self.assertEqual(watches[0].thread_label, "\u4e3b\u8d34\u5907\u6ce8")
+
 
 if __name__ == "__main__":
     unittest.main()
