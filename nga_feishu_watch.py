@@ -7201,17 +7201,81 @@ def collect_posts_with_retries(args: argparse.Namespace, count_pages: int | None
     )
 
 
+def post_needs_forum_author(post: NgaPost) -> bool:
+    author = str(post.author or "").strip()
+    author_id = str(post.author_id or "").strip()
+    if not author:
+        return True
+    return bool(author_id and author == author_id) or bool(re.fullmatch(r"\d+", author))
+
+
+def post_matches_identity(candidate: NgaPost, original: NgaPost) -> bool:
+    keys = {str(original.key or "").strip(), str(original.canonical_key or "").strip()}
+    keys.discard("")
+    candidate_keys = {str(candidate.key or "").strip(), str(candidate.canonical_key or "").strip()}
+    candidate_keys.discard("")
+    return bool(keys & candidate_keys)
+
+
+def merge_enriched_post(original: NgaPost, enriched: NgaPost) -> NgaPost:
+    return NgaPost(
+        key=original.key,
+        subject=enriched.subject or original.subject,
+        content=enriched.content or original.content,
+        url=original.url or enriched.url,
+        post_time=enriched.post_time or original.post_time,
+        author=enriched.author or original.author,
+        author_id=enriched.author_id or original.author_id,
+        floor=enriched.floor or original.floor,
+        image_urls=enriched.image_urls or original.image_urls,
+        quote_image_urls=enriched.quote_image_urls or original.quote_image_urls,
+        reply_image_urls=enriched.reply_image_urls or original.reply_image_urls,
+        source_type=original.source_type,
+        source_id=original.source_id,
+        source_label=original.source_label,
+        canonical_key=original.canonical_key or enriched.canonical_key or original.key,
+        thread_id=original.thread_id or enriched.thread_id,
+        thread_label=original.thread_label or enriched.thread_label,
+    )
+
+
+def enrich_author_posts_from_threads(args: argparse.Namespace, posts: list[NgaPost], author_id: str = "") -> list[NgaPost]:
+    if not posts:
+        return posts
+    enriched_by_thread: dict[tuple[str, str], list[NgaPost]] = {}
+    result: list[NgaPost] = []
+    for post in posts:
+        if not post_needs_forum_author(post):
+            result.append(post)
+            continue
+        tid = post_tid(post)
+        effective_author_id = str(post.author_id or author_id or "").strip()
+        if not tid or not effective_author_id:
+            result.append(post)
+            continue
+        cache_key = (tid, effective_author_id)
+        if cache_key not in enriched_by_thread:
+            try:
+                enriched_by_thread[cache_key] = collect_thread_tail_with_retries(args, tid, 20, effective_author_id)
+            except Exception as exc:
+                print(f"补全用户 {effective_author_id} 在帖子 {tid} 的论坛用户名失败，继续使用原始作者字段: {exc}", file=sys.stderr)
+                enriched_by_thread[cache_key] = []
+        enriched = next((candidate for candidate in enriched_by_thread[cache_key] if post_matches_identity(candidate, post)), None)
+        result.append(merge_enriched_post(post, enriched) if enriched else post)
+    return result
+
+
 def collect_posts_for_author_with_retries(args: argparse.Namespace, author_id: str, count_pages: int | None = None) -> list[NgaPost]:
     cloned = copy.copy(args)
     cloned.author_id = author_id
-    return collect_posts_with_retries(cloned, count_pages)
+    return enrich_author_posts_from_threads(args, collect_posts_with_retries(cloned, count_pages), author_id)
 
 
 def collect_replies_with_retries(args: argparse.Namespace, author_id: str, count: int) -> list[NgaPost]:
     cookie = args.cookie or os.getenv("NGA_COOKIE", "")
     if not cookie:
         raise SystemExit("缺少 NGA_COOKIE。请从已登录 bbs.nga.cn 的浏览器会话复制 Cookie。")
-    return collect_recent_replies(
+    posts = collect_recent_replies(
         author_id,
         count,
         cookie,
@@ -7224,6 +7288,7 @@ def collect_replies_with_retries(args: argparse.Namespace, author_id: str, count
         getattr(args, "nga_cache_ttl", DEFAULT_NGA_CACHE_TTL),
         True,
     )
+    return enrich_author_posts_from_threads(args, posts, author_id)
 
 
 def collect_replies_in_days_with_retries(args: argparse.Namespace, author_id: str, days: int) -> list[NgaPost]:
@@ -7231,7 +7296,7 @@ def collect_replies_in_days_with_retries(args: argparse.Namespace, author_id: st
     if not cookie:
         raise SystemExit("缺少 NGA_COOKIE。请从已登录 bbs.nga.cn 的浏览器会话复制 Cookie。")
     max_pages = int(os.getenv("NGA_DAILY_PACK_MAX_PAGES", str(DEFAULT_DAILY_PACK_MAX_PAGES)))
-    return collect_replies_in_natural_days(
+    posts = collect_replies_in_natural_days(
         author_id,
         days,
         cookie,
@@ -7245,6 +7310,7 @@ def collect_replies_in_days_with_retries(args: argparse.Namespace, author_id: st
         True,
         max_pages,
     )
+    return enrich_author_posts_from_threads(args, posts, author_id)
 
 
 def collect_thread_tail_with_retries(args: argparse.Namespace, tid: str, count: int, author_id: str = "") -> list[NgaPost]:
