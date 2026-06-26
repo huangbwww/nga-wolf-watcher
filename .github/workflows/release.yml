@@ -241,6 +241,7 @@ jobs:
   publish:
     name: Publish GitHub release
     runs-on: ubuntu-24.04
+    if: ${{ !failure() && !cancelled() }}
     needs:
       - build-linux
       - build-windows
