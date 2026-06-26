@@ -170,6 +170,10 @@ More source runtime, pywebview build, BAT usage, and release packaging notes are
 
 Please open an [Issue](https://github.com/huangbwww/nga-wolf-watcher/issues) for bugs, usage problems, or feature ideas.
 
+## License
+
+This project is licensed under the [MIT License](LICENSE).
+
 ## Disclaimer
 
 This project is for personal technical research and learning. You are responsible for your own use.

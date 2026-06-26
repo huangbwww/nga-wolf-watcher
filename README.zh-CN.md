@@ -170,6 +170,10 @@ python ngawolf_cli.py run
 
 遇到 bug 或使用问题，欢迎提 [Issue](https://github.com/huangbwww/nga-wolf-watcher/issues)。功能建议也可以提，NGA 相关、股票相关，或者类似的个人工具需求都可以。
 
+## 许可证
+
+本项目基于 [MIT License](LICENSE) 开源。
+
 ## 免责声明
 
 本项目仅供个人技术研究和学习使用，使用者需自行承担使用风险。
