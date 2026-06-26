@@ -18,6 +18,8 @@
 
 <p align="center">
   <img alt="Release" src="https://img.shields.io/github/v/release/huangbwww/nga-wolf-watcher?style=flat-square">
+  <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/huangbwww/nga-wolf-watcher/ci.yml?branch=main&label=CI&style=flat-square">
+  <img alt="License" src="https://img.shields.io/github/license/huangbwww/nga-wolf-watcher?style=flat-square">
   <img alt="Windows" src="https://img.shields.io/badge/Windows-setup%20%2F%20portable-2563eb?style=flat-square">
   <img alt="Linux" src="https://img.shields.io/badge/Linux-x86__64%20%2F%20aarch64-16a34a?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12+-3776ab?style=flat-square">
@@ -169,6 +171,8 @@ python ngawolf_cli.py run
 ## 反馈
 
 遇到 bug 或使用问题，欢迎提 [Issue](https://github.com/huangbwww/nga-wolf-watcher/issues)。功能建议也可以提，NGA 相关、股票相关，或者类似的个人工具需求都可以。
+
+提交修改前可以先看 [Contributing](CONTRIBUTING.md)。涉及 Cookie、Token、Webhook 等敏感信息的问题请参考 [Security Policy](SECURITY.md)。
 
 ## 许可证
 
