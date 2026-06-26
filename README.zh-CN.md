@@ -21,6 +21,7 @@
   <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/huangbwww/nga-wolf-watcher/ci.yml?branch=main&label=CI&style=flat-square">
   <img alt="License" src="https://img.shields.io/github/license/huangbwww/nga-wolf-watcher?style=flat-square">
   <img alt="Windows" src="https://img.shields.io/badge/Windows-setup%20%2F%20portable-2563eb?style=flat-square">
+  <img alt="macOS" src="https://img.shields.io/badge/macOS-arm64%20experimental-111827?style=flat-square">
   <img alt="Linux" src="https://img.shields.io/badge/Linux-x86__64%20%2F%20aarch64-16a34a?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12+-3776ab?style=flat-square">
 </p>
@@ -32,6 +33,7 @@
 | 你想做什么 | 推荐入口 | 说明 |
 | --- | --- | --- |
 | Windows 日常使用 | 下载 `nga-wolf-watcher-vX.Y.Z-windows-x86_64-setup.exe` | 安装后从开始菜单启动；也可以下载 `portable.zip` 免安装运行。 |
+| macOS 试用 | 下载 `nga-wolf-watcher-vX.Y.Z-macos-arm64-experimental.dmg` | 面向 Apple Silicon Mac 的未签名实验版。 |
 | Linux 服务器后台运行 | `curl \| sudo bash` 一行安装 | 安装为 `ngawolf` 命令，支持 TUI 配置、systemd、日志和后台管理。 |
 | 配置飞书/微信/钉钉/邮箱/WxPusher | 先打开 GUI 或运行 `ngawolf config` | 推荐先用交互界面添加通道、用户、帖子和监听规则。 |
 | 查参数或手动改配置 | 看 [配置参考](docs/configuration.zh-CN.md) | 包含通道字段、监听模式、群内命令、配置路径和排查命令。 |
@@ -45,6 +47,12 @@
 5. 第一次启动前建议先执行“初始化已读”，避免历史回复一次性推送。
 
 Windows 安装版支持简体中文和英文安装界面。安装版、便携版和旧版 exe 复用同一个数据目录：`%LOCALAPPDATA%\NGA Wolf Watcher\`。
+
+### macOS
+
+从 [Releases](https://github.com/huangbwww/nga-wolf-watcher/releases/latest) 下载 `nga-wolf-watcher-vX.Y.Z-macos-arm64-experimental.dmg`，打开后把 `NGA-Wolf-Watcher.app` 拖到 `Applications`。Release 里也会保留 `.zip` 包作为备用。
+
+macOS 包目前是未签名实验版。首次打开如果被系统拦截，可以右键应用选择“打开”，或到系统设置里允许打开。本地配置、状态和日志默认保存在 `~/.nga_wolf_watcher/`。
 
 ### Linux
 
@@ -137,6 +145,7 @@ v1.5.0 开始，Windows 桌面端融合了 NGA 社区分享的牛股计算器思
 | 运行方式 | 配置 | 状态和日志 |
 | --- | --- | --- |
 | Windows GUI | `%LOCALAPPDATA%\NGA Wolf Watcher\config.json` | 同目录下的 `.nga_seen.json` 和日志文件 |
+| macOS 实验版 | `~/.nga_wolf_watcher/config.json` | 同目录下的 `.nga_seen.json` 和日志文件 |
 | Linux 一行安装 | `/etc/ngawolf/config.json` | `/var/lib/ngawolf`、`/var/log/ngawolf/watcher.log` |
 | 源码/普通 CLI | `~/.config/ngawolf/config.json` | `~/.local/state/ngawolf/` |
 

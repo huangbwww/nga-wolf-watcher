@@ -22,7 +22,7 @@ import wechat_bot
 try:
     from build_version import APP_VERSION
 except Exception:
-    APP_VERSION = "v1.5.6"
+    APP_VERSION = "v1.5.7"
 
 
 APP_TITLE = "NGA Wolf Watcher"
@@ -31,10 +31,12 @@ REPO_PAGE_URL = f"https://github.com/{GITHUB_REPO}"
 LATEST_RELEASE_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 LATEST_RELEASE_PAGE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
 RELEASE_PAGE_PREFIX = f"https://github.com/{GITHUB_REPO}/releases/"
+_PLATFORM_ASSET_KEYWORD = {"win32": "windows", "darwin": "macos"}.get(sys.platform, sys.platform)
 _ACTIVE_WINDOW: Any | None = None
 _CLOSE_CONFIRMED = False
 _TRAY_ICON: Any | None = None
 _TRAY_LOCK = threading.Lock()
+_MAC_QUIT_REQUESTED = False
 
 
 def _set_active_window(window: Any | None) -> None:
@@ -46,8 +48,96 @@ def _set_active_window(window: Any | None) -> None:
 def _request_frontend_close_dialog() -> bool | None:
     if _CLOSE_CONFIRMED:
         return None
+    if sys.platform == "darwin":
+        if _MAC_QUIT_REQUESTED or _mac_command_key_equivalent() == "q":
+            _trigger_frontend_close("nga-tray-exit-trigger")
+        else:
+            _hide_active_window()
+        return False
     _trigger_frontend_close("nga-close-request-trigger")
     return False
+
+
+def _install_macos_lifecycle_hooks() -> None:
+    if sys.platform != "darwin":
+        return
+    try:
+        import AppKit
+        import Foundation
+        import webview.platforms.cocoa as cocoa
+    except Exception:
+        return
+    if getattr(cocoa.BrowserView, "_ngawolf_lifecycle_hooks_installed", False):
+        return
+
+    original_should_terminate = cocoa.BrowserView.AppDelegate.applicationShouldTerminate_
+    original_key_down = cocoa.BrowserView.WebKitHost.keyDown_
+
+    def application_should_terminate(self: Any, app: Any) -> Any:
+        global _MAC_QUIT_REQUESTED
+        _MAC_QUIT_REQUESTED = True
+        try:
+            return original_should_terminate(self, app)
+        finally:
+            _MAC_QUIT_REQUESTED = False
+
+    def application_should_handle_reopen(self: Any, app: Any, has_visible_windows: bool) -> Any:
+        _show_active_window()
+        return Foundation.YES
+
+    def key_down(self: Any, event: Any) -> None:
+        try:
+            if event.modifierFlags() & AppKit.NSCommandKeyMask:
+                chars = event.charactersIgnoringModifiers() or event.characters() or ""
+                if str(chars).lower() == "q":
+                    _trigger_frontend_close("nga-tray-exit-trigger")
+                    return
+        except Exception:
+            pass
+        original_key_down(self, event)
+
+    cocoa.BrowserView.AppDelegate.applicationShouldTerminate_ = application_should_terminate
+    cocoa.BrowserView.AppDelegate.applicationShouldHandleReopen_hasVisibleWindows_ = application_should_handle_reopen
+    cocoa.BrowserView.WebKitHost.keyDown_ = key_down
+    cocoa.BrowserView._ngawolf_lifecycle_hooks_installed = True
+
+
+def _mac_command_key_equivalent() -> str:
+    if sys.platform != "darwin":
+        return ""
+    try:
+        import AppKit
+
+        event = AppKit.NSApp.currentEvent()
+        if event is None or event.type() != AppKit.NSKeyDown:
+            return ""
+        if not (event.modifierFlags() & AppKit.NSCommandKeyMask):
+            return ""
+        chars = event.charactersIgnoringModifiers() or event.characters() or ""
+        return str(chars).lower()
+    except Exception:
+        return ""
+
+
+def _hide_active_window() -> None:
+    window = _ACTIVE_WINDOW
+    if window is None:
+        return
+    try:
+        window.hide()
+    except Exception:
+        pass
+
+
+def _show_active_window() -> None:
+    window = _ACTIVE_WINDOW
+    if window is None:
+        return
+    try:
+        window.show()
+        window.restore()
+    except Exception:
+        pass
 
 
 def _trigger_frontend_close(element_id: str) -> None:
@@ -487,6 +577,7 @@ class PreviewApi:
             "running": bool(pids),
             "pids": pids,
             "appVersion": APP_VERSION,
+            "platform": sys.platform,
             "configPath": str(legacy.config_path()),
             "runtimeConfigPath": str(legacy.watcher_config_path()),
             "statePath": str(legacy.resolved_state_path(legacy.load_config())),
@@ -844,11 +935,20 @@ class PreviewApi:
             return {"ok": False, "error": f"检查更新失败：{exc}", "currentVersion": APP_VERSION}
         latest_version = str(release.get("tag_name") or "").strip()
         release_url = str(release.get("html_url") or "").strip() or LATEST_RELEASE_PAGE_URL
+        has_update = _is_newer_version(latest_version, APP_VERSION)
+        if has_update:
+            assets = release.get("assets") or []
+            has_platform_asset = any(
+                _PLATFORM_ASSET_KEYWORD in (asset.get("name") or "").lower()
+                for asset in assets
+            )
+            if not has_platform_asset:
+                has_update = False
         return {
             "ok": True,
             "currentVersion": APP_VERSION,
             "latestVersion": latest_version,
-            "hasUpdate": _is_newer_version(latest_version, APP_VERSION),
+            "hasUpdate": has_update,
             "releaseUrl": release_url,
             "releaseName": str(release.get("name") or latest_version),
             "publishedAt": str(release.get("published_at") or ""),
@@ -975,6 +1075,7 @@ def run_preview() -> None:
     except ImportError as exc:
         raise SystemExit("pywebview is not installed. Run: python -m pip install pywebview") from exc
 
+    _install_macos_lifecycle_hooks()
     api = PreviewApi()
     logging.getLogger("pywebview").addFilter(WebViewShutdownNoiseFilter())
     index_path = webui_index_path()

@@ -2209,6 +2209,7 @@ function App() {
   const listenRules = useMemo(() => parseListenRules(config), [config]);
   const authorRows = useMemo(() => parseTargetList(config.watch_author_ids, config.default_author_id), [config.watch_author_ids, config.default_author_id]);
   const threadRows = useMemo(() => parseTargetList(config.preset_thread_ids, config.default_tid), [config.preset_thread_ids, config.default_tid]);
+  const isMac = status.platform === "darwin";
   const configSnapshot = useMemo(() => JSON.stringify(config), [config]);
   const isDirty = Boolean(savedSnapshot && configSnapshot !== savedSnapshot);
   const setStructured = (patch) => {
@@ -2998,13 +2999,15 @@ function App() {
           </div>
         </Section>
 
-        <Section icon={Settings} title="关闭行为" description="控制点击窗口关闭按钮时每次询问、默认隐藏到托盘，还是默认退出程序。关闭弹窗里勾选记住选择后也会写入这里。" defaultOpen={false}>
-          <div className="grid">
-            {fieldGroups.close.map((spec) => (
-              <Field key={spec[0]} config={config} setConfig={setConfig} spec={spec} />
-            ))}
-          </div>
-        </Section>
+        {!isMac && (
+          <Section icon={Settings} title="关闭行为" description="控制点击窗口关闭按钮时每次询问、默认隐藏到托盘，还是默认退出程序。关闭弹窗里勾选记住选择后也会写入这里。" defaultOpen={false}>
+            <div className="grid">
+              {fieldGroups.close.map((spec) => (
+                <Field key={spec[0]} config={config} setConfig={setConfig} spec={spec} />
+              ))}
+            </div>
+          </Section>
+        )}
 
         <Section icon={TerminalSquare} title="高级配置" description="保留全部旧配置字段，适合排查或迁移。" defaultOpen={false} sectionId="advanced" hint={sectionHint("advanced")}>
           <div id="advanced" className="json-panel">

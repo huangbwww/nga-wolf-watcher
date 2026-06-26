@@ -9,6 +9,10 @@ on:
       tag:
         description: 'Release tag, for example v1.4.0'
         required: true
+      platforms:
+        description: 'Platforms to build (comma-separated: windows,macos,linux)'
+        required: false
+        default: 'windows,macos,linux'
 
 permissions:
   contents: write
@@ -19,6 +23,8 @@ env:
 # Standard asset names:
 # - nga-wolf-watcher-${TAG}-windows-x86_64-setup.exe
 # - nga-wolf-watcher-${TAG}-windows-x86_64-portable.zip
+# - nga-wolf-watcher-${TAG}-macos-arm64-experimental.zip
+# - nga-wolf-watcher-${TAG}-macos-arm64-experimental.dmg
 # - nga-wolf-watcher-${TAG}-linux-x86_64.tar.gz
 # - nga-wolf-watcher-${TAG}-linux-aarch64.tar.gz
 # - install-linux.sh
@@ -26,6 +32,7 @@ env:
 
 jobs:
   build-linux:
+    if: ${{ github.event_name == 'push' || contains(inputs.platforms, 'linux') }}
     name: Linux CLI ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -40,8 +47,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ env.TAG }}
 
       - name: Validate release tag
         shell: bash
@@ -85,14 +90,13 @@ jobs:
           path: release/*.tar.gz
 
   build-windows:
+    if: ${{ github.event_name == 'push' || contains(inputs.platforms, 'windows') }}
     name: Windows installer and portable
     runs-on: windows-2025
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ env.TAG }}
 
       - name: Validate release tag
         shell: pwsh
@@ -163,18 +167,88 @@ jobs:
             release/*.zip
             release/*.exe
 
+  build-macos:
+    if: ${{ github.event_name == 'push' || contains(inputs.platforms, 'macos') }}
+    name: macOS app arm64
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "Release tag must match vX.Y.Z, got: $TAG" >&2
+            exit 1
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Build web UI
+        working-directory: webui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Stamp app version
+        run: echo "APP_VERSION = '$TAG'" > build_version.py
+
+      - name: Build macOS app
+        run: python -m PyInstaller --clean --noconfirm NGA-Wolf-Watcher-macOS.spec
+
+      - name: Pack macOS app
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ARCH="$(uname -m)"
+          if [[ "$ARCH" == "arm64" ]]; then
+            ASSET_ARCH="arm64"
+          else
+            ASSET_ARCH="$ARCH"
+          fi
+          mkdir -p release
+          ditto -c -k --keepParent dist/NGA-Wolf-Watcher.app "release/nga-wolf-watcher-${TAG}-macos-${ASSET_ARCH}-experimental.zip"
+          bash tools/build-macos-dmg.sh \
+            dist/NGA-Wolf-Watcher.app \
+            "release/nga-wolf-watcher-${TAG}-macos-${ASSET_ARCH}-experimental.dmg" \
+            "NGA Wolf Watcher"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-arm64
+          path: |
+            release/*.zip
+            release/*.dmg
+
   publish:
     name: Publish GitHub release
     runs-on: ubuntu-24.04
     needs:
       - build-linux
       - build-windows
+      - build-macos
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ env.TAG }}
 
       - name: Download release artifacts
         uses: actions/download-artifact@v4
@@ -204,5 +278,10 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" release-assets/* --clobber
           else
-            gh release create "$TAG" release-assets/* --title "$TAG" --generate-notes
+            NOTES_FILE="docs/release-notes/${TAG}.md"
+            if [ -f "$NOTES_FILE" ]; then
+              gh release create "$TAG" release-assets/* --title "$TAG" --notes-file "$NOTES_FILE"
+            else
+              gh release create "$TAG" release-assets/* --title "$TAG" --generate-notes
+            fi
           fi

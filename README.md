@@ -21,6 +21,7 @@
   <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/huangbwww/nga-wolf-watcher/ci.yml?branch=main&label=CI&style=flat-square">
   <img alt="License" src="https://img.shields.io/github/license/huangbwww/nga-wolf-watcher?style=flat-square">
   <img alt="Windows" src="https://img.shields.io/badge/Windows-setup%20%2F%20portable-2563eb?style=flat-square">
+  <img alt="macOS" src="https://img.shields.io/badge/macOS-arm64%20experimental-111827?style=flat-square">
   <img alt="Linux" src="https://img.shields.io/badge/Linux-x86__64%20%2F%20aarch64-16a34a?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12+-3776ab?style=flat-square">
 </p>
@@ -32,6 +33,7 @@
 | Goal | Recommended Entry | Notes |
 | --- | --- | --- |
 | Use it on Windows | Download `nga-wolf-watcher-vX.Y.Z-windows-x86_64-setup.exe` | Use `portable.zip` if you do not want to install. |
+| Try it on macOS | Download `nga-wolf-watcher-vX.Y.Z-macos-arm64-experimental.dmg` | Unsigned experimental build for Apple Silicon Macs. |
 | Run it on a Linux server | Install with one shell command | Creates the `ngawolf` command, TUI setup, logs, and background service helpers. |
 | Configure channels and listen rules | Use the GUI or `ngawolf config` | Add push channels, NGA users, thread IDs, and listen rules interactively. |
 | Check advanced settings | Read [Configuration](docs/configuration.md) | Channel fields, commands, config paths, watch modes, and troubleshooting commands. |
@@ -45,6 +47,12 @@
 5. Before the first long-running watch, mark existing replies as seen to avoid pushing old history in bulk.
 
 The Windows setup installer supports Simplified Chinese and English. Setup, portable, and older onefile builds use the same data directory: `%LOCALAPPDATA%\NGA Wolf Watcher\`.
+
+### macOS
+
+Download `nga-wolf-watcher-vX.Y.Z-macos-arm64-experimental.dmg` from [Releases](https://github.com/huangbwww/nga-wolf-watcher/releases/latest), open it, then drag `NGA-Wolf-Watcher.app` to `Applications`. A `.zip` package is also published as a fallback.
+
+The macOS build is currently experimental and unsigned. If macOS blocks the first launch, right-click the app and choose Open, or allow it in System Settings. Local config, state, and logs are stored under `~/.nga_wolf_watcher/`.
 
 ### Linux
 
@@ -137,6 +145,7 @@ The single-stock workbench supports fast stock switching, intraday/K-line charts
 | Runtime | Config | State And Logs |
 | --- | --- | --- |
 | Windows GUI | `%LOCALAPPDATA%\NGA Wolf Watcher\config.json` | `.nga_seen.json` and logs in the same directory |
+| macOS experimental app | `~/.nga_wolf_watcher/config.json` | `.nga_seen.json` and logs in the same directory |
 | Linux one-command install | `/etc/ngawolf/config.json` | `/var/lib/ngawolf`, `/var/log/ngawolf/watcher.log` |
 | Source / plain CLI | `~/.config/ngawolf/config.json` | `~/.local/state/ngawolf/` |
 

@@ -1,6 +1,6 @@
 # 安装和运行
 
-Windows、Linux、源码运行和发布包构建说明。
+Windows、macOS、Linux、源码运行和发布包构建说明。
 
 > 详细参考文档。第一次使用建议先看仓库首页的快速开始。
 
@@ -11,13 +11,15 @@ Release 资产统一使用小写项目前缀，并在文件名里写明版本、
 ```text
 nga-wolf-watcher-vX.Y.Z-windows-x86_64-setup.exe
 nga-wolf-watcher-vX.Y.Z-windows-x86_64-portable.zip
+nga-wolf-watcher-vX.Y.Z-macos-arm64-experimental.dmg
+nga-wolf-watcher-vX.Y.Z-macos-arm64-experimental.zip
 nga-wolf-watcher-vX.Y.Z-linux-x86_64.tar.gz
 nga-wolf-watcher-vX.Y.Z-linux-aarch64.tar.gz
 install-linux.sh
 SHA256SUMS
 ```
 
-Windows 的 `setup.exe` 和 `portable.zip` 会替代旧的单文件大 exe。Linux 压缩包内是无界面的 `ngawolf` CLI；`install-linux.sh` 会优先安装这些二进制包，必要时才回退到源码安装。
+Windows 的 `setup.exe` 和 `portable.zip` 会替代旧的单文件大 exe。macOS 资产包含面向 Apple Silicon Mac 的未签名实验版 `.dmg`，里面带 Applications 快捷方式，同时也保留 `.zip` 备用包。Linux 压缩包内是无界面的 `ngawolf` CLI；`install-linux.sh` 会优先安装这些二进制包，必要时才回退到源码安装。
 
 Windows 安装版支持简体中文和英文安装界面。当前 Windows Release 资产还没有做代码签名，所以 Windows SmartScreen 可能提示未知发布者。需要校验文件时，用同一个 Release 里的 `SHA256SUMS`。
 
@@ -37,6 +39,14 @@ Windows 安装版支持简体中文和英文安装界面。当前 Windows Releas
 第一次启动前建议保持“首次启动前自动初始化已读”开启。它会先把当前抓到的 NGA 回复标记为已读，避免历史回复一次性刷到飞书。
 
 安装版和便携版会复用旧 EXE 的同一个数据目录。GUI 会把本地密钥保存到 `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`。运行状态默认保存在同目录的 `.nga_seen.json`。不要外发这些文件。
+
+## macOS 实验版
+
+从 [Releases](https://github.com/huangbwww/nga-wolf-watcher/releases/latest) 下载 `nga-wolf-watcher-vX.Y.Z-macos-arm64-experimental.dmg`，打开后把 `NGA-Wolf-Watcher.app` 拖到 `Applications`。如果 DMG 方式在你的机器上不可用，可以下载备用 `.zip` 包，解压后打开 `NGA-Wolf-Watcher.app`。
+
+这个包目前面向 Apple Silicon Mac，没有签名，也没有做 Apple 公证。首次打开时，macOS 可能会提示无法验证开发者。确认信任该 Release 文件后，可以右键应用选择“打开”，或到系统设置里允许打开。需要校验下载文件时，用同一个 Release 里的 `SHA256SUMS`。
+
+macOS 应用会把本地密钥保存到 `~/.nga_wolf_watcher/config.json`。运行状态和日志也在同一目录。不要外发这些文件。
 
 ## 使用 BAT
 
@@ -193,3 +203,20 @@ python -m PyInstaller --noconfirm --clean .\NGA-Wolf-Watcher-Web-Onedir.spec
 ```
 
 便携版程序目录是 `dist\NGA-Wolf-Watcher\`。Release 资产命名为 `nga-wolf-watcher-vX.Y.Z-windows-x86_64-portable.zip` 和 `nga-wolf-watcher-vX.Y.Z-windows-x86_64-setup.exe`。
+
+## 打包 macOS 实验版
+
+先构建前端，再把 pywebview 客户端打包成未签名 `.app`：
+
+```bash
+cd webui
+npm ci
+npm run build
+cd ..
+python -m pip install -r requirements.txt pyinstaller
+python -m PyInstaller --noconfirm --clean NGA-Wolf-Watcher-macOS.spec
+bash tools/build-macos-dmg.sh dist/NGA-Wolf-Watcher.app "release/nga-wolf-watcher-vX.Y.Z-macos-arm64-experimental.dmg" "NGA Wolf Watcher"
+ditto -c -k --keepParent dist/NGA-Wolf-Watcher.app "release/nga-wolf-watcher-vX.Y.Z-macos-arm64-experimental.zip"
+```
+
+在配置代码签名和 Apple 公证前，macOS 包都先按 experimental 处理。
