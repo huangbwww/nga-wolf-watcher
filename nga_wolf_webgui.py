@@ -22,7 +22,7 @@ import wechat_bot
 try:
     from build_version import APP_VERSION
 except Exception:
-    APP_VERSION = "v1.5.7"
+    APP_VERSION = "v1.5.8"
 
 
 APP_TITLE = "NGA Wolf Watcher"
@@ -1020,15 +1020,15 @@ class PreviewApi:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    def stock_chart(self, code: str, period: str = "day") -> dict[str, Any]:
+    def stock_chart(self, code: str, period: str = "day", date: str = "") -> dict[str, Any]:
         try:
-            return stock_quotes.chart_data(legacy.data_dir(), code, period=str(period or "day"))
+            return stock_quotes.chart_data(legacy.data_dir(), code, period=str(period or "day"), date=str(date or ""))
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    def stock_market_chart(self, code: str, period: str = "minute") -> dict[str, Any]:
+    def stock_market_chart(self, code: str, period: str = "minute", date: str = "") -> dict[str, Any]:
         try:
-            return stock_quotes.market_chart(code, period=str(period or "minute"))
+            return stock_quotes.market_chart(code, period=str(period or "minute"), date=str(date or ""))
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 

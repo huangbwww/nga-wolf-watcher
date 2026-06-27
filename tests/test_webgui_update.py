@@ -39,6 +39,7 @@ def test_check_update_returns_latest_release(monkeypatch) -> None:
                 "html_url": "https://github.com/huangbwww/nga-wolf-watcher/releases/tag/v1.5.3",
                 "name": "v1.5.3",
                 "published_at": "2026-06-24T00:00:00Z",
+                "assets": [{"name": f"nga-wolf-{nga_wolf_webgui._PLATFORM_ASSET_KEYWORD}.zip"}],
             }
         )
 

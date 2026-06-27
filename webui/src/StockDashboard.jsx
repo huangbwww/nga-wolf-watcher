@@ -73,6 +73,43 @@ function formatPct(value) {
   return "0.00%";
 }
 
+function formatTradeDate(value) {
+  const raw = String(value || "").replace(/\D/g, "");
+  if (raw.length === 8) return `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`;
+  return String(value || "");
+}
+
+function hasChartData(payload) {
+  if (!payload) return false;
+  if (payload.kind === "minute" || payload.kind === "market-minute") return Boolean(payload.main?.points?.length);
+  if (payload.kind === "kline") return Boolean(payload.klines?.length);
+  return true;
+}
+
+function minuteTradeLabel(payload) {
+  if (!payload || (payload.kind !== "minute" && payload.kind !== "market-minute")) return "";
+  const label = formatTradeDate(payload.main?.date);
+  if (!label) return "";
+  if (payload.selectedDate) return `${label} 历史分时`;
+  return payload.main?.isFallback || payload.main?.source === "recent-trading-day" ? `${label} 最近交易日分时` : `${label} 分时`;
+}
+
+function minuteDateOptions(payload) {
+  const options = Array.isArray(payload?.recentMinutes) ? payload.recentMinutes : [];
+  const seen = new Set();
+  const result = [];
+  options.forEach((option) => {
+    const date = String(option?.date || "");
+    if (!date || seen.has(date)) return;
+    seen.add(date);
+    result.push(option);
+  });
+  if (payload?.main?.date && !seen.has(String(payload.main.date))) {
+    result.unshift({ date: payload.main.date, pointCount: payload.main.points?.length || 0 });
+  }
+  return result;
+}
+
 function priceTone(value) {
   const n = toNumber(value);
   if (n > 0) return "up";
@@ -255,6 +292,7 @@ export default function StockDashboard({ api }) {
   const [messageKind, setMessageKind] = useState("info");
   const [chartTarget, setChartTarget] = useState(null);
   const [chartPeriod, setChartPeriod] = useState("day");
+  const [chartMinuteDate, setChartMinuteDate] = useState("");
   const [chartIndicator, setChartIndicator] = useState("ma");
   const [chartPayload, setChartPayload] = useState(null);
   const [chartLoading, setChartLoading] = useState(false);
@@ -428,19 +466,21 @@ export default function StockDashboard({ api }) {
     }
   }, [chartTarget, selectedItem]);
 
-  const loadChart = async (target = chartTarget, period = chartPeriod) => {
+  const loadChart = async (target = chartTarget, period = chartPeriod, minuteDate = chartMinuteDate, options = {}) => {
     if (!target?.code) return;
     if (!apiClient) {
       setChartPayload(null);
       setChartError("");
       return;
     }
+    const showLoading = options.showLoading !== false;
     setChartError("");
-    setChartLoading(true);
+    if (showLoading) setChartLoading(true);
+    const selectedMinuteDate = period === "minute" ? minuteDate : "";
     try {
       const result = target.type === "market"
-        ? await apiClient.stock_market_chart(target.code, period)
-        : await apiClient.stock_chart(target.code, period);
+        ? await apiClient.stock_market_chart(target.code, period, selectedMinuteDate)
+        : await apiClient.stock_chart(target.code, period, selectedMinuteDate);
       if (!result?.ok) {
         setChartError(result?.error || "图表加载失败");
         return;
@@ -449,7 +489,7 @@ export default function StockDashboard({ api }) {
     } catch (error) {
       setChartError(String(error?.message || error));
     } finally {
-      setChartLoading(false);
+      if (showLoading) setChartLoading(false);
     }
   };
 
@@ -457,7 +497,15 @@ export default function StockDashboard({ api }) {
     if (!chartTarget?.code) return undefined;
     const timer = window.setTimeout(() => loadChart(chartTarget, chartPeriod), detailOpen ? 80 : 0);
     return () => window.clearTimeout(timer);
-  }, [chartTarget?.code, chartTarget?.type, chartPeriod, detailOpen]);
+  }, [chartTarget?.code, chartTarget?.type, chartPeriod, chartMinuteDate, detailOpen]);
+
+  useEffect(() => {
+    if (!detailOpen || chartPeriod !== "minute" || chartMinuteDate || !chartTarget?.code || !apiClient) return undefined;
+    const timer = window.setInterval(() => {
+      loadChart(chartTarget, "minute", "", { showLoading: false });
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [detailOpen, chartTarget?.code, chartTarget?.type, chartPeriod, chartMinuteDate, apiClient]);
 
   useEffect(() => {
     if (!detailOpen || !chartRef.current) return undefined;
@@ -949,11 +997,14 @@ export default function StockDashboard({ api }) {
           busy={busy}
           chartPeriod={chartPeriod}
           setChartPeriod={setChartPeriod}
+          chartMinuteDate={chartMinuteDate}
+          setChartMinuteDate={setChartMinuteDate}
           chartIndicator={chartIndicator}
           setChartIndicator={setChartIndicator}
           chartLoading={chartLoading}
           chartError={chartError}
-          hasChartPayload={Boolean(chartPayload)}
+          chartPayload={chartPayload}
+          hasChartPayload={hasChartData(chartPayload)}
           chartRef={chartRef}
         />
       ) : null}
@@ -1090,10 +1141,13 @@ function StockDetailWorkbench({
   busy,
   chartPeriod,
   setChartPeriod,
+  chartMinuteDate,
+  setChartMinuteDate,
   chartIndicator,
   setChartIndicator,
   chartLoading,
   chartError,
+  chartPayload,
   hasChartPayload,
   chartRef,
 }) {
@@ -1103,6 +1157,8 @@ function StockDetailWorkbench({
   const title = target?.name || item?.name || "单股工作台";
   const code = target?.code || item?.fullCode || "";
   const amountUnit = item?.fullCode?.startsWith("hk") ? 1 : 10000;
+  const minuteLabel = chartPeriod === "minute" ? minuteTradeLabel(chartPayload) : "";
+  const minuteOptions = chartPeriod === "minute" ? minuteDateOptions(chartPayload) : [];
 
   return (
     <div className="stock-detail-workbench" role="dialog" aria-modal="true" aria-label="单股详情工作台">
@@ -1171,7 +1227,7 @@ function StockDetailWorkbench({
           <div className="chart-toolbar workbench-chart-toolbar">
             <div>
               <strong>{isMarket ? "指数分时" : "走势分析"}</strong>
-              <span>{title} {code}</span>
+              <span>{title} {code}{minuteLabel ? ` · ${minuteLabel}` : ""}</span>
             </div>
             <div className="chart-switches">
               {PERIODS.map(([value, label]) => (
@@ -1189,7 +1245,21 @@ function StockDetailWorkbench({
                 </button>
               ))}
             </div>
-          ) : null}
+          ) : (
+            <div className="minute-date-switch">
+              <label>
+                <span>分时日期</span>
+                <select value={chartMinuteDate} onChange={(event) => setChartMinuteDate(event.target.value)} disabled={chartLoading}>
+                  <option value="">最新 / 最近交易日</option>
+                  {minuteOptions.map((option) => (
+                    <option key={option.date} value={option.date}>
+                      {formatTradeDate(option.date)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          )}
           <div className="chart-frame workbench-chart-frame">
             {chartLoading ? <div className="chart-loading">加载中...</div> : null}
             {!chartLoading && (chartError || !hasChartPayload) ? (

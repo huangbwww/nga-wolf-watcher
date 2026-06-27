@@ -337,15 +337,17 @@ class BotCommand:
     target_id: str = ""
     count: int = DEFAULT_REPLY_COUNT
     days: int = 0
+    thread_id: str = ""
 
     def __str__(self) -> str:
         action_labels = {"start": "开始菜单", "history": "查询", "pack": "打包"}
         target_labels = {"reply": "用户回复", "thread": "帖子回复", "": "无目标"}
         range_text = f"{self.days} 天" if self.days else f"{self.count} 条"
+        thread_text = f" @{self.thread_id}" if self.target_type == "reply" and self.thread_id else ""
         return (
             f"{action_labels.get(self.action, self.action)} "
             f"{target_labels.get(self.target_type, self.target_type)} "
-            f"{self.target_id or '-'} {range_text}"
+            f"{self.target_id or '-'}{thread_text} {range_text}"
         ).strip()
 
 
@@ -676,6 +678,45 @@ def preset_thread_targets(args: argparse.Namespace) -> list[WatchTarget]:
 
 def thread_author_watches(args: argparse.Namespace) -> list[ThreadAuthorWatch]:
     return parse_thread_author_watches(getattr(args, "thread_author_watches", "") or os.getenv("NGA_THREAD_AUTHOR_WATCHES", ""))
+
+
+def append_unique_watch_target(targets: list[WatchTarget], seen: set[str], target_id: str, label: str = "") -> None:
+    target_id = str(target_id or "").strip()
+    if not target_id or target_id in seen:
+        return
+    seen.add(target_id)
+    targets.append(WatchTarget(target_id, str(label or "").strip()))
+
+
+def command_author_targets(args: argparse.Namespace) -> list[WatchTarget]:
+    base_targets = watch_author_targets(args)
+    rules = configured_listen_rules(args)
+    if not rules:
+        return base_targets
+    labels_by_id = {target.id: target.label for target in base_targets if target.label}
+    targets: list[WatchTarget] = []
+    seen: set[str] = set()
+    for rule in rules:
+        append_unique_watch_target(targets, seen, rule.author_id, labels_by_id.get(rule.author_id) or rule.label)
+    for target in base_targets:
+        append_unique_watch_target(targets, seen, target.id, target.label)
+    return targets
+
+
+def command_thread_targets(args: argparse.Namespace) -> list[WatchTarget]:
+    base_targets = preset_thread_targets(args)
+    rules = configured_listen_rules(args)
+    if not rules:
+        return base_targets
+    labels_by_id = {target.id: target.label for target in base_targets if target.label}
+    targets: list[WatchTarget] = []
+    seen: set[str] = set()
+    for rule in rules:
+        if rule.mode == "thread_author":
+            append_unique_watch_target(targets, seen, rule.tid, labels_by_id.get(rule.tid))
+    for target in base_targets:
+        append_unique_watch_target(targets, seen, target.id, target.label)
+    return targets
 
 
 def parse_feishu_bot_profiles(raw: Any) -> list[FeishuBotProfile]:
@@ -2105,6 +2146,31 @@ def strip_markup(value: str) -> str:
     return value.strip()
 
 
+NGA_LIMITED_PLACEHOLDER_MARKERS = (
+    "账号权限不足",
+    "权限不足",
+    "帖子发布或回复时间超过限制",
+)
+
+
+def is_limited_nga_placeholder(item: dict[str, Any], subject: str, content: str) -> bool:
+    denied = first_str(item, "denied", "__topic_denied", "topic_denied").strip()
+    if denied == "1":
+        return True
+    error = strip_markup(first_str(item, "error", "__topic_error", "topic_error"))
+    text = "\n".join(part for part in (subject, content, error) if part)
+    return bool(error and any(marker in text for marker in NGA_LIMITED_PLACEHOLDER_MARKERS))
+
+
+def item_with_topic_context(item: dict[str, Any], topic: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(item)
+    for name in ("tid", "fid", "subject", "postdate", "lastpost", "lastmodify", "denied", "error"):
+        value = topic.get(name)
+        if value is not None and value != "":
+            enriched[f"__topic_{name}"] = value
+    return enriched
+
+
 IMAGE_EXT_RE = r"(?:jpg|jpeg|png|gif|webp|bmp)"
 
 
@@ -2230,6 +2296,8 @@ def make_post(item: dict[str, Any], fallback_subject: str = "") -> NgaPost | Non
     floor = first_str(item, "lou", "floor")
     subject = strip_markup(first_str(item, "subject", "title", "thread_subject"))
     subject = subject or strip_markup(fallback_subject) or "(无标题)"
+    if is_limited_nga_placeholder(item, subject, content):
+        return None
 
     key_source = "|".join([tid, pid, postdate, subject, content[:80]])
     key = pid or hashlib.sha1(key_source.encode("utf-8")).hexdigest()
@@ -2335,6 +2403,10 @@ def post_sort_key(post: NgaPost) -> tuple[float, str]:
     return post_timestamp(post) or 0.0, post.key
 
 
+def posts_chronological(posts: list[NgaPost]) -> list[NgaPost]:
+    return sorted(posts, key=post_sort_key)
+
+
 def post_identity_key(post: NgaPost) -> str:
     return str(post.canonical_key or post.key or "").strip()
 
@@ -2384,6 +2456,7 @@ def item_with_payload_author(item: dict[str, Any], users: dict[str, dict[str, An
 
 def extract_posts(payload: dict[str, Any]) -> list[NgaPost]:
     seen: set[str] = set()
+    handled_items: set[int] = set()
     posts: list[NgaPost] = []
     users = payload_user_lookup(payload)
     topics = payload.get("data", {}).get("__T", {})
@@ -2394,13 +2467,16 @@ def extract_posts(payload: dict[str, Any]) -> list[NgaPost]:
             reply = topic.get("__P")
             if not isinstance(reply, dict):
                 continue
-            reply = item_with_payload_author(reply, users)
+            handled_items.add(id(reply))
+            reply = item_with_topic_context(item_with_payload_author(reply, users), topic)
             post = make_post(reply, fallback_subject=first_str(topic, "subject", "title"))
             if post and post.key not in seen:
                 seen.add(post.key)
                 posts.append(post)
 
     for item in walk_dicts(payload.get("data", payload)):
+        if id(item) in handled_items:
+            continue
         post = make_post(item_with_payload_author(item, users))
         if post and post.key not in seen:
             seen.add(post.key)
@@ -4806,6 +4882,78 @@ def default_command_count(command_name: str) -> int:
     return DEFAULT_THREAD_COUNT if command_name.endswith("_t") else DEFAULT_REPLY_COUNT
 
 
+def command_count_token(value: str | None) -> bool:
+    return bool(re.fullmatch(r"\d{1,4}d?", str(value or "").strip().lower()))
+
+
+def command_alias_token(value: str | None, prefix: str) -> bool:
+    return bool(re.fullmatch(rf"{re.escape(prefix)}\s*\d+", str(value or "").strip(), flags=re.I))
+
+
+def parse_reply_command_tokens(
+    tokens: list[str],
+    author_targets: list[WatchTarget],
+    thread_targets: list[WatchTarget],
+    effective_author_id: str,
+) -> tuple[str, str, str | None]:
+    target = effective_author_id
+    thread_id = ""
+    raw_count: str | None = None
+    explicit_author = False
+    for index, token in enumerate(tokens):
+        token = str(token or "").strip()
+        if not token:
+            continue
+        if command_alias_token(token, "t"):
+            thread_id = resolve_target_alias(token, thread_targets, "t")
+            continue
+        if command_alias_token(token, "u"):
+            target = resolve_target_alias(token, author_targets, "u")
+            explicit_author = True
+            continue
+        if command_count_token(token) and (explicit_author or thread_id or index > 0):
+            raw_count = token
+            continue
+        if not explicit_author:
+            target = resolve_target_alias(token, author_targets, "u")
+            explicit_author = True
+            continue
+        if not thread_id:
+            thread_id = resolve_target_alias(token, thread_targets, "t")
+            continue
+        if raw_count is None:
+            raw_count = token
+    return target, thread_id, raw_count
+
+
+def parse_thread_command_tokens(
+    tokens: list[str],
+    thread_targets: list[WatchTarget],
+    effective_tid: str,
+) -> tuple[str, str | None]:
+    target = effective_tid
+    raw_count: str | None = None
+    explicit_thread = False
+    for index, token in enumerate(tokens):
+        token = str(token or "").strip()
+        if not token:
+            continue
+        if command_alias_token(token, "t"):
+            target = resolve_target_alias(token, thread_targets, "t")
+            explicit_thread = True
+            continue
+        if command_count_token(token) and (explicit_thread or index > 0):
+            raw_count = token
+            continue
+        if not explicit_thread:
+            target = resolve_target_alias(token, thread_targets, "t")
+            explicit_thread = True
+            continue
+        if raw_count is None:
+            raw_count = token
+    return target, raw_count
+
+
 def parse_bot_command(
     text: str,
     default_author_id: str,
@@ -4834,16 +4982,18 @@ def parse_bot_command(
             count=clamp_count(legacy.group(1), DEFAULT_REPLY_COUNT, 50),
         )
 
-    match = re.search(r"(?:^|\s)/(history_r|pack_r|history_t|pack_t)(?:\s+([A-Za-z]?\d+))?(?:\s+(\d{1,4}d?))?(?:\s|$)", compact)
+    match = re.search(r"(?:^|\s)/(history_r|pack_r|history_t|pack_t)(?P<tail>(?:\s+\S+){0,4})(?:\s|$)", compact)
     if not match:
         return None
 
-    name, raw_target, raw_count = match.groups()
+    name = match.group(1)
+    tokens = str(match.group("tail") or "").split()
     target_type = "thread" if name.endswith("_t") else "reply"
     if target_type == "thread":
-        target = resolve_target_alias(raw_target or "", thread_targets, "t") or effective_tid
+        target, raw_count = parse_thread_command_tokens(tokens, thread_targets, effective_tid)
+        thread_id = ""
     else:
-        target = resolve_target_alias(raw_target or "", author_targets, "u") or effective_author_id
+        target, thread_id, raw_count = parse_reply_command_tokens(tokens, author_targets, thread_targets, effective_author_id)
     days = 0
     if name.startswith("pack_"):
         count, days = parse_pack_count_or_days(raw_count, default_command_count(name), 500)
@@ -4853,9 +5003,10 @@ def parse_bot_command(
     # Compatibility for the older "/pack_r <default tid> <count>" spelling.
     if name == "pack_r" and target == default_tid:
         target_type = "thread"
+        thread_id = ""
 
     action = "pack" if name.startswith("pack_") else "history"
-    return BotCommand(action=action, target_type=target_type, target_id=target, count=count, days=days)
+    return BotCommand(action=action, target_type=target_type, target_id=target, count=count, days=days, thread_id=thread_id)
 
 
 def bot_command_from_form(
@@ -4869,6 +5020,9 @@ def bot_command_from_form(
     raw_custom_target = str(form.get("custom_target_id") or "").strip()
     raw_preset_target = str(form.get("preset_target_id") or "").strip()
     raw_target = raw_custom_target or raw_preset_target or str(form.get("target_id") or "").strip()
+    raw_custom_thread = str(form.get("custom_thread_id") or "").strip()
+    raw_preset_thread = str(form.get("preset_thread_id") or "").strip()
+    raw_thread = raw_custom_thread or raw_preset_thread or str(form.get("thread_id") or "").strip()
     raw_count = str(form.get("count") or "").strip()
     if raw_name not in {"history_r", "pack_r", "history_t", "pack_t"}:
         raw_name = "history_r"
@@ -4876,8 +5030,10 @@ def bot_command_from_form(
     thread_targets = thread_targets or parse_target_list("", default_tid)
     if raw_name.endswith("_t"):
         target = resolve_target_alias(raw_target, thread_targets, "t") or (thread_targets[0].id if thread_targets else default_tid)
+        thread_id = ""
     else:
         target = resolve_target_alias(raw_target, author_targets, "u") or (author_targets[0].id if author_targets else default_author_id)
+        thread_id = resolve_target_alias(raw_thread, thread_targets, "t") if raw_thread else ""
     days = 0
     if raw_name.startswith("pack_"):
         count, days = parse_pack_count_or_days(raw_count or None, default_command_count(raw_name), 500)
@@ -4887,7 +5043,8 @@ def bot_command_from_form(
     action = "pack" if raw_name.startswith("pack_") else "history"
     if raw_name == "pack_r" and target == default_tid:
         target_type = "thread"
-    return BotCommand(action=action, target_type=target_type, target_id=target, count=count, days=days)
+        thread_id = ""
+    return BotCommand(action=action, target_type=target_type, target_id=target, count=count, days=days, thread_id=thread_id)
 
 
 def form_action_name(form: dict[str, Any]) -> str:
@@ -5161,6 +5318,11 @@ def command_form_card(
         f"{prefix}{index}={target_display_name(target)}"
         for index, target in enumerate(targets[:6], 1)
     )
+    thread_targets = thread_targets or []
+    thread_help = " / ".join(
+        f"t{index}={target_display_name(target)}"
+        for index, target in enumerate(thread_targets[:6], 1)
+    )
     return {
         "schema": "2.0",
         "config": {"wide_screen_mode": True, "update_multi": True},
@@ -5185,6 +5347,22 @@ def command_form_card(
                             "placeholder": {"tag": "plain_text", "content": f"{target_label} / preset alias"},
                             "default_value": target_id,
                         },
+                        *(
+                            [
+                                {
+                                    "tag": "markdown",
+                                    "content": "可选 `tid`：留空走用户主页；填写 `tid` 或 `t1` 则只拉取该用户在指定帖子内的回复" + (f"；{thread_help}" if thread_help else ""),
+                                },
+                                {
+                                    "tag": "input",
+                                    "name": "custom_thread_id",
+                                    "placeholder": {"tag": "plain_text", "content": "optional tid / t1"},
+                                    "default_value": "",
+                                },
+                            ]
+                            if command.endswith("_r")
+                            else []
+                        ),
                         {
                             "tag": "input",
                             "name": "count",
@@ -5649,7 +5827,10 @@ def command_pack_file_name(command: BotCommand, post_count: int) -> str:
         range_part = f"{today}" if command.days == 1 else f"{today}_{command.days}d"
     else:
         range_part = str(post_count)
-    safe_target = re.sub(r"[^A-Za-z0-9_-]+", "_", command.target_id or "any").strip("_") or "any"
+    target_parts = [command.target_id or "any"]
+    if command.target_type == "reply" and command.thread_id:
+        target_parts.append(command.thread_id)
+    safe_target = re.sub(r"[^A-Za-z0-9_-]+", "_", "_".join(target_parts)).strip("_") or "any"
     return f"nga_{command.target_type}_{safe_target}_{range_part}_{int(time.time())}.txt"
 
 
@@ -5764,8 +5945,8 @@ def wechat_settings_text(args: argparse.Namespace, manager: ai_analysis.AIManage
 
 def dingtalk_start_markdown(args: argparse.Namespace) -> str:
     target_user = str(getattr(args, "dingtalk_target_user_ids", "") or "").strip()
-    author_targets = watch_author_targets(args)
-    thread_targets = preset_thread_targets(args)
+    author_targets = command_author_targets(args)
+    thread_targets = command_thread_targets(args)
     active_uid, active_tid = dingtalk_active_target_ids(args, target_user, author_targets, thread_targets)
     lines = [
         "## NGA Wolf Watcher",
@@ -5897,8 +6078,8 @@ def wechat_normalize_short_command(args: argparse.Namespace, user_id: str, text:
     if not compact:
         return raw
     menu = wechat_bot.WeChatMenuState(wechat_client_for_args(args).config.state_dir).get(user_id)
-    author_targets = watch_author_targets(args)
-    thread_targets = preset_thread_targets(args)
+    author_targets = command_author_targets(args)
+    thread_targets = command_thread_targets(args)
     default_uid, default_tid = wechat_active_target_ids(args, user_id, author_targets, thread_targets)
 
     def parse_short_count(prefix: str, default: int) -> int | None:
@@ -6251,10 +6432,10 @@ def run_bot_command(args: argparse.Namespace, command: BotCommand) -> None:
         push_feishu_card(args, settings_card_for_args(args, manager))
         return
 
-    author_targets = watch_author_targets(args)
-    thread_targets = preset_thread_targets(args)
+    author_targets = command_author_targets(args)
+    thread_targets = command_thread_targets(args)
     if command.target_type == "reply":
-        thread_author_tid = thread_author_tid_for_reply_command(args, command.target_id)
+        thread_author_tid = str(command.thread_id or "").strip()
         if thread_author_tid:
             if command.action == "pack" and command.days:
                 posts = collect_thread_in_days_with_retries(args, thread_author_tid, command.days, command.target_id)
@@ -6276,6 +6457,7 @@ def run_bot_command(args: argparse.Namespace, command: BotCommand) -> None:
     else:
         raise RuntimeError(f"未知命令目标：{command}")
 
+    posts = posts_chronological(posts)
     title = f"NGA {label} {command_range_title(command, len(posts))}"
     if not command.days and len(posts) < command.count:
         title += f"（请求 {command.count} 条，NGA 临时限流时会先返回已获取部分）"
@@ -6526,7 +6708,7 @@ def start_ws(args: argparse.Namespace) -> None:
         if ai_analysis.parse_ai_command(text) is not None:
             run_ai_command_background(args_for_chat(args, chat_id), text, sender_id, f"飞书消息:{message_id}", message_id, image_refs, file_refs, reply_context)
             return
-        command = parse_bot_command(text, args.default_author_id, args.default_tid, watch_author_targets(args), preset_thread_targets(args))
+        command = parse_bot_command(text, args.default_author_id, args.default_tid, command_author_targets(args), command_thread_targets(args))
         if command is None:
             if should_forward_plain_text_to_ai(args_for_chat(args, chat_id), text, sender_id, image_keys, file_refs):
                 run_ai_plain_text_background(args_for_chat(args, chat_id), text, sender_id, f"飞书消息:{message_id}", message_id, image_refs, file_refs, reply_context)
@@ -6632,9 +6814,9 @@ def start_ws(args: argparse.Namespace) -> None:
                 command_name = str(form.get("command") or "history_r")
                 target_id = str(form.get("target_id") or (args.default_tid if command_name.endswith("_t") else args.default_author_id))
                 count = str(form.get("count") or default_command_count(command_name))
-                form_card = command_form_card(command_name, target_id, count, watch_author_targets(scoped_args), preset_thread_targets(scoped_args))
+                form_card = command_form_card(command_name, target_id, count, command_author_targets(scoped_args), command_thread_targets(scoped_args))
                 return card_response(form_card, "已打开预填表单")
-            command = bot_command_from_form(form, args.default_author_id, args.default_tid, watch_author_targets(scoped_args), preset_thread_targets(scoped_args))
+            command = bot_command_from_form(form, args.default_author_id, args.default_tid, command_author_targets(scoped_args), command_thread_targets(scoped_args))
             run_command_background(scoped_args, command, "卡片操作")
             return card_response(processing_card("正在处理", f"已收到 `{command}`，结果会发送到当前群。", "open_fetch_menu"), "已收到，正在处理")
         except Exception as exc:
@@ -7434,7 +7616,7 @@ def handle_feishu_commands(args: argparse.Namespace, state: dict[str, Any]) -> b
             handled.add(message_id)
             changed = True
             continue
-        command = parse_bot_command(text, args.default_author_id, args.default_tid, watch_author_targets(args), preset_thread_targets(args))
+        command = parse_bot_command(text, args.default_author_id, args.default_tid, command_author_targets(args), command_thread_targets(args))
         if command is None:
             if should_forward_plain_text_to_ai(args, text, sender_id, image_keys, file_refs):
                 run_ai_plain_text_background(args, text, sender_id, f"飞书消息轮询:{message_id}", message_id, image_refs, file_refs, reply_context)
@@ -7577,8 +7759,8 @@ def handle_wechat_commands(args: argparse.Namespace) -> bool:
                     client.mark_handled(message)
                     changed = True
                     continue
-                author_targets = watch_author_targets(scoped_args)
-                thread_targets = preset_thread_targets(scoped_args)
+                author_targets = command_author_targets(scoped_args)
+                thread_targets = command_thread_targets(scoped_args)
                 active_uid, active_tid = wechat_active_target_ids(scoped_args, message.user_id, author_targets, thread_targets)
                 command = parse_bot_command(text, args.default_author_id, args.default_tid, author_targets, thread_targets, active_uid, active_tid)
                 if command is not None:
@@ -7656,8 +7838,8 @@ def handle_dingtalk_card_action(args: argparse.Namespace, action: dingtalk_bot.D
         if parsed_ai is not None:
             run_ai_command_background(scoped_args, command, sender_id, f"DingTalk card:{message_id}", message_id)
             return
-        author_targets = watch_author_targets(scoped_args)
-        thread_targets = preset_thread_targets(scoped_args)
+        author_targets = command_author_targets(scoped_args)
+        thread_targets = command_thread_targets(scoped_args)
         parsed = parse_bot_command(command, args.default_author_id, args.default_tid, author_targets, thread_targets, args.default_author_id, args.default_tid)
         if parsed is not None:
             run_command_background(scoped_args, parsed, f"DingTalk card:{message_id}")
@@ -7708,8 +7890,8 @@ def handle_dingtalk_message(args: argparse.Namespace, message: dingtalk_bot.Ding
         if ai_analysis.parse_ai_command(text) is not None:
             run_ai_command_background(scoped_args, text, sender_id, f"DingTalk message:{message.message_id}", message.message_id)
         else:
-            author_targets = watch_author_targets(scoped_args)
-            thread_targets = preset_thread_targets(scoped_args)
+            author_targets = command_author_targets(scoped_args)
+            thread_targets = command_thread_targets(scoped_args)
             command = parse_bot_command(text, args.default_author_id, args.default_tid, author_targets, thread_targets, args.default_author_id, args.default_tid)
             if command is not None:
                 run_command_background(scoped_args, command, f"DingTalk message:{message.message_id}")

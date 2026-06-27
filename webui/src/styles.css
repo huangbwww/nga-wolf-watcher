@@ -2298,6 +2298,33 @@ textarea:focus {
   margin-bottom: 8px;
 }
 
+.minute-date-switch {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+
+.minute-date-switch label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.minute-date-switch select {
+  min-width: 184px;
+  height: 32px;
+  border: 1px solid #cbd7e6;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #132238;
+  padding: 0 8px;
+  font-size: 13px;
+}
+
 .chart-frame {
   position: relative;
   height: 430px;
@@ -2687,8 +2714,8 @@ textarea:focus {
 }
 
 .workbench-chart-frame {
-  height: auto;
-  min-height: 0;
+  height: 100%;
+  min-height: 360px;
 }
 
 .stock-detail-workbench .stock-chart {
