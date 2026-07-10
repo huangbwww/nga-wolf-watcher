@@ -35,6 +35,16 @@ def test_parse_args_accepts_supported_commands() -> None:
         assert args.command == command
 
 
+def test_parse_args_accepts_agent_cli_management_commands() -> None:
+    listed = ngawolf_cli.parse_args(["agent-cli", "list", "--provider", "claude"])
+    tested = ngawolf_cli.parse_args(["agent-cli", "test", "codewhale"])
+    rescanned = ngawolf_cli.parse_args(["agent-cli", "rescan", "--provider", "codex"])
+
+    assert (listed.agent_cli_action, listed.provider) == ("list", "claude")
+    assert (tested.agent_cli_action, tested.provider) == ("test", "codewhale")
+    assert (rescanned.agent_cli_action, rescanned.provider) == ("rescan", "codex")
+
+
 def test_resolve_cli_paths_defaults_without_xdg(monkeypatch) -> None:
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("XDG_STATE_HOME", raising=False)
@@ -172,6 +182,35 @@ def test_command_check_returns_zero_for_valid_config(tmp_path: Path) -> None:
 
     validate_config.assert_called_once_with(config, require_cookie=True)
     print_validation_errors.assert_not_called()
+
+
+def test_command_check_prints_resolved_agent_cli_details(tmp_path: Path, capsys) -> None:
+    paths = ngawolf_cli.CliPaths(
+        config_path=tmp_path / "config.json",
+        data_dir=tmp_path / "state",
+        log_file=tmp_path / "watcher.log",
+    )
+    config = _valid_email_config()
+    config.update({"ai_enabled": True, "ai_provider": "codex"})
+    resolved = {
+        "provider": "codex",
+        "path": str(tmp_path / "codex"),
+        "version": "1.2.3",
+        "source": "PATH",
+        "status": "compatible",
+        "selectionMode": "auto",
+    }
+
+    with patch.object(ngawolf_cli, "load_service_config", return_value=config), patch.object(
+        ngawolf_cli.nga_wolf_config, "validate_config", return_value=[]
+    ), patch.object(ngawolf_cli, "_agent_cli_test_result", return_value={"ok": True, "resolved": resolved}):
+        assert ngawolf_cli.command_check(paths) == 0
+
+    output = capsys.readouterr().out
+    assert "codex 1.2.3 [auto]" in output
+    assert "source=PATH" in output
+    assert "status=compatible" in output
+    assert f"path={tmp_path / 'codex'}" in output
 
 
 def test_command_mark_seen_validates_and_runs_once(tmp_path: Path) -> None:

@@ -37,7 +37,7 @@ AI 分析只是工具，不是开箱即用的固定答案。实际效果取决�
 ```powershell
 $env:AI_ENABLED = 'true'
 $env:AI_PROVIDER = 'codex'
-$env:AI_CODEX_COMMAND = 'codex'
+$env:AI_CODEX_CLI_MODE = 'auto'
 python .\nga_feishu_watch.py --ws
 ```
 
@@ -46,7 +46,7 @@ python .\nga_feishu_watch.py --ws
 ```powershell
 $env:AI_ENABLED = 'true'
 $env:AI_PROVIDER = 'claude'
-$env:AI_CLAUDE_COMMAND = 'claude'
+$env:AI_CLAUDE_CLI_MODE = 'auto'
 python .\nga_feishu_watch.py --ws
 ```
 
@@ -55,7 +55,7 @@ python .\nga_feishu_watch.py --ws
 ```powershell
 $env:AI_ENABLED = 'true'
 $env:AI_PROVIDER = 'codewhale'
-$env:AI_CODEWHALE_COMMAND = 'codewhale'
+$env:AI_CODEWHALE_CLI_MODE = 'auto'
 python .\nga_feishu_watch.py --ws
 ```
 
@@ -70,11 +70,50 @@ python .\nga_feishu_watch.py --ws
 
 custom command 支持占位符：`{work_dir}`、`{prompt_file}`、`{output_file}`、`{task_type}`、`{latest_event}`、`{history_file}`、`{session_id}`、`{image_files}`、`{file_files}`、`{permission_mode}`、`{model}`、`{reasoning_effort}`。
 
+### 本地 Agent CLI 扫描与选择
+
+Codex、Claude Code、CodeWhale 现在共用同一套跨平台 CLI 发现机制。GUI 和 WebUI 会在 NGA Wolf Watcher 启动时扫描一次运行端所在的机器并缓存结果。安装、升级、移动或删除 CLI 后，手动点击“重新扫描”即可；普通 AI 请求不会临时扫描文件系统。
+
+每个内置 provider 都有三种方式：
+
+- `auto`：优先按 `PATH` 原始顺序使用第一个兼容命令；遇到不兼容候选时继续检查其他 `PATH` 项、当前原生/包管理器位置，最后才检查明确支持的旧位置。
+- `selected`：锁定扫描结果中的一个路径。路径消失或不再兼容时直接报错，不会静默换成别的版本。
+- `manual`：填写一个绝对可执行文件路径，固定参数单独保存。该模式同样严格；想使用 `PATH` 中的命令名应选择 `auto`。
+
+启动扫描覆盖 Windows、macOS、Linux 和 WSL；WSL 只使用 Linux 规则。WindowsApps 内部资源和 macOS `.app` 内部 helper 会被排除。兼容性探测只会运行有超时限制的 `--version` 和内置 help 命令，关闭 stdin，不会登录、更新、安装、运行 `doctor` 或发送模型请求。
+
+无界面管理命令：
+
+```powershell
+python .\ngawolf_cli.py agent-cli list
+python .\ngawolf_cli.py agent-cli test codex
+python .\ngawolf_cli.py agent-cli rescan --provider codex
+python .\ngawolf_cli.py check
+```
+
+环境变量也使用相同模型。下面把 `CODEX` 换成 `CLAUDE` 或 `CODEWHALE` 即可：
+
+```powershell
+# 自动解析 PATH / 原生安装 / 包管理器 / 旧位置
+$env:AI_CODEX_CLI_MODE = 'auto'
+
+# 锁定扫描得到的路径
+$env:AI_CODEX_CLI_MODE = 'selected'
+$env:AI_CODEX_CLI_SELECTED_PATH = 'C:\Users\me\AppData\Roaming\npm\codex.cmd'
+
+# 严格使用手动路径，并可附加固定参数
+$env:AI_CODEX_CLI_MODE = 'manual'
+$env:AI_CODEX_CLI_PATH = 'D:\Tools\codex.exe'
+$env:AI_CODEX_CLI_ARGS = '--some-fixed-option value'
+```
+
+旧的 `AI_CODEX_COMMAND`、`AI_CLAUDE_COMMAND`、`AI_CODEWHALE_COMMAND` 仍会读取并迁移：默认命令名转成 `auto`，显式路径及参数转成严格 `manual`。新的 GUI/WebUI 保存使用结构化 `ai_cli` 配置。
+
 模型和思考强度：
 
 - GUI 里的“默认模型”和“默认思考强度”是启动默认值，留空或 `default` 表示不指定，使用 agent 自己的默认。
 - 飞书 `/setting` 卡片里的模型/思考强度是运行时覆盖，点“恢复默认模型/强度”会回到 GUI/启动默认值。
-- Codex 下拉模型：`gpt-5.5`、`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.3-codex`、`gpt-5.3-codex-spark`、`gpt-5.2`；思考强度：`low`、`medium`、`high`、`xhigh`。
+- Codex 下拉模型优先显示 `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`，之后保留旧模型选项；默认使用 Sol，默认推理强度为 `high`。Sol 和 Terra 支持 `low`、`medium`、`high`、`xhigh`、`max`、`ultra`，Luna 最高支持 `max`，保留的 5.5/5.4 模型最高支持 `xhigh`。`max` 是单任务最大推理深度；`ultra` 可能自动委派给子 Agent，且 Luna 不支持。
 - Claude 下拉模型：`default`、`sonnet[1m]`、`opus[1m]`、`haiku`；思考强度：`low`、`medium`、`high`、`xhigh`、`max`。
 - CodeWhale 下拉模型：`deepseek-v4-flash`、`deepseek-v4-pro`，也可选 `auto` 让 CodeWhale 自动路由；思考强度：`auto`、`off`、`low`、`medium`、`high`、`max`。
 - Codex 会把模型传给 `codex exec --model <model>`，把思考强度通过 Codex 配置覆盖传入。
@@ -119,10 +158,12 @@ $env:AI_SCHEDULE_WINDOWS = 'weekday:09:30-11:30,13:00-15:00'
 /ai mode full-auto
 /model
 /model auto
-/model gpt-5.4
+/model gpt-5.6-sol
 /reasoning
 /reasoning default
 /reasoning high
+/reasoning max
+/reasoning ultra
 /ai auto on
 /ai auto off
 /ai latest
@@ -165,9 +206,9 @@ AI_AUTO_ANALYZE_NEW_POST=false
 AI_AUTO_ANALYSIS_PROMPT=根据最新的 NGA 回复历史、我目前的持仓信息和观察列表，并实时查询公开 A 股行情信息，分析盘面变化、机会与风险，给出接下来需要重点观察的方向和操作建议。
 AI_PROMPT_FILE=
 AI_TIMEOUT=300
-AI_CODEX_COMMAND=codex
-AI_CLAUDE_COMMAND=claude
-AI_CODEWHALE_COMMAND=codewhale
+AI_CODEX_CLI_MODE=auto
+AI_CLAUDE_CLI_MODE=auto
+AI_CODEWHALE_CLI_MODE=auto
 AI_CUSTOM_COMMAND=
 AI_MODEL=
 AI_CODEX_MODEL=
@@ -191,6 +232,10 @@ AI_UPLOAD_LONG_RESULT=false
 AI_REPLY_STATUS_EMOJI=WITTY
 AI_PERMISSION_MODE=default
 ```
+
+设置 `AI_IGNORE_CODEX_USER_CONFIG=true`（或开启 GUI 中的对应选项）后，程序会向
+Codex 传入 `--ignore-user-config`。登录状态和 Codex 会话仍使用 `CODEX_HOME`，但桌面端
+对 `config.toml` 中模型、思考强度或服务等级的修改不会再影响飞书侧任务。
 
 `AI_WORK_DIR` 如果是相对路径，会解析到运行状态文件旁边。GUI/EXE 默认就是 `%LOCALAPPDATA%\NGA Wolf Watcher\.ai_agent_workspace`；普通 CLI 默认 `.nga_seen.json` 在当前目录，所以工作目录也在当前目录。想固定位置可以直接填绝对路径。
 
@@ -236,7 +281,9 @@ Prompt 使用方式：
 
 故障排查：
 
-- 找不到 `codex`、`claude` 或 `codewhale`：先在本机安装对应工具，或把 `AI_CODEX_COMMAND` / `AI_CLAUDE_COMMAND` / `AI_CODEWHALE_COMMAND` 设置为完整命令。
+- 找不到 `codex`、`claude` 或 `codewhale`：先运行 `agent-cli list`，安装工具后重新扫描。要锁定扫描路径用 `selected`，填写其他绝对路径用 `manual`。
+- 已选择/手动 CLI 失效：程序会按设计拒绝回退。请测试当前选择、重新扫描、改选其他候选，或切回 `auto`。
+- Codex 桌面端正常，但修改模型/思考强度后飞书任务失败：运行 `agent-cli test codex` 并确认实际解析路径。Codex 桌面版与 standalone/npm CLI 可能是版本不同的独立安装。
 - 任务超时：调大 `AI_TIMEOUT`，或减少 prompt / context 内容。
 - 输出为空：查看 `logs/ai_agent.log`；如果 output file 缺失，程序会用 stdout 兜底。
 - 飞书消息过长：默认直接截断成文本。需要长结果文件时再设置 `AI_UPLOAD_LONG_RESULT=true`。

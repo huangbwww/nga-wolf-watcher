@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
 
+import agent_cli
 import ai_analysis
 import nga_wolf_gui as legacy
 import stock_quotes
@@ -22,7 +23,7 @@ import wechat_bot
 try:
     from build_version import APP_VERSION
 except Exception:
-    APP_VERSION = "v1.5.8"
+    APP_VERSION = "v1.5.9"
 
 
 APP_TITLE = "NGA Wolf Watcher"
@@ -507,6 +508,8 @@ class PreviewApi:
     def __init__(self) -> None:
         self.process: subprocess.Popen[str] | None = None
         self.closing = False
+        self.agent_cli_service = agent_cli.GLOBAL_AGENT_CLI_SERVICE
+        self.agent_cli_service.start()
 
     def shutdown(self) -> dict[str, Any]:
         self.closing = True
@@ -591,6 +594,7 @@ class PreviewApi:
             "defaults": dict(legacy.DEFAULT_CONFIG),
             "appVersion": APP_VERSION,
             "status": self._status(),
+            "agentCli": self.agent_cli_service.snapshot(),
             "options": {
                 "botChannels": ["feishu", "wechat"],
                 "watchModes": ["author", "thread_author", "both"],
@@ -606,9 +610,49 @@ class PreviewApi:
                     "claude": ai_analysis.reasoning_effort_options("claude"),
                     "codewhale": ai_analysis.reasoning_effort_options("codewhale"),
                 },
+                "aiDefaultReasoning": {
+                    provider: ai_analysis.provider_default_reasoning_effort(provider)
+                    for provider in ("codex", "claude", "codewhale")
+                },
+                "aiReasoningByModel": {
+                    "codex": {
+                        model: ai_analysis.reasoning_effort_options("codex", model)
+                        for model in ai_analysis.model_options("codex")
+                    },
+                },
             },
             "logs": self.read_logs(0),
         }
+
+    @staticmethod
+    def _agent_cli_required(config: dict[str, Any], provider: str) -> set[str]:
+        if provider == "codex" and bool(config.get("ai_ignore_codex_user_config", False)):
+            return {"ignore-user-config"}
+        return set()
+
+    def agent_cli_status(self) -> dict[str, Any]:
+        return {"ok": True, "agentCli": self.agent_cli_service.snapshot()}
+
+    def agent_cli_rescan(self, provider: str = "") -> dict[str, Any]:
+        target = str(provider or "").strip().lower()
+        if target and target not in agent_cli.BUILTIN_PROVIDERS:
+            return {"ok": False, "error": f"Unsupported Agent provider: {target}"}
+        self.agent_cli_service.rescan()
+        self.agent_cli_service.probe_all(target or None)
+        return {"ok": True, "agentCli": self.agent_cli_service.snapshot()}
+
+    def agent_cli_test(self, provider: str = "", config: dict[str, Any] | None = None) -> dict[str, Any]:
+        merged = self._merged_config(config)
+        target = str(provider or merged.get("ai_provider") or "codex").strip().lower()
+        if target not in agent_cli.BUILTIN_PROVIDERS:
+            return {"ok": False, "error": f"Unsupported Agent provider: {target}"}
+        result = self.agent_cli_service.test_selection(
+            target,
+            agent_cli.selection_for_provider(merged, target),
+            additional_required=self._agent_cli_required(merged, target),
+        )
+        result["agentCli"] = self.agent_cli_service.snapshot()
+        return result
 
     def validate(self, config: dict[str, Any]) -> dict[str, Any]:
         merged = self._merged_config(config)
@@ -621,8 +665,22 @@ class PreviewApi:
         errors = legacy.validate_config(merged)
         if errors:
             return {"ok": False, "errors": webui_friendly_errors(merged, errors)}
+        provider = str(merged.get("ai_provider") or "codex").strip().lower()
+        if bool(merged.get("ai_enabled", False)) and provider in agent_cli.BUILTIN_PROVIDERS:
+            cli_result = self.agent_cli_test(provider, merged)
+            if not cli_result.get("ok"):
+                return {
+                    "ok": False,
+                    "errors": [str(cli_result.get("error") or "Agent CLI validation failed")],
+                    "agentCli": cli_result.get("agentCli"),
+                }
         legacy.save_config(merged)
-        return {"ok": True, "config": merged, "status": self._status()}
+        return {
+            "ok": True,
+            "config": merged,
+            "status": self._status(),
+            "agentCli": self.agent_cli_service.snapshot(),
+        }
 
     def mark_seen(self, config: dict[str, Any] | None = None) -> dict[str, Any]:
         merged = self._merged_config(config)

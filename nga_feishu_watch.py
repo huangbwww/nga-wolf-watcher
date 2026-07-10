@@ -5404,7 +5404,7 @@ def ai_settings_card(manager: ai_analysis.AIManager, mention_enabled: bool = Fal
     runtime_model = "model" in state and manager._runtime_setting_is_current(state, "model")
     runtime_reasoning = "reasoning_effort" in state and manager._runtime_setting_is_current(state, "reasoning_effort")
     model_choices = ai_analysis.model_options(manager.config.provider)
-    reasoning_choices = ai_analysis.reasoning_effort_options(manager.config.provider)
+    reasoning_choices = ai_analysis.reasoning_effort_options(manager.config.provider, current_model)
     if manager.config.provider in {"codex", "claude", "codewhale"}:
         model_control = {
             "tag": "select_static",

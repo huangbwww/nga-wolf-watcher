@@ -548,6 +548,76 @@ header p,
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.agent-cli-card {
+  margin-top: 2px;
+}
+
+.agent-cli-grid {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.45fr) minmax(0, 1.55fr);
+  gap: 12px;
+}
+
+.agent-cli-path-field select,
+.agent-cli-path-field input {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+}
+
+.agent-cli-status {
+  margin-top: 10px;
+  padding: 9px 10px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  background: white;
+  color: #475569;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.agent-cli-status.error {
+  border-color: #fecaca;
+  color: #991b1b;
+  background: #fef2f2;
+}
+
+.agent-cli-candidates {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.agent-cli-candidate {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px 10px;
+  padding: 8px 10px;
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  background: #ffffff;
+  font-size: 12px;
+}
+
+.agent-cli-candidate code {
+  overflow-wrap: anywhere;
+  color: #0f172a;
+}
+
+.agent-cli-candidate span,
+.agent-cli-candidate small {
+  color: #64748b;
+}
+
+.agent-cli-candidate small {
+  grid-column: 1 / -1;
+}
+
+.agent-cli-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2871,6 +2941,10 @@ textarea:focus {
   }
 
   .ai-agent-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-cli-grid {
     grid-template-columns: 1fr;
   }
 

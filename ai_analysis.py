@@ -32,6 +32,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+import agent_cli
+
 
 DEFAULT_WORK_DIR = ".ai_agent_workspace"
 DEFAULT_PROVIDER = "codex"
@@ -40,15 +42,32 @@ DEFAULT_TIMEOUT = 300
 DEFAULT_SCHEDULE_WINDOWS = "weekday:09:30-11:30,13:00-15:00"
 DEFAULT_MAX_FEISHU_CHARS = 3500
 SOURCE_NAME = "nga-wolf-watcher"
-CODEX_DEFAULT_MODEL = "gpt-5.5"
+CODEX_DEFAULT_MODEL = "gpt-5.6-sol"
 CLAUDE_DEFAULT_MODEL = "sonnet"
 CODEWHALE_DEFAULT_MODEL = "deepseek-v4-pro"
-CODEX_DEFAULT_REASONING_EFFORT = "medium"
+CODEX_DEFAULT_REASONING_EFFORT = "high"
 CLAUDE_DEFAULT_REASONING_EFFORT = "medium"
 CODEWHALE_DEFAULT_REASONING_EFFORT = "auto"
-CODEX_MODEL_OPTIONS = [CODEX_DEFAULT_MODEL, "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2"]
+CODEX_MODEL_OPTIONS = [
+    CODEX_DEFAULT_MODEL,
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex",
+    "gpt-5.3-codex-spark",
+    "gpt-5.2",
+]
 CLAUDE_MODEL_OPTIONS = [CLAUDE_DEFAULT_MODEL, "default", "opus[1m]", "haiku"]
-CODEX_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+CODEX_REASONING_EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max", "ultra")
+CODEX_MODEL_REASONING_EFFORTS = {
+    "gpt-5.6-sol": CODEX_REASONING_EFFORT_ORDER,
+    "gpt-5.6-terra": CODEX_REASONING_EFFORT_ORDER,
+    "gpt-5.6-luna": CODEX_REASONING_EFFORT_ORDER[:-1],
+}
+CODEX_LEGACY_REASONING_EFFORTS = CODEX_REASONING_EFFORT_ORDER[:4]
+CODEX_REASONING_EFFORTS = set(CODEX_REASONING_EFFORT_ORDER)
 CLAUDE_REASONING_EFFORTS = {"low", "medium", "high", "max"}
 CODEWHALE_MODEL_OPTIONS = [CODEWHALE_DEFAULT_MODEL, "deepseek-v4-flash"]
 CODEWHALE_REASONING_EFFORTS = {"auto", "off", "high", "max"}
@@ -142,6 +161,14 @@ def provider_reasoning_env(provider: str) -> str:
     return os.getenv("AI_CUSTOM_REASONING_EFFORT", "")
 
 
+def provider_cli_env(provider: str, suffix: str) -> str | None:
+    provider_name = str(provider or "").strip().upper()
+    specific = os.getenv(f"AI_{provider_name}_CLI_{suffix}")
+    if specific is not None:
+        return specific
+    return os.getenv(f"AI_CLI_{suffix}")
+
+
 def normalize_model(raw: str) -> str:
     text = str(raw or "").strip()
     if text.lower() in {"unset"}:
@@ -179,6 +206,8 @@ def normalize_provider_model(provider: str, raw: str) -> str:
         return ""
     if provider == "custom":
         return model
+    if provider == "codex" and model.lower() == "gpt-5.6":
+        return "gpt-5.6-sol"
     options = model_options(provider)
     if not options:
         return model
@@ -203,6 +232,8 @@ def is_valid_model(raw: str, provider: str = "codex") -> bool:
         return True
     if provider == "custom":
         return True
+    if provider == "codex" and text.lower() == "gpt-5.6":
+        return True
     options = model_options(provider)
     return not options or any(text.lower() == option.lower() for option in options)
 
@@ -220,6 +251,9 @@ def model_options(provider: str = "codex") -> list[str]:
 def model_label(provider: str, value: str) -> str:
     if provider == "codex":
         return {
+            "gpt-5.6-sol": "GPT-5.6 Sol",
+            "gpt-5.6-terra": "GPT-5.6 Terra",
+            "gpt-5.6-luna": "GPT-5.6 Luna",
             "gpt-5.5": "GPT-5.5",
             "gpt-5.4": "GPT-5.4",
             "gpt-5.4-mini": "GPT-5.4-Mini",
@@ -230,11 +264,12 @@ def model_label(provider: str, value: str) -> str:
     return value
 
 
-def reasoning_effort_options(provider: str = "codex") -> list[str]:
+def reasoning_effort_options(provider: str = "codex", model: str = "") -> list[str]:
     if provider == "claude":
         return sorted(CLAUDE_REASONING_EFFORTS, key=["low", "medium", "high", "max"].index)
     if provider == "codex":
-        return sorted(CODEX_REASONING_EFFORTS, key=["low", "medium", "high", "xhigh"].index)
+        normalized_model = normalize_provider_model("codex", model) if str(model or "").strip() else CODEX_DEFAULT_MODEL
+        return list(CODEX_MODEL_REASONING_EFFORTS.get(normalized_model, CODEX_LEGACY_REASONING_EFFORTS))
     if provider == "codewhale":
         return sorted(CODEWHALE_REASONING_EFFORTS, key=["auto", "off", "high", "max"].index)
     return []
@@ -244,7 +279,7 @@ def reasoning_effort_label(provider: str, value: str) -> str:
     return value
 
 
-def normalize_reasoning_effort(raw: str, provider: str = "codex") -> str:
+def normalize_reasoning_effort(raw: str, provider: str = "codex", model: str = "") -> str:
     text = str(raw or "").strip().lower()
     if text in {"", "default", "unset"}:
         return ""
@@ -252,19 +287,19 @@ def normalize_reasoning_effort(raw: str, provider: str = "codex") -> str:
         return ""
     if provider == "claude" and text == "xhigh":
         return "max"
-    options = reasoning_effort_options(provider)
+    options = reasoning_effort_options(provider, model)
     if options and text not in options:
         return ""
     return text
 
 
-def is_valid_reasoning_effort(raw: str, provider: str = "codex") -> bool:
+def is_valid_reasoning_effort(raw: str, provider: str = "codex", model: str = "") -> bool:
     text = str(raw or "").strip().lower()
     if text in {"", "default", "auto", "unset"}:
         return True
     if provider == "claude" and text == "xhigh":
         return True
-    options = reasoning_effort_options(provider)
+    options = reasoning_effort_options(provider, model)
     return not options or text in options
 
 
@@ -295,18 +330,61 @@ class AIConfig:
     model: str = ""
     reasoning_effort: str = ""
     ignore_codex_user_config: bool = False
+    cli_mode: str = "auto"
+    cli_selected_path: str = ""
+    cli_manual_path: str = ""
+    cli_manual_args: tuple[str, ...] = ()
+    resolved_cli_command: tuple[str, ...] = ()
+    resolved_cli_capabilities: set[str] = field(default_factory=set)
+    cli_resolution_error: str = ""
 
     @classmethod
     def from_namespace(cls, args: argparse.Namespace) -> "AIConfig":
         provider = str(getattr(args, "ai_provider", os.getenv("AI_PROVIDER", DEFAULT_PROVIDER)) or DEFAULT_PROVIDER).lower()
         if provider not in {"codex", "claude", "codewhale", "custom"}:
             provider = DEFAULT_PROVIDER
+        codex_command = str(getattr(args, "ai_codex_command", os.getenv("AI_CODEX_COMMAND", "codex")) or "codex")
+        claude_command = str(getattr(args, "ai_claude_command", os.getenv("AI_CLAUDE_COMMAND", "claude")) or "claude")
+        codewhale_command = str(
+            getattr(args, "ai_codewhale_command", os.getenv("AI_CODEWHALE_COMMAND", "codewhale")) or "codewhale"
+        )
+        legacy_commands = {
+            "codex": codex_command,
+            "claude": claude_command,
+            "codewhale": codewhale_command,
+        }
+        cli_values = {
+            "mode": getattr(args, "ai_cli_mode", None),
+            "selected_path": getattr(args, "ai_cli_selected_path", None),
+            "manual_path": getattr(args, "ai_cli_manual_path", None),
+            "manual_args": getattr(args, "ai_cli_manual_args", None),
+        }
+        env_values = {
+            "mode": provider_cli_env(provider, "MODE"),
+            "selected_path": provider_cli_env(provider, "SELECTED_PATH"),
+            "manual_path": provider_cli_env(provider, "PATH"),
+            "manual_args": provider_cli_env(provider, "ARGS"),
+        }
+        explicit_cli_selection = any(value is not None for value in cli_values.values()) or any(
+            value is not None for value in env_values.values()
+        )
+        if explicit_cli_selection:
+            selection = agent_cli.AgentCliSelection.from_value(
+                {
+                    key: cli_values[key] if cli_values[key] is not None else env_values[key]
+                    for key in cli_values
+                }
+            )
+        else:
+            normalized = agent_cli.normalize_agent_cli_config(None, legacy_commands=legacy_commands)
+            selection = agent_cli.AgentCliSelection.from_value(normalized.get(provider))
         raw_model = getattr(args, "ai_model", None)
         if raw_model is None or not str(raw_model).strip():
             raw_model = provider_model_env(provider)
         raw_reasoning = getattr(args, "ai_reasoning_effort", None)
         if raw_reasoning is None or not str(raw_reasoning).strip():
             raw_reasoning = provider_reasoning_env(provider)
+        normalized_model = normalize_provider_model(provider, str(raw_model or ""))
         work_dir = resolve_work_dir(
             str(getattr(args, "ai_work_dir", os.getenv("AI_WORK_DIR", DEFAULT_WORK_DIR)) or DEFAULT_WORK_DIR),
             getattr(args, "state_path", ""),
@@ -322,9 +400,9 @@ class AIConfig:
             prompt_file=str(getattr(args, "ai_prompt_file", os.getenv("AI_PROMPT_FILE", "")) or ""),
             history_limit=safe_int(getattr(args, "ai_history_limit", os.getenv("AI_HISTORY_LIMIT", DEFAULT_HISTORY_LIMIT)), DEFAULT_HISTORY_LIMIT, 1),
             timeout=safe_int(getattr(args, "ai_timeout", os.getenv("AI_TIMEOUT", DEFAULT_TIMEOUT)), DEFAULT_TIMEOUT, 1),
-            codex_command=str(getattr(args, "ai_codex_command", os.getenv("AI_CODEX_COMMAND", "codex")) or "codex"),
-            claude_command=str(getattr(args, "ai_claude_command", os.getenv("AI_CLAUDE_COMMAND", "claude")) or "claude"),
-            codewhale_command=str(getattr(args, "ai_codewhale_command", os.getenv("AI_CODEWHALE_COMMAND", "codewhale")) or "codewhale"),
+            codex_command=codex_command,
+            claude_command=claude_command,
+            codewhale_command=codewhale_command,
             custom_command=str(getattr(args, "ai_custom_command", os.getenv("AI_CUSTOM_COMMAND", "")) or ""),
             schedule_enabled=bool_value(getattr(args, "ai_schedule_enabled", env_bool("AI_SCHEDULE_ENABLED", False))),
             schedule_interval_minutes=safe_int(
@@ -348,14 +426,19 @@ class AIConfig:
                 str(getattr(args, "ai_permission_mode", os.getenv("AI_PERMISSION_MODE", "default")) or "default"),
                 provider,
             ),
-            model=normalize_provider_model(provider, str(raw_model or "")),
+            model=normalized_model,
             reasoning_effort=normalize_reasoning_effort(
                 str(raw_reasoning or ""),
                 provider,
+                normalized_model,
             ),
             ignore_codex_user_config=bool_value(
                 getattr(args, "ai_ignore_codex_user_config", env_bool("AI_IGNORE_CODEX_USER_CONFIG", False))
             ),
+            cli_mode=selection.mode,
+            cli_selected_path=selection.selected_path,
+            cli_manual_path=selection.manual_path,
+            cli_manual_args=selection.manual_args,
         )
 
 
@@ -414,6 +497,10 @@ def add_cli_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--ai-claude-command", default=os.getenv("AI_CLAUDE_COMMAND", "claude"))
     parser.add_argument("--ai-codewhale-command", default=os.getenv("AI_CODEWHALE_COMMAND", "codewhale"))
     parser.add_argument("--ai-custom-command", default=os.getenv("AI_CUSTOM_COMMAND", ""))
+    parser.add_argument("--ai-cli-mode", choices=sorted(agent_cli.SELECTION_MODES), default=None)
+    parser.add_argument("--ai-cli-selected-path", default=None)
+    parser.add_argument("--ai-cli-manual-path", default=None)
+    parser.add_argument("--ai-cli-manual-arg", dest="ai_cli_manual_args", action="append", default=None)
     parser.add_argument("--ai-schedule-enabled", action="store_true", default=env_bool("AI_SCHEDULE_ENABLED", False))
     parser.add_argument("--ai-schedule-interval-minutes", type=int, default=int(os.getenv("AI_SCHEDULE_INTERVAL_MINUTES", "5")))
     parser.add_argument("--ai-schedule-prompt", default=os.getenv("AI_SCHEDULE_PROMPT", ""))
@@ -1117,44 +1204,31 @@ def resolve_executable(command: list[str], provider: str) -> list[str]:
     path = Path(executable)
     if path.is_absolute() or path.parent != Path("."):
         return command
-    if os.name == "nt":
-        candidates: list[Path] = []
-        appdata = os.getenv("APPDATA")
-        localappdata = os.getenv("LOCALAPPDATA")
-        userprofile = os.getenv("USERPROFILE")
-        executable_names = [executable]
-        if not executable.lower().endswith((".exe", ".cmd", ".bat", ".ps1")):
-            executable_names.extend([f"{executable}.exe", f"{executable}.cmd", f"{executable}.bat"])
-
-        def add_named_candidates(directory: Path | None) -> None:
-            if directory is None:
-                return
-            for name in executable_names:
-                candidates.append(directory / name)
-
-        if provider == "codex":
-            if localappdata:
-                candidates.append(Path(localappdata) / "OpenAI" / "Codex" / "bin" / "codex.exe")
-            if appdata:
-                candidates.append(Path(appdata) / "npm" / "codex.cmd")
-        elif provider == "claude":
-            add_named_candidates(Path(userprofile) / ".local" / "bin" if userprofile else None)
-            add_named_candidates(Path(localappdata) / "Microsoft" / "WinGet" / "Links" if localappdata else None)
-            add_named_candidates(Path(appdata) / "npm" if appdata else None)
-        elif provider == "codewhale" and appdata:
-            candidates.append(Path(appdata) / "npm" / "codewhale.cmd")
-            candidates.append(Path(appdata) / "npm" / "deepseek.cmd")
-        for candidate in candidates:
-            if candidate.exists():
-                return [str(candidate), *command[1:]]
     found = shutil.which(executable)
     if found:
         return [found, *command[1:]]
     return command
 
 
+def configured_agent_command(config: AIConfig, fallback: str) -> list[str]:
+    if config.resolved_cli_command:
+        return list(config.resolved_cli_command)
+    return split_command_line(fallback)
+
+
+def configured_cli_supports(config: AIConfig, capability: str) -> bool:
+    if not config.resolved_cli_command:
+        return True
+    return capability in config.resolved_cli_capabilities
+
+
 class CodexRunner(BaseRunner):
     provider = "codex"
+
+    def _user_config_args(self) -> list[str]:
+        if self.config.ignore_codex_user_config:
+            return ["--ignore-user-config"]
+        return []
 
     def _model_args(self, task: AITask, *, allow_model: bool = True) -> list[str]:
         if not allow_model:
@@ -1167,9 +1241,11 @@ class CodexRunner(BaseRunner):
         return bool(model)
 
     def _reasoning_args(self, task: AITask) -> list[str]:
+        model = model_for_cli("codex", str(task.metadata.get("model") or self.config.model or ""))
         effort = normalize_reasoning_effort(
             str(task.metadata.get("reasoning_effort") or self.config.reasoning_effort or ""),
             "codex",
+            model,
         )
         if not effort or effort == "auto":
             return []
@@ -1184,6 +1260,8 @@ class CodexRunner(BaseRunner):
         return []
 
     def _image_args(self, task: AITask) -> list[str]:
+        if task.image_paths and not configured_cli_supports(self.config, "image"):
+            return []
         args: list[str] = []
         for image_path in task.image_paths:
             args.extend(["--image", str(image_path)])
@@ -1198,7 +1276,7 @@ class CodexRunner(BaseRunner):
         ignore_rules: bool = False,
         allow_model: bool = True,
     ) -> list[str]:
-        base = split_command_line(self.config.codex_command)
+        base = configured_agent_command(self.config, self.config.codex_command)
         command = [
             *base,
             "exec",
@@ -1208,6 +1286,7 @@ class CodexRunner(BaseRunner):
         ]
         if ignore_rules:
             command.insert(len(base) + 1, "--ignore-rules")
+        command.extend(self._user_config_args())
         command.extend(self._model_args(task, allow_model=allow_model))
         command.extend(self._reasoning_args(task))
         command.extend(self._mode_args(task))
@@ -1228,7 +1307,7 @@ class CodexRunner(BaseRunner):
         ignore_rules: bool = False,
         allow_model: bool = True,
     ) -> list[str]:
-        base = split_command_line(self.config.codex_command)
+        base = configured_agent_command(self.config, self.config.codex_command)
         command = [
             *base,
             "exec",
@@ -1238,6 +1317,7 @@ class CodexRunner(BaseRunner):
         ]
         if ignore_rules:
             command.insert(len(base) + 3, "--ignore-rules")
+        command.extend(self._user_config_args())
         command.extend(self._model_args(task, allow_model=allow_model))
         command.extend(self._reasoning_args(task))
         command.extend(self._mode_args(task))
@@ -1317,9 +1397,10 @@ def _claude_session_key(config: AIConfig, task: AITask) -> str:
     model = model_for_cli("claude", str(task.metadata.get("model") or config.model or ""))
     effort = normalize_reasoning_effort(str(task.metadata.get("reasoning_effort") or config.reasoning_effort or ""), "claude")
     mode = normalize_permission_mode(task.metadata.get("permission_mode") or config.permission_mode, "claude")
+    command_key = "\0".join(config.resolved_cli_command) if config.resolved_cli_command else config.claude_command
     return "\n".join([
         str(task.work_dir.resolve()),
-        config.claude_command,
+        command_key,
         model,
         effort,
         mode,
@@ -1345,7 +1426,7 @@ class ClaudeStreamSession:
         threading.Thread(target=self._stderr_loop, daemon=True).start()
 
     def _start(self, task: AITask) -> subprocess.Popen[str]:
-        base = resolve_executable(split_command_line(self.config.claude_command), "claude")
+        base = resolve_executable(configured_agent_command(self.config, self.config.claude_command), "claude")
         if not base:
             raise RuntimeError("Empty claude command")
         command = [
@@ -1359,16 +1440,16 @@ class ClaudeStreamSession:
             "--replay-user-messages",
             "--verbose",
         ]
-        if self.mode != "default":
+        if self.mode != "default" and configured_cli_supports(self.config, "permission-mode"):
             command.extend(["--permission-mode", self.mode])
         effort = normalize_reasoning_effort(
             str(task.metadata.get("reasoning_effort") or self.config.reasoning_effort or ""),
             "claude",
         )
-        if effort:
+        if effort and configured_cli_supports(self.config, "effort"):
             command.extend(["--effort", effort])
         model = model_for_cli("claude", str(task.metadata.get("model") or self.config.model or ""))
-        if model:
+        if model and configured_cli_supports(self.config, "model"):
             command.extend(["--model", model])
         self.logger.info("starting persistent claude stream command=%s", scrub_command_for_log(command))
         return subprocess.Popen(
@@ -1590,7 +1671,7 @@ class ClaudeRunner(BaseRunner):
         if "{" in self.config.claude_command:
             return format_command_template(self.config.claude_command, values)
         mode = normalize_permission_mode(task.metadata.get("permission_mode") or self.config.permission_mode, "claude")
-        command = [*split_command_line(self.config.claude_command), "-p"]
+        command = [*configured_agent_command(self.config, self.config.claude_command), "-p"]
         if conversation_mode == "continue":
             command.append("--continue")
         elif conversation_mode == "continue_fork":
@@ -1598,12 +1679,12 @@ class ClaudeRunner(BaseRunner):
         elif conversation_mode == "session_id":
             command.extend(["--session-id", str(values["session_id"])])
         model = model_for_cli("claude", str(task.metadata.get("model") or self.config.model or ""))
-        if model:
+        if model and configured_cli_supports(self.config, "model"):
             command.extend(["--model", model])
         effort = normalize_reasoning_effort(str(task.metadata.get("reasoning_effort") or self.config.reasoning_effort or ""), "claude")
-        if effort:
+        if effort and configured_cli_supports(self.config, "effort"):
             command.extend(["--effort", effort])
-        if mode != "default":
+        if mode != "default" and configured_cli_supports(self.config, "permission-mode"):
             command.extend(["--permission-mode", mode])
         command.append(short_prompt)
         return command
@@ -1777,7 +1858,7 @@ class CodeWhaleRunner(BaseRunner):
         allow_model: bool = True,
         allow_reasoning: bool = True,
     ) -> list[str]:
-        base = split_command_line(self.config.codewhale_command)
+        base = configured_agent_command(self.config, self.config.codewhale_command)
         command = [*base]
         if allow_reasoning:
             command.extend(self._reasoning_config_args(task))
@@ -1995,6 +2076,87 @@ class AIManager:
         self._worker_started = False
         self._lock = threading.Lock()
         self._started_at = time.time()
+        self._resolved_cli: agent_cli.ResolvedAgentCli | None = None
+        self._cli_resolution_error = ""
+        self._cli_ready = threading.Event()
+        if self.config.provider in agent_cli.BUILTIN_PROVIDERS:
+            agent_cli.GLOBAL_AGENT_CLI_SERVICE.start()
+            threading.Thread(target=self._prepare_agent_cli, name="ai-cli-resolve", daemon=True).start()
+        else:
+            self._cli_ready.set()
+
+    def _cli_selection(self) -> agent_cli.AgentCliSelection:
+        return agent_cli.AgentCliSelection(
+            mode=self.config.cli_mode,
+            selected_path=self.config.cli_selected_path,
+            manual_path=self.config.cli_manual_path,
+            manual_args=tuple(self.config.cli_manual_args),
+        )
+
+    def _prepare_agent_cli(self) -> None:
+        additional_required: set[str] = set()
+        if self.config.provider == "codex" and self.config.ignore_codex_user_config:
+            additional_required.add("ignore-user-config")
+        try:
+            self._resolved_cli = agent_cli.GLOBAL_AGENT_CLI_SERVICE.resolve(
+                self.config.provider,
+                self._cli_selection(),
+                additional_required=additional_required,
+                timeout=min(max(float(self.config.timeout), 10.0), 30.0),
+            )
+            resolved = self._resolved_cli
+            logger = self.logger()
+            logger.info(
+                "local_agent_cli_resolved provider=%s selection_mode=%s source=%s executable=%s version=%s capability_status=%s capabilities=%s",
+                resolved.provider,
+                resolved.selection_mode,
+                resolved.source,
+                resolved.invocation_path,
+                resolved.version or "unknown",
+                resolved.capability_status,
+                ",".join(sorted(resolved.capabilities)),
+            )
+            provider_state = agent_cli.GLOBAL_AGENT_CLI_SERVICE.snapshot().get("providers", {}).get(resolved.provider, {})
+            rejected = []
+            for candidate in provider_state.get("candidates", []) if isinstance(provider_state, dict) else []:
+                if candidate.get("status") not in {"incompatible", "failed", "timeout", "stale"}:
+                    continue
+                diagnostic = str(candidate.get("diagnostic") or candidate.get("status") or "rejected").replace("\n", " ")[:240]
+                rejected.append(f"{candidate.get('path')}: {diagnostic}")
+            if rejected:
+                logger.info("local_agent_cli_rejected provider=%s candidates=%s", resolved.provider, " | ".join(rejected[:4]))
+        except Exception as exc:
+            self._cli_resolution_error = str(exc)
+            try:
+                self.logger().warning(
+                    "local_agent_cli_resolution_failed provider=%s selection_mode=%s error=%s",
+                    self.config.provider,
+                    self.config.cli_mode,
+                    self._cli_resolution_error,
+                )
+            except Exception:
+                pass
+        finally:
+            self._cli_ready.set()
+
+    def _await_agent_cli(self) -> None:
+        if self.config.provider not in agent_cli.BUILTIN_PROVIDERS:
+            return
+        timeout = min(max(float(self.config.timeout), 10.0), 30.0)
+        if not self._cli_ready.wait(timeout=timeout):
+            raise RuntimeError("Local Agent CLI discovery is still running.")
+        if self._cli_resolution_error:
+            raise RuntimeError(self._cli_resolution_error)
+        if self._resolved_cli is None:
+            raise RuntimeError(f"No resolved {self.config.provider} CLI is available.")
+
+    def cli_status(self) -> dict[str, Any]:
+        return {
+            "ready": self._cli_ready.is_set(),
+            "error": self._cli_resolution_error,
+            "selection": self._cli_selection().to_dict(),
+            "resolved": self._resolved_cli.to_dict() if self._resolved_cli else None,
+        }
 
     @property
     def state_path(self) -> Path:
@@ -2059,6 +2221,10 @@ class AIManager:
         clone.permission_mode = self.effective_permission_mode()
         clone.model = self.effective_model()
         clone.reasoning_effort = self.effective_reasoning_effort()
+        if self._resolved_cli is not None:
+            clone.resolved_cli_command = self._resolved_cli.argv_prefix
+            clone.resolved_cli_capabilities = set(self._resolved_cli.capabilities)
+        clone.cli_resolution_error = self._cli_resolution_error
         return clone
 
     def effective_permission_mode(self) -> str:
@@ -2086,16 +2252,17 @@ class AIManager:
 
     def effective_reasoning_effort(self) -> str:
         state = self.read_state()
+        model = self.effective_model()
         if "reasoning_effort" in state and self._runtime_setting_is_current(state, "reasoning_effort"):
             raw = str(state.get("reasoning_effort") or "").strip()
-            effort = normalize_reasoning_effort(raw, self.config.provider)
+            effort = normalize_reasoning_effort(raw, self.config.provider, model)
             if effort:
                 return effort
             if raw.lower() in {"", "auto", "unset", "default"}:
                 return provider_default_reasoning_effort(self.config.provider)
         config_raw = str(self.config.reasoning_effort or "").strip()
         if config_raw:
-            effort = normalize_reasoning_effort(config_raw, self.config.provider)
+            effort = normalize_reasoning_effort(config_raw, self.config.provider, model)
             if effort:
                 return effort
         return provider_default_reasoning_effort(self.config.provider)
@@ -2244,6 +2411,7 @@ class AIManager:
 
     def run_task(self, task: AITask) -> AIResult:
         self.ensure_ready()
+        self._await_agent_cli()
         logger = self.logger()
         prompt_text = self.build_prompt(task.task_type, task.user_prompt)
         if task.image_paths:
@@ -2474,11 +2642,12 @@ class AIManager:
                 self.write_state(state)
                 effort = self.effective_reasoning_effort()
                 return f"AI reasoning effort restored to default: `{effort}`."
-            if not is_valid_reasoning_effort(raw, self.config.provider):
-                options = reasoning_effort_options(self.config.provider)
+            model = self.effective_model()
+            if not is_valid_reasoning_effort(raw, self.config.provider, model):
+                options = reasoning_effort_options(self.config.provider, model)
                 detail = ", ".join(options) if options else "any custom string"
                 return f"Unknown AI reasoning effort: `{raw}`. Available: {detail}."
-            effort = normalize_reasoning_effort(raw, self.config.provider)
+            effort = normalize_reasoning_effort(raw, self.config.provider, model)
             state["reasoning_effort"] = effort
             state["updated_at"] = utcish_now()
             state["reasoning_effort_updated_at"] = state["updated_at"]

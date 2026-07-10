@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -10,6 +11,7 @@ from argparse import Namespace
 from pathlib import Path
 from typing import Any
 
+import agent_cli
 import ai_analysis
 import nga_feishu_watch
 
@@ -102,6 +104,7 @@ DEFAULT_CONFIG = {
     "ai_codex_command": "codex",
     "ai_claude_command": "claude",
     "ai_codewhale_command": "codewhale",
+    "ai_cli": agent_cli.default_agent_cli_config(),
     "ai_custom_command": "",
     "ai_model": "",
     "ai_reasoning_effort": "",
@@ -178,6 +181,9 @@ CONFIG_FIELD_COMMENTS = {
     "ai_enabled": [
         "AI 功能开关。需要先安装并登录对应 provider 的 CLI，例如 codex、claude、codewhale。",
     ],
+    "ai_cli": [
+        "内置 Agent CLI 的选择方式。auto 优先 PATH；selected/manual 会严格锁定配置路径。",
+    ],
 }
 
 
@@ -239,7 +245,7 @@ def load_jsonc(text: str) -> Any:
 
 
 def load_config(path: Path, defaults: dict[str, object] | None = None) -> dict[str, object]:
-    base = dict(DEFAULT_CONFIG if defaults is None else defaults)
+    base = copy.deepcopy(DEFAULT_CONFIG if defaults is None else defaults)
     if not path.exists():
         return base
     try:
@@ -248,6 +254,15 @@ def load_config(path: Path, defaults: dict[str, object] | None = None) -> dict[s
     except Exception:
         return base
     if isinstance(loaded, dict):
+        loaded = dict(loaded)
+        loaded["ai_cli"] = agent_cli.normalize_agent_cli_config(
+            loaded.get("ai_cli"),
+            legacy_commands={
+                "codex": loaded.get("ai_codex_command"),
+                "claude": loaded.get("ai_claude_command"),
+                "codewhale": loaded.get("ai_codewhale_command"),
+            },
+        )
         base.update(loaded)
     return base
 
@@ -293,7 +308,16 @@ def commented_config_text(config: dict[str, object]) -> str:
 
 
 def save_config(config: dict[str, object], path: Path) -> None:
-    _write_text_atomic(path, commented_config_text(config))
+    normalized = copy.deepcopy(config)
+    normalized["ai_cli"] = agent_cli.normalize_agent_cli_config(
+        normalized.get("ai_cli"),
+        legacy_commands={
+            "codex": normalized.get("ai_codex_command"),
+            "claude": normalized.get("ai_claude_command"),
+            "codewhale": normalized.get("ai_codewhale_command"),
+        },
+    )
+    _write_text_atomic(path, commented_config_text(normalized))
 
 
 def json_list_value(raw: object) -> list[Any]:
@@ -702,6 +726,12 @@ def build_args(
     ai_work_dir = Path(str(config.get("ai_work_dir") or ".ai_agent_workspace").strip())
     if data_dir is not None and not ai_work_dir.is_absolute():
         ai_work_dir = data_dir / ai_work_dir
+    ai_provider = str(config.get("ai_provider") or "codex").strip().lower()
+    cli_selection = (
+        agent_cli.selection_for_provider(config, ai_provider)
+        if ai_provider in agent_cli.BUILTIN_PROVIDERS
+        else agent_cli.AgentCliSelection()
+    )
     return Namespace(
         bot_channel=str(config.get("bot_channel") or "feishu").strip(),
         author_id=author_id,
@@ -792,7 +822,7 @@ def build_args(
         ws=ws,
         ws_no_watch=ws_no_watch,
         ai_enabled=bool(config.get("ai_enabled", False)),
-        ai_provider=str(config.get("ai_provider") or "codex").strip(),
+        ai_provider=ai_provider,
         ai_work_dir=str(ai_work_dir),
         ai_auto_analyze_new_post=bool(config.get("ai_auto_analyze_new_post", False)),
         ai_auto_analysis_prompt=str(config.get("ai_auto_analysis_prompt") or "").strip(),
@@ -802,6 +832,10 @@ def build_args(
         ai_codex_command=str(config.get("ai_codex_command") or "codex").strip(),
         ai_claude_command=str(config.get("ai_claude_command") or "claude").strip(),
         ai_codewhale_command=str(config.get("ai_codewhale_command") or "codewhale").strip(),
+        ai_cli_mode=cli_selection.mode,
+        ai_cli_selected_path=cli_selection.selected_path,
+        ai_cli_manual_path=cli_selection.manual_path,
+        ai_cli_manual_args=list(cli_selection.manual_args),
         ai_custom_command=str(config.get("ai_custom_command") or "").strip(),
         ai_model=str(config.get("ai_model") or "").strip(),
         ai_reasoning_effort=str(config.get("ai_reasoning_effort") or "").strip(),
@@ -1020,9 +1054,22 @@ def validate_config(
     provider = str(config.get("ai_provider") or "codex")
     if provider not in {"codex", "claude", "codewhale", "custom"}:
         errors.append("AI Provider 必须是 codex、claude、codewhale 或 custom")
+    if provider in agent_cli.BUILTIN_PROVIDERS:
+        selection = agent_cli.selection_for_provider(config, provider)
+        if selection.mode == "selected":
+            if not selection.selected_path:
+                errors.append("扫描选择模式必须选择一个 Agent CLI 路径")
+            elif not Path(selection.selected_path).expanduser().is_absolute():
+                errors.append("扫描选择的 Agent CLI 路径必须是绝对路径")
+        elif selection.mode == "manual":
+            if not selection.manual_path:
+                errors.append("手动模式必须填写 Agent CLI 路径")
+            elif not Path(selection.manual_path).expanduser().is_absolute():
+                errors.append("手动填写的 Agent CLI 路径必须是绝对路径")
     effort = str(config.get("ai_reasoning_effort") or "").strip().lower()
-    if provider != "custom" and effort and not ai_analysis.is_valid_reasoning_effort(effort, provider):
-        values = "、".join(ai_analysis.reasoning_effort_options(provider))
+    model = str(config.get("ai_model") or "").strip()
+    if provider != "custom" and effort and not ai_analysis.is_valid_reasoning_effort(effort, provider, model):
+        values = "、".join(ai_analysis.reasoning_effort_options(provider, model))
         errors.append(f"AI 思考强度必须是 {values}")
     if bool(config.get("ai_enabled", False)) and provider == "custom":
         if not str(config.get("ai_custom_command") or "").strip():

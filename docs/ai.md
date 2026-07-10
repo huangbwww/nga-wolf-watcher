@@ -37,7 +37,7 @@ Enable Codex:
 ```powershell
 $env:AI_ENABLED = 'true'
 $env:AI_PROVIDER = 'codex'
-$env:AI_CODEX_COMMAND = 'codex'
+$env:AI_CODEX_CLI_MODE = 'auto'
 python .\nga_feishu_watch.py --ws
 ```
 
@@ -46,7 +46,7 @@ Enable Claude Code:
 ```powershell
 $env:AI_ENABLED = 'true'
 $env:AI_PROVIDER = 'claude'
-$env:AI_CLAUDE_COMMAND = 'claude'
+$env:AI_CLAUDE_CLI_MODE = 'auto'
 python .\nga_feishu_watch.py --ws
 ```
 
@@ -55,7 +55,7 @@ Enable CodeWhale:
 ```powershell
 $env:AI_ENABLED = 'true'
 $env:AI_PROVIDER = 'codewhale'
-$env:AI_CODEWHALE_COMMAND = 'codewhale'
+$env:AI_CODEWHALE_CLI_MODE = 'auto'
 python .\nga_feishu_watch.py --ws
 ```
 
@@ -70,11 +70,50 @@ python .\nga_feishu_watch.py --ws
 
 Supported custom placeholders: `{work_dir}`, `{prompt_file}`, `{output_file}`, `{task_type}`, `{latest_event}`, `{history_file}`, `{session_id}`, `{image_files}`, `{file_files}`, `{permission_mode}`, `{model}`, `{reasoning_effort}`.
 
+### Local Agent CLI discovery and selection
+
+Codex, Claude Code, and CodeWhale now share one cross-platform CLI discovery system. The GUI and WebUI scan the machine that runs NGA Wolf Watcher once at startup and cache the result. Use **Rescan** after installing, updating, moving, or removing a CLI; normal AI requests never rescan the filesystem.
+
+Each built-in provider has three selection modes:
+
+- `auto`: use the first compatible executable in `PATH`; if it is incompatible, continue through other `PATH` entries, current native/package-manager locations, and finally supported legacy locations.
+- `selected`: pin one path from the detected candidates. If it disappears or becomes incompatible, the task fails and does not switch silently.
+- `manual`: use one absolute executable path plus a separate argument list. This mode is also strict. Use `auto` if you want a bare command name resolved through `PATH`.
+
+The startup scan covers Windows, macOS, Linux, and WSL rules. WSL uses Linux locations only. Desktop application internals such as WindowsApps resources and macOS `.app` helpers are deliberately excluded. Probes only run bounded `--version` and built-in help commands with closed stdin; they do not authenticate, update, install, run `doctor`, or send a model prompt.
+
+Headless inspection commands:
+
+```powershell
+python .\ngawolf_cli.py agent-cli list
+python .\ngawolf_cli.py agent-cli test codex
+python .\ngawolf_cli.py agent-cli rescan --provider codex
+python .\ngawolf_cli.py check
+```
+
+Process-scoped overrides use the same model. Replace `CODEX` with `CLAUDE` or `CODEWHALE` as needed:
+
+```powershell
+# Automatic PATH/native/package/legacy resolution
+$env:AI_CODEX_CLI_MODE = 'auto'
+
+# Pin a path returned by discovery
+$env:AI_CODEX_CLI_MODE = 'selected'
+$env:AI_CODEX_CLI_SELECTED_PATH = 'C:\Users\me\AppData\Roaming\npm\codex.cmd'
+
+# Strict manual executable plus optional fixed arguments
+$env:AI_CODEX_CLI_MODE = 'manual'
+$env:AI_CODEX_CLI_PATH = 'D:\Tools\codex.exe'
+$env:AI_CODEX_CLI_ARGS = '--some-fixed-option value'
+```
+
+The older `AI_CODEX_COMMAND`, `AI_CLAUDE_COMMAND`, and `AI_CODEWHALE_COMMAND` values are still read for migration. A default command name migrates to `auto`; an explicit path and its arguments migrate to strict `manual` mode. New GUI/WebUI saves use the structured `ai_cli` configuration.
+
 Model and reasoning effort:
 
 - The GUI's default model and default reasoning effort are startup defaults. Leave them empty or `default` to use the agent's own default.
 - The Feishu `/setting` card can override model/reasoning at runtime. Click `恢复默认模型/强度` to return to the GUI/startup defaults.
-- Codex model dropdown: `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.2`; reasoning effort: `low`, `medium`, `high`, `xhigh`.
+- Codex model dropdown starts with `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`, followed by the retained older model choices. The default is Sol with `high` reasoning. Sol and Terra support `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`; Luna supports through `max`; retained 5.5/5.4 models support through `xhigh`. `max` gives one task the most reasoning time, while `ultra` may automatically delegate work to subagents and is not available for Luna.
 - Claude model dropdown: `default`, `sonnet[1m]`, `opus[1m]`, `haiku`; effort: `low`, `medium`, `high`, `xhigh`, `max`.
 - CodeWhale model dropdown: `deepseek-v4-flash`, `deepseek-v4-pro`, or `auto` for CodeWhale's router; reasoning effort: `auto`, `off`, `low`, `medium`, `high`, `max`.
 - Codex receives the model through `codex exec --model <model>` and receives reasoning effort through a Codex config override.
@@ -119,10 +158,12 @@ AI Feishu commands:
 /ai mode full-auto
 /model
 /model auto
-/model gpt-5.4
+/model gpt-5.6-sol
 /reasoning
 /reasoning default
 /reasoning high
+/reasoning max
+/reasoning ultra
 /ai auto on
 /ai auto off
 /ai latest
@@ -165,9 +206,9 @@ AI_AUTO_ANALYZE_NEW_POST=false
 AI_AUTO_ANALYSIS_PROMPT=According to the latest NGA reply history, my current positions and watchlist, query public A-share market information in real time, then analyze market changes, opportunities, and risks, and give key observations and operation ideas.
 AI_PROMPT_FILE=
 AI_TIMEOUT=300
-AI_CODEX_COMMAND=codex
-AI_CLAUDE_COMMAND=claude
-AI_CODEWHALE_COMMAND=codewhale
+AI_CODEX_CLI_MODE=auto
+AI_CLAUDE_CLI_MODE=auto
+AI_CODEWHALE_CLI_MODE=auto
 AI_CUSTOM_COMMAND=
 AI_MODEL=
 AI_CODEX_MODEL=
@@ -191,6 +232,11 @@ AI_UPLOAD_LONG_RESULT=false
 AI_REPLY_STATUS_EMOJI=WITTY
 AI_PERMISSION_MODE=default
 ```
+
+Set `AI_IGNORE_CODEX_USER_CONFIG=true` (or enable the matching GUI option) to pass
+`--ignore-user-config` to Codex. Authentication and Codex sessions still use
+`CODEX_HOME`, while desktop changes to model, reasoning effort, or service tier in
+`config.toml` cannot break the Feishu worker.
 
 When `AI_WORK_DIR` is relative, the watcher resolves it next to the runtime state file. In the GUI/EXE flow that means `%LOCALAPPDATA%\NGA Wolf Watcher\.ai_agent_workspace`; in plain CLI flow with the default `.nga_seen.json`, it stays under the current working directory. Use an absolute path if you want a fixed location.
 
@@ -236,7 +282,9 @@ Security notes:
 
 Troubleshooting:
 
-- `codex`, `claude`, or `codewhale` not found: install the tool locally or set `AI_CODEX_COMMAND` / `AI_CLAUDE_COMMAND` / `AI_CODEWHALE_COMMAND` to the full command.
+- `codex`, `claude`, or `codewhale` not found: run `agent-cli list`, install the tool locally, then rescan. To pin a detected path use `selected`; for another absolute path use `manual`.
+- A selected/manual CLI stopped working: the app intentionally does not fall back. Test that selection, rescan, choose another candidate, or switch the provider back to `auto`.
+- The desktop app works but the Feishu worker fails after model/reasoning changes: use `agent-cli test codex` and confirm the resolved path. The Codex desktop app and standalone/npm CLI may be separate installations with different versions.
 - Timeout: increase `AI_TIMEOUT` or reduce the prompt/context size.
 - Empty output: check `logs/ai_agent.log`; stdout is used as a fallback if the output file is missing.
 - Feishu message too long: the default is truncated text. Set `AI_UPLOAD_LONG_RESULT=true` if you want long results uploaded as files.
