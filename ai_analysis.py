@@ -38,6 +38,7 @@ DEFAULT_PROVIDER = "codex"
 DEFAULT_HISTORY_LIMIT = 50
 DEFAULT_TIMEOUT = 300
 DEFAULT_SCHEDULE_WINDOWS = "weekday:09:30-11:30,13:00-15:00"
+STOCK_WATCHLIST_FILE = "stock_watchlist.json"
 DEFAULT_MAX_FEISHU_CHARS = 3500
 SOURCE_NAME = "nga-wolf-watcher"
 CODEX_DEFAULT_MODEL = "gpt-5.5"
@@ -95,11 +96,87 @@ def bool_value(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def stock_watchlist_source_path(work_dir: Path) -> Path:
+def stock_watchlist_source_path(
+    work_dir: Path,
+    state_path: str | os.PathLike[str] | None = None,
+    explicit_path: str | os.PathLike[str] | None = None,
+) -> Path:
+    if explicit_path:
+        return Path(explicit_path).expanduser()
     raw = os.getenv("NGA_STOCK_WATCHLIST_PATH", "").strip()
     if raw:
-        return Path(raw)
-    return work_dir.parent / "stock_watchlist.json"
+        return Path(raw).expanduser()
+    candidates: list[Path] = []
+    state_text = str(state_path or "").strip()
+    if state_text:
+        state_parent = Path(state_text).expanduser().parent
+        if state_parent != Path("."):
+            candidates.append(state_parent / STOCK_WATCHLIST_FILE)
+    candidates.append(work_dir.parent / STOCK_WATCHLIST_FILE)
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
+
+def ensure_stock_watchlist_source(path: Path) -> None:
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "groups": ["重点关注"],
+        "activeGroup": "__all__",
+        "items": [],
+        "lastRefreshTime": "",
+        "disclaimerAccepted": False,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def is_stock_position_item(item: dict[str, Any]) -> bool:
+    return any(str(item.get(key) or "").strip() for key in ("cost", "shares", "buyDate"))
+
+
+def compact_stock_item(item: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "fullCode",
+        "code",
+        "name",
+        "market",
+        "group",
+        "now",
+        "changePct",
+        "cost",
+        "shares",
+        "buyDate",
+        "positionNote",
+        "high",
+        "low",
+        "avg",
+        "signal",
+        "advice2",
+    ]
+    return {key: item.get(key) for key in keys if key in item and item.get(key) not in (None, "")}
+
+
+def sync_stock_dashboard_context(work_dir: Path, source_path: Path) -> Path:
+    ensure_stock_watchlist_source(source_path)
+    data = read_json(source_path, {})
+    items = data.get("items") if isinstance(data, dict) else []
+    if not isinstance(items, list):
+        items = []
+    compact_items = [compact_stock_item(item) for item in items if isinstance(item, dict)]
+    snapshot = {
+        "sourcePath": str(source_path.resolve()),
+        "syncedAt": utcish_now(),
+        "holdings": [item for item in compact_items if is_stock_position_item(item)],
+        "focusWatch": [item for item in compact_items if str(item.get("group") or "").strip() == "重点关注"],
+        "items": compact_items,
+    }
+    output = work_dir / "context" / "positions.json"
+    write_json(output, snapshot)
+    return output
 
 
 def safe_int(value: Any, default: int, minimum: int | None = None) -> int:
@@ -295,6 +372,7 @@ class AIConfig:
     model: str = ""
     reasoning_effort: str = ""
     ignore_codex_user_config: bool = False
+    stock_watchlist_path: Path | None = None
 
     @classmethod
     def from_namespace(cls, args: argparse.Namespace) -> "AIConfig":
@@ -307,9 +385,10 @@ class AIConfig:
         raw_reasoning = getattr(args, "ai_reasoning_effort", None)
         if raw_reasoning is None or not str(raw_reasoning).strip():
             raw_reasoning = provider_reasoning_env(provider)
+        state_path = getattr(args, "state_path", "")
         work_dir = resolve_work_dir(
             str(getattr(args, "ai_work_dir", os.getenv("AI_WORK_DIR", DEFAULT_WORK_DIR)) or DEFAULT_WORK_DIR),
-            getattr(args, "state_path", ""),
+            state_path,
         )
         return cls(
             enabled=bool_value(getattr(args, "ai_enabled", env_bool("AI_ENABLED", False))),
@@ -355,6 +434,11 @@ class AIConfig:
             ),
             ignore_codex_user_config=bool_value(
                 getattr(args, "ai_ignore_codex_user_config", env_bool("AI_IGNORE_CODEX_USER_CONFIG", False))
+            ),
+            stock_watchlist_path=stock_watchlist_source_path(
+                work_dir,
+                state_path,
+                getattr(args, "stock_watchlist_path", ""),
             ),
         )
 
@@ -2166,12 +2250,14 @@ class AIManager:
         return self.config.work_dir / "analysis" / f"{timestamp}_{safe_key(task_type)}_{safe_key(key)}.md"
 
     def local_history_context(self) -> str:
-        stock_watchlist_path = stock_watchlist_source_path(self.config.work_dir)
+        stock_watchlist_path = self.config.stock_watchlist_path or stock_watchlist_source_path(self.config.work_dir)
+        positions_snapshot_path = sync_stock_dashboard_context(self.config.work_dir, stock_watchlist_path)
         lines = [
             "Local NGA context files:",
             f"- latest event: {self.latest_event_path.resolve()}",
             f"- global history: {self.history_file.resolve()}",
             f"- stock dashboard source: {stock_watchlist_path.resolve()}",
+            f"- synced positions snapshot: {positions_snapshot_path.resolve()}",
             "- stock dashboard rules: holdings are rows with cost/shares/buyDate; focus-watch rows have group `重点关注`; suggest changes only after user confirmation.",
         ]
         summary = source_index_summary(self.config.work_dir)

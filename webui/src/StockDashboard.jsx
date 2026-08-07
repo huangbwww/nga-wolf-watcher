@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as echarts from "echarts";
 import {
   ArrowLeft,
+  ArrowDown,
+  ArrowUp,
   BarChart3,
   Briefcase,
   ChevronLeft,
@@ -47,6 +49,26 @@ const SOURCE_LABELS = {
   none: "无",
 };
 
+const SORT_OPTIONS = [
+  ["manual", "手动排序"],
+  ["name", "名称"],
+  ["fullCode", "代码"],
+  ["now", "最新价"],
+  ["changePct", "涨跌幅"],
+  ["amount", "成交额"],
+  ["avg", "均价"],
+  ["high", "阶段高点"],
+  ["low", "阶段低点"],
+  ["group", "分组"],
+  ["cost", "持仓成本"],
+  ["shares", "持仓数量"],
+  ["profit", "浮盈亏"],
+  ["profitPct", "盈亏比例"],
+  ["buyDate", "买入日"],
+];
+
+const TEXT_SORT_KEYS = new Set(["name", "fullCode", "group", "buyDate"]);
+
 function toNumber(value) {
   const n = Number.parseFloat(value);
   return Number.isFinite(n) ? n : 0;
@@ -58,12 +80,42 @@ function formatNumber(value, digits = 2) {
   return n.toLocaleString("zh-CN", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
+function isHongKongStock(itemOrCode) {
+  const code = typeof itemOrCode === "string" ? itemOrCode : itemOrCode?.fullCode || itemOrCode?.code || "";
+  return String(code || "").trim().toLowerCase().startsWith("hk");
+}
+
+function formatPrice(value, itemOrCode, digits = 2) {
+  const text = formatNumber(value, digits);
+  if (text === "--") return text;
+  return isHongKongStock(itemOrCode) ? `HK$ ${text}` : text;
+}
+
+function formatPriceLevel(value, itemOrCode) {
+  const text = String(value ?? "").trim();
+  if (!text) return "--";
+  return isHongKongStock(itemOrCode) ? `HK$ ${text}` : text;
+}
+
+function formatAxisPrice(value, itemOrCode, digits = 2) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "";
+  const text = n.toLocaleString("zh-CN", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  return isHongKongStock(itemOrCode) ? `HK$ ${text}` : text;
+}
+
 function formatCompact(value) {
   const n = toNumber(value);
   if (!n) return "--";
   if (Math.abs(n) >= 100000000) return `${(n / 100000000).toFixed(2)}亿`;
   if (Math.abs(n) >= 10000) return `${(n / 10000).toFixed(2)}万`;
   return n.toFixed(0);
+}
+
+function formatCompactMoney(value, itemOrCode) {
+  const text = formatCompact(value);
+  if (text === "--") return text;
+  return isHongKongStock(itemOrCode) ? `HK$ ${text}` : text;
 }
 
 function formatPct(value) {
@@ -107,6 +159,61 @@ function positionProfitPct(item) {
   const now = toNumber(item?.now);
   const cost = toNumber(item?.cost);
   return now > 0 && cost > 0 ? ((now - cost) / cost) * 100 : 0;
+}
+
+function amountValue(item) {
+  const amountUnit = item?.fullCode?.startsWith("hk") ? 1 : 10000;
+  return toNumber(item?.amount) * amountUnit;
+}
+
+function sortValue(item, key) {
+  if (key === "amount") return amountValue(item);
+  if (key === "profit") return positionProfit(item);
+  if (key === "profitPct") return positionProfitPct(item);
+  if (key === "name") return item?.name || item?.fullCode || "";
+  if (key === "fullCode") return item?.fullCode || item?.code || "";
+  if (TEXT_SORT_KEYS.has(key)) return String(item?.[key] || "");
+  return toNumber(item?.[key]);
+}
+
+function sortItemsBySpec(sourceItems, sortSpec) {
+  if (!sortSpec || sortSpec.key === "manual") return sourceItems;
+  const direction = sortSpec.direction === "asc" ? 1 : -1;
+  return [...sourceItems].sort((left, right) => {
+    const leftValue = sortValue(left, sortSpec.key);
+    const rightValue = sortValue(right, sortSpec.key);
+    let result = 0;
+    if (TEXT_SORT_KEYS.has(sortSpec.key)) {
+      result = String(leftValue).localeCompare(String(rightValue), "zh-CN", { numeric: true, sensitivity: "base" });
+    } else {
+      result = toNumber(leftValue) - toNumber(rightValue);
+    }
+    if (result === 0) {
+      result = String(left?.fullCode || "").localeCompare(String(right?.fullCode || ""), "zh-CN", { numeric: true });
+    }
+    return result * direction;
+  });
+}
+
+function emptyPositionSummary() {
+  return {
+    count: 0,
+    marketValue: 0,
+    costValue: 0,
+    profit: 0,
+    profitPct: 0,
+  };
+}
+
+function addToPositionSummary(summary, item) {
+  const marketValue = positionValue(item);
+  const costValue = positionCostValue(item);
+  const profit = positionProfit(item);
+  summary.count += 1;
+  summary.marketValue += marketValue;
+  summary.costValue += costValue;
+  summary.profit += profit;
+  summary.profitPct = summary.costValue > 0 ? (summary.profit / summary.costValue) * 100 : 0;
 }
 
 function calcMA(values, period) {
@@ -192,7 +299,7 @@ function StockIdentity({ item, showGroup = true, dragProps = null }) {
 function QuoteCell({ item }) {
   return (
     <div className={`stock-price ${priceTone(item.changePct)}`}>
-      <strong>{formatNumber(item.now, 2)}</strong>
+      <strong>{formatPrice(item.now, item, 2)}</strong>
       <span>{formatPct(item.changePct)}</span>
     </div>
   );
@@ -203,8 +310,8 @@ function LiquidityCell({ item }) {
   return (
     <div className="stock-mini-metric">
       <KeyValueLine label="量" value={formatCompact(item.volume)} />
-      <KeyValueLine label="额" value={formatCompact(item.amount * amountUnit)} />
-      <KeyValueLine label="均" value={formatNumber(item.avg, 3)} />
+      <KeyValueLine label="额" value={formatCompactMoney(item.amount * amountUnit, item)} />
+      <KeyValueLine label="均" value={formatPrice(item.avg, item, 3)} />
       <KeyValueLine label="换" value={`${formatNumber(item.turnoverRate, 2)}%`} />
     </div>
   );
@@ -213,9 +320,9 @@ function LiquidityCell({ item }) {
 function FibCell({ item }) {
   return (
     <div className="fib-stack">
-      <KeyValueLine label="0.382" value={item.f382 || "--"} />
-      <KeyValueLine label="0.618" value={item.f618 || "--"} />
-      <KeyValueLine label="0.786" value={item.f786 || "--"} />
+      <KeyValueLine label="0.382" value={formatPriceLevel(item.f382, item)} />
+      <KeyValueLine label="0.618" value={formatPriceLevel(item.f618, item)} />
+      <KeyValueLine label="0.786" value={formatPriceLevel(item.f786, item)} />
     </div>
   );
 }
@@ -223,8 +330,8 @@ function FibCell({ item }) {
 function PressureCell({ item }) {
   return (
     <div className="fib-stack">
-      <KeyValueLine label="压" value={item.topLine || "--"} tone="up" />
-      <KeyValueLine label="撑" value={item.bottomLine || "--"} tone="down" />
+      <KeyValueLine label="压" value={formatPriceLevel(item.topLine, item)} tone="up" />
+      <KeyValueLine label="撑" value={formatPriceLevel(item.bottomLine, item)} tone="down" />
     </div>
   );
 }
@@ -262,6 +369,7 @@ export default function StockDashboard({ api }) {
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailQuery, setDetailQuery] = useState("");
   const [boardMode, setBoardMode] = useState("watchlist");
+  const [sortSpec, setSortSpec] = useState({ key: "manual", direction: "desc" });
   const [disclaimerOpen, setDisclaimerOpen] = useState(false);
   const [stockDataMeta, setStockDataMeta] = useState({ dataPath: "", dataMtime: 0, dataSize: 0 });
   const chartRef = useRef(null);
@@ -280,15 +388,22 @@ export default function StockDashboard({ api }) {
   }, [activeGroup, items]);
   const positionItems = useMemo(() => items.filter(isPositionItem), [items]);
   const focusItems = useMemo(() => items.filter((item) => item.group === FOCUS_GROUP), [items]);
+  const sortedFilteredItems = useMemo(() => sortItemsBySpec(filteredItems, sortSpec), [filteredItems, sortSpec]);
+  const sortedPositionItems = useMemo(() => sortItemsBySpec(positionItems, sortSpec), [positionItems, sortSpec]);
+  const isManualSort = sortSpec.key === "manual";
   const positionSummary = useMemo(() => {
-    const marketValue = positionItems.reduce((sum, item) => sum + positionValue(item), 0);
-    const costValue = positionItems.reduce((sum, item) => sum + positionCostValue(item), 0);
-    const profit = positionItems.reduce((sum, item) => sum + positionProfit(item), 0);
+    const total = emptyPositionSummary();
+    const mainland = emptyPositionSummary();
+    const hongKong = emptyPositionSummary();
+    positionItems.forEach((item) => {
+      addToPositionSummary(total, item);
+      addToPositionSummary(isHongKongStock(item) ? hongKong : mainland, item);
+    });
     return {
-      marketValue,
-      costValue,
-      profit,
-      profitPct: costValue > 0 ? (profit / costValue) * 100 : 0,
+      total,
+      mainland,
+      hongKong,
+      hasMixedCurrencies: mainland.count > 0 && hongKong.count > 0,
     };
   }, [positionItems]);
   const activeStockItem = useMemo(
@@ -297,7 +412,7 @@ export default function StockDashboard({ api }) {
   );
   const selectedItem = activeStockItem || filteredItems[0] || items[0] || null;
   const detailItems = useMemo(() => {
-    const base = boardMode === "positions" ? positionItems : filteredItems.length ? filteredItems : items;
+    const base = boardMode === "positions" ? sortedPositionItems : sortedFilteredItems.length ? sortedFilteredItems : sortItemsBySpec(items, sortSpec);
     const keyword = detailQuery.trim().toLowerCase();
     if (!keyword) return base;
     return base.filter((item) => {
@@ -307,7 +422,7 @@ export default function StockDashboard({ api }) {
         .toLowerCase();
       return haystack.includes(keyword);
     });
-  }, [boardMode, detailQuery, filteredItems, items, positionItems]);
+  }, [boardMode, detailQuery, items, sortSpec, sortedFilteredItems, sortedPositionItems]);
 
   const applyWatchlist = (next) => {
     if (!next) return;
@@ -319,9 +434,12 @@ export default function StockDashboard({ api }) {
       return wanted === "__all__" || wanted === "__none__" || nextGroups.includes(wanted) ? wanted : "__all__";
     });
     const nextItems = Array.isArray(next.items) ? next.items : [];
-    if (!chartTarget && nextItems[0]) {
-      setChartTarget({ type: "stock", code: nextItems[0].fullCode, name: nextItems[0].name });
-    }
+    setChartTarget((current) => {
+      if (current?.type === "market") return current;
+      if (current?.type === "stock" && nextItems.some((item) => item.fullCode === current.code)) return current;
+      if (nextItems[0]) return { type: "stock", code: nextItems[0].fullCode, name: nextItems[0].name };
+      return null;
+    });
   };
 
   const showMessage = (text, kind = "info") => {
@@ -503,7 +621,7 @@ export default function StockDashboard({ api }) {
         return;
       }
       if (chartPayload.kind === "minute") {
-        renderStockMinute(chart, chartPayload.main, chartPayload.target?.name || chartPayload.code);
+        renderStockMinute(chart, chartPayload.main, chartPayload.target?.name || chartPayload.code, chartPayload.code);
         return;
       }
       if (chartPayload.kind === "market-minute") {
@@ -742,7 +860,7 @@ export default function StockDashboard({ api }) {
                     <strong>{item.name}</strong>
                     <small>{item.fullCode} · {item.market}{item.type ? ` · ${item.type}` : ""}</small>
                   </span>
-                  <em className={priceTone(item.changePct)}>{formatNumber(item.now, 2)} {formatPct(item.changePct)}</em>
+                  <em className={priceTone(item.changePct)}>{formatPrice(item.now, item, 2)} {formatPct(item.changePct)}</em>
                 </button>
               ))}
             </div>
@@ -785,55 +903,62 @@ export default function StockDashboard({ api }) {
         </div>
       ) : null}
 
-      <div className="stock-board-tabs">
-        <button type="button" className={boardMode === "watchlist" && activeGroup === "__all__" ? "active" : ""} onClick={() => { setBoardMode("watchlist"); setActiveGroup("__all__"); }}>
-          自选看板 <span>{items.length}</span>
-        </button>
-        <button type="button" className={boardMode === "positions" ? "active" : ""} onClick={() => setBoardMode("positions")}>
-          持仓看板 <span>{positionItems.length}</span>
-        </button>
-        <button type="button" className={boardMode === "watchlist" && activeGroup === FOCUS_GROUP ? "active" : ""} onClick={() => { setBoardMode("watchlist"); setActiveGroup(FOCUS_GROUP); }}>
-          重点关注 <span>{focusItems.length}</span>
-        </button>
-      </div>
-
-      {boardMode === "watchlist" ? (
-        <div className="stock-group-bar">
-          <button type="button" className={activeGroup === "__all__" ? "active" : ""} onClick={() => setActiveGroup("__all__")}>
-            全部 <span>{items.length}</span>
+      <div className="stock-filter-row">
+        <div className="stock-board-tabs">
+          <button type="button" className={boardMode === "watchlist" && activeGroup === "__all__" ? "active" : ""} onClick={() => { setBoardMode("watchlist"); setActiveGroup("__all__"); }}>
+            自选看板 <span>{items.length}</span>
           </button>
-          {groups.map((group) => (
-            <button key={group} type="button" className={activeGroup === group ? "active" : ""} onClick={() => setActiveGroup(group)}>
-              {group} <span>{items.filter((item) => item.group === group).length}</span>
-            </button>
-          ))}
-          <button type="button" className={activeGroup === "__none__" ? "active" : ""} onClick={() => setActiveGroup("__none__")}>
-            未分组 <span>{items.filter((item) => !item.group).length}</span>
+          <button type="button" className={boardMode === "positions" ? "active" : ""} onClick={() => setBoardMode("positions")}>
+            持仓看板 <span>{positionItems.length}</span>
           </button>
-          <div className="stock-group-editor">
-            <Layers3 size={15} />
-            <input value={newGroup} onChange={(event) => setNewGroup(event.target.value)} onKeyDown={(event) => event.key === "Enter" && addGroup()} placeholder="新分组" />
-            <button type="button" onClick={addGroup}><Plus size={14} /></button>
-          </div>
+          <button type="button" className={boardMode === "watchlist" && activeGroup === FOCUS_GROUP ? "active" : ""} onClick={() => { setBoardMode("watchlist"); setActiveGroup(FOCUS_GROUP); }}>
+            重点关注 <span>{focusItems.length}</span>
+          </button>
         </div>
-      ) : null}
+
+        {boardMode === "watchlist" ? (
+          <div className="stock-group-bar">
+            <button type="button" className={activeGroup === "__all__" ? "active" : ""} onClick={() => setActiveGroup("__all__")}>
+              全部 <span>{items.length}</span>
+            </button>
+            {groups.map((group) => (
+              <button key={group} type="button" className={activeGroup === group ? "active" : ""} onClick={() => setActiveGroup(group)}>
+                {group} <span>{items.filter((item) => item.group === group).length}</span>
+              </button>
+            ))}
+            <button type="button" className={activeGroup === "__none__" ? "active" : ""} onClick={() => setActiveGroup("__none__")}>
+              未分组 <span>{items.filter((item) => !item.group).length}</span>
+            </button>
+            <div className="stock-group-editor">
+              <Layers3 size={15} />
+              <input value={newGroup} onChange={(event) => setNewGroup(event.target.value)} onKeyDown={(event) => event.key === "Enter" && addGroup()} placeholder="新分组" />
+              <button type="button" onClick={addGroup}><Plus size={14} /></button>
+            </div>
+          </div>
+        ) : null}
+      </div>
 
       <div className="stock-workspace">
         {boardMode === "positions" ? (
         <PositionBoard
-            items={positionItems}
+            items={sortedPositionItems}
             summary={positionSummary}
             onOpen={openStockWorkbench}
             onUpdateItem={updateItem}
             onMarkFocus={markFocus}
-            dragPropsFor={dragPropsFor}
+            dragPropsFor={isManualSort ? dragPropsFor : null}
+            sortSpec={sortSpec}
+            onSortChange={setSortSpec}
           />
         ) : (
         <>
         <div className="stock-table-shell">
           <div className="stock-table-header">
-            <strong>{activeGroup === "__all__" ? "全部自选" : activeGroup === "__none__" ? "未分组" : activeGroup}</strong>
-            <span>{filteredItems.length} 只</span>
+            <div>
+              <strong>{activeGroup === "__all__" ? "全部自选" : activeGroup === "__none__" ? "未分组" : activeGroup}</strong>
+              <span>{filteredItems.length} 只</span>
+            </div>
+            <SortControls sortSpec={sortSpec} onChange={setSortSpec} />
           </div>
           <div className="stock-table-scroll">
             <table className="stock-table">
@@ -852,10 +977,10 @@ export default function StockDashboard({ api }) {
                 </tr>
               </thead>
               <tbody>
-                {filteredItems.map((item) => (
+                {sortedFilteredItems.map((item) => (
                   <tr key={item.fullCode} className={stockRowClass(item, activeStockItem?.fullCode)} onClick={() => openStockWorkbench(item)}>
                     <td>
-                      <StockIdentity item={item} dragProps={dragPropsFor(item)} />
+                      <StockIdentity item={item} dragProps={isManualSort ? dragPropsFor(item) : null} />
                     </td>
                     <td>
                       <QuoteCell item={item} />
@@ -898,7 +1023,7 @@ export default function StockDashboard({ api }) {
                     </td>
                   </tr>
                 ))}
-                {!filteredItems.length ? (
+                {!sortedFilteredItems.length ? (
                   <tr>
                     <td colSpan="10">
                       <div className="stock-empty">暂无自选</div>
@@ -961,20 +1086,76 @@ export default function StockDashboard({ api }) {
   );
 }
 
-function PositionBoard({ items, summary, onOpen, onUpdateItem, onMarkFocus, dragPropsFor }) {
+function SortControls({ sortSpec, onChange }) {
+  const activeOption = SORT_OPTIONS.find(([value]) => value === sortSpec.key) || SORT_OPTIONS[0];
+  const isManual = sortSpec.key === "manual";
+  const nextDirection = sortSpec.direction === "asc" ? "desc" : "asc";
+
+  return (
+    <div className="stock-sort-controls">
+      <label>
+        <span>排序</span>
+        <select
+          value={sortSpec.key}
+          onChange={(event) => onChange({ key: event.target.value, direction: event.target.value === "manual" ? "desc" : sortSpec.direction })}
+          title="选择看板排序字段"
+        >
+          {SORT_OPTIONS.map(([value, label]) => (
+            <option key={value} value={value}>{label}</option>
+          ))}
+        </select>
+      </label>
+      <button
+        type="button"
+        className="sort-direction-button"
+        onClick={() => onChange({ ...sortSpec, direction: nextDirection })}
+        disabled={isManual}
+        title={isManual ? "手动排序不需要升降序" : `${activeOption[1]}${sortSpec.direction === "asc" ? "升序" : "降序"}`}
+      >
+        {sortSpec.direction === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
+        <span>{sortSpec.direction === "asc" ? "升序" : "降序"}</span>
+      </button>
+    </div>
+  );
+}
+
+function PositionBoard({ items, summary, onOpen, onUpdateItem, onMarkFocus, dragPropsFor, sortSpec, onSortChange }) {
+  const summaryRows = summary?.hasMixedCurrencies
+    ? [
+        ["持仓数量", `${items.length} 只`],
+        ["A股总市值", formatPrice(summary.mainland.marketValue, "", 2)],
+        ["A股成本", formatPrice(summary.mainland.costValue, "", 2)],
+        ["A股浮盈亏", `${formatPrice(summary.mainland.profit, "", 2)} / ${formatPct(summary.mainland.profitPct)}`],
+        ["港股总市值", formatPrice(summary.hongKong.marketValue, "hk", 2)],
+        ["港股成本", formatPrice(summary.hongKong.costValue, "hk", 2)],
+        ["港股浮盈亏", `${formatPrice(summary.hongKong.profit, "hk", 2)} / ${formatPct(summary.hongKong.profitPct)}`],
+      ]
+    : (() => {
+        const summaryCode = items.length > 0 && items.every((item) => isHongKongStock(item)) ? "hk" : "";
+        const total = summary?.total || emptyPositionSummary();
+        return [
+          ["持仓数量", `${items.length} 只`],
+          ["总市值", formatPrice(total.marketValue, summaryCode, 2)],
+          ["成本市值", formatPrice(total.costValue, summaryCode, 2)],
+          ["浮盈亏", `${formatPrice(total.profit, summaryCode, 2)} / ${formatPct(total.profitPct)}`],
+        ];
+      })();
+
   return (
     <div className="position-board">
       <div className="position-summary-grid">
-        <Metric label="持仓数量" value={`${items.length} 只`} />
-        <Metric label="总市值" value={formatNumber(summary.marketValue, 2)} />
-        <Metric label="成本市值" value={formatNumber(summary.costValue, 2)} />
-        <Metric label="浮盈亏" value={`${formatNumber(summary.profit, 2)} / ${formatPct(summary.profitPct)}`} />
+        {summaryRows.map(([label, value]) => (
+          <Metric key={label} label={label} value={value} />
+        ))}
       </div>
 
       <div className="stock-table-shell">
         <div className="stock-table-header">
-          <strong>持仓看板</strong>
-          <span>按成本、数量或买入日识别持仓</span>
+          <div>
+            <strong>持仓看板</strong>
+            <span>按成本、数量或买入日识别持仓</span>
+          </div>
+          <SortControls sortSpec={sortSpec} onChange={onSortChange} />
         </div>
         <div className="stock-table-scroll">
           <table className="stock-table position-table">
@@ -1001,7 +1182,7 @@ function PositionBoard({ items, summary, onOpen, onUpdateItem, onMarkFocus, drag
                 return (
                   <tr key={item.fullCode} className={stockRowClass(item)} onClick={() => onOpen(item)}>
                     <td>
-                      <StockIdentity item={item} dragProps={dragPropsFor(item)} />
+                      <StockIdentity item={item} dragProps={dragPropsFor ? dragPropsFor(item) : null} />
                     </td>
                     <td>
                       <QuoteCell item={item} />
@@ -1011,7 +1192,7 @@ function PositionBoard({ items, summary, onOpen, onUpdateItem, onMarkFocus, drag
                     </td>
                     <td>
                       <div className={`position-profit ${priceTone(profit)}`}>
-                        <strong>{formatNumber(profit, 2)}</strong>
+                        <strong>{formatPrice(profit, item, 2)}</strong>
                         <span>{formatPct(profitPct)}</span>
                       </div>
                     </td>
@@ -1117,7 +1298,7 @@ function StockDetailWorkbench({
           <em>{code}</em>
         </div>
         <div className={`workbench-quote ${tone}`}>
-          <strong>{item ? formatNumber(item.now, 2) : "--"}</strong>
+          <strong>{item ? formatPrice(item.now, item, 2) : "--"}</strong>
           <span>{item ? formatPct(item.changePct) : "指数"}</span>
         </div>
         <div className="workbench-nav">
@@ -1217,9 +1398,9 @@ function StockDetailWorkbench({
 
               <div className="stock-detail-grid workbench-metric-grid">
                 <Metric label="成交量" value={formatCompact(item.volume)} />
-                <Metric label="成交额" value={formatCompact(item.amount * amountUnit)} />
+                <Metric label="成交额" value={formatCompactMoney(item.amount * amountUnit, item)} />
                 <Metric label="换手" value={`${formatNumber(item.turnoverRate, 2)}%`} />
-                <Metric label="均价" value={formatNumber(item.avg, 3)} />
+                <Metric label="均价" value={formatPrice(item.avg, item, 3)} />
                 <Metric label="趋势" value={item.trend || "--"} />
                 <Metric label="K线状态" value={item.klineStatus || "--"} />
               </div>
@@ -1235,12 +1416,12 @@ function StockDetailWorkbench({
                   />
                 </div>
                 <div className="stock-detail-grid workbench-metric-grid compact">
-                  <Metric label="0.382" value={item.f382 || "--"} />
-                  <Metric label="0.618" value={item.f618 || "--"} />
-                  <Metric label="0.786" value={item.f786 || "--"} />
+                  <Metric label="0.382" value={formatPriceLevel(item.f382, item)} />
+                  <Metric label="0.618" value={formatPriceLevel(item.f618, item)} />
+                  <Metric label="0.786" value={formatPriceLevel(item.f786, item)} />
                   <Metric label="顶部来源" value={sourceLabel(item.swingHighSource)} />
-                  <Metric label="压力" value={item.topLine || "--"} />
-                  <Metric label="支撑" value={item.bottomLine || "--"} />
+                  <Metric label="压力" value={formatPriceLevel(item.topLine, item)} />
+                  <Metric label="支撑" value={formatPriceLevel(item.bottomLine, item)} />
                 </div>
               </div>
 
@@ -1252,7 +1433,7 @@ function StockDetailWorkbench({
                 </div>
                 <div className="stock-detail-grid workbench-metric-grid compact">
                   <Metric label="持仓天数" value={item.holdDays || "--"} />
-                  <Metric label="浮盈亏" value={`${formatNumber(positionProfit(item), 2)} / ${formatPct(positionProfitPct(item))}`} />
+                  <Metric label="浮盈亏" value={`${formatPrice(positionProfit(item), item, 2)} / ${formatPct(positionProfitPct(item))}`} />
                   <Metric label="底部来源" value={sourceLabel(item.swingLowSource)} />
                 </div>
               </div>
@@ -1294,6 +1475,7 @@ function HoldingEditor({ item, onCommit }) {
   const [cost, setCost] = useState(item.cost || "");
   const [shares, setShares] = useState(item.shares || "");
   const [buyDate, setBuyDate] = useState(item.buyDate || "");
+  const isHongKong = isHongKongStock(item);
 
   useEffect(() => setCost(item.cost || ""), [item.cost]);
   useEffect(() => setShares(item.shares || ""), [item.shares]);
@@ -1309,7 +1491,10 @@ function HoldingEditor({ item, onCommit }) {
 
   return (
     <div className="holding-editor" onClick={(event) => event.stopPropagation()}>
-      <input value={cost} onChange={(event) => setCost(event.target.value)} onBlur={commit} placeholder="成本" />
+      <div className={`holding-cost-field ${isHongKong ? "has-currency" : ""}`}>
+        {isHongKong ? <span className="holding-currency">HK$</span> : null}
+        <input value={cost} onChange={(event) => setCost(event.target.value)} onBlur={commit} placeholder="成本" />
+      </div>
       <input value={shares} onChange={(event) => setShares(event.target.value)} onBlur={commit} placeholder="数量" />
       <input value={buyDate} onChange={(event) => setBuyDate(event.target.value)} onBlur={commit} placeholder="日期" />
     </div>
@@ -1325,11 +1510,12 @@ function Metric({ label, value }) {
   );
 }
 
-function renderStockMinute(chart, main, name) {
+function renderStockMinute(chart, main, name, code = "") {
   if (!main?.points?.length) {
     chart.clear();
     return;
   }
+  const priceCode = main.code || code;
   const times = main.points.map((point) => `${point.time.slice(0, 2)}:${point.time.slice(2, 4)}`);
   const prices = main.points.map((point) => point.price);
   const volumes = main.points.map((point, index) => Math.max(point.volume - (index > 0 ? main.points[index - 1].volume : 0), 0));
@@ -1355,7 +1541,7 @@ function renderStockMinute(chart, main, name) {
       { type: "category", data: times, gridIndex: 1, boundaryGap: false, axisLabel: { show: false }, axisTick: { show: false } },
     ],
     yAxis: [
-      { type: "value", scale: true, splitLine: { lineStyle: { color: "#e6edf5" } } },
+      { type: "value", scale: true, axisLabel: { formatter: (value) => formatAxisPrice(value, priceCode, 2) }, splitLine: { lineStyle: { color: "#e6edf5" } } },
       { type: "value", gridIndex: 1, axisLabel: { show: false }, splitLine: { show: false } },
     ],
     series: [
@@ -1432,6 +1618,7 @@ function renderKline(chart, klines, item, name) {
     chart.clear();
     return;
   }
+  const priceCode = item?.fullCode || item?.code || "";
   const previousZoom = Array.isArray(chart.getOption?.().dataZoom) ? chart.getOption().dataZoom : [];
   const zoomValue = (index, key, fallback) => {
     const value = Number(previousZoom[index]?.[key]);
@@ -1492,7 +1679,7 @@ function renderKline(chart, klines, item, name) {
       { type: "category", data: dates, gridIndex: 1, boundaryGap: true, axisLabel: { show: false }, axisTick: { show: false } },
     ],
     yAxis: [
-      { type: "value", scale: true, splitLine: { lineStyle: { color: "#e6edf5" } } },
+      { type: "value", scale: true, axisLabel: { formatter: (value) => formatAxisPrice(value, priceCode, 2) }, splitLine: { lineStyle: { color: "#e6edf5" } } },
       { type: "value", gridIndex: 1, axisLabel: { show: false }, splitLine: { show: false } },
     ],
     dataZoom: [
@@ -1517,7 +1704,7 @@ function buildMarkLines(item) {
     .filter(([, value]) => toNumber(value) > 0)
     .map(([label, value, color]) => ({
       yAxis: toNumber(value),
-      label: { formatter: `${label} ${value}`, position: "insideEndTop", color, fontSize: 10 },
+      label: { formatter: `${label} ${formatPriceLevel(value, item)}`, position: "insideEndTop", color, fontSize: 10 },
       lineStyle: { color, type: "dashed", width: 1 },
     }));
 }
