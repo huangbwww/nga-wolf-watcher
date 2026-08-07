@@ -209,6 +209,8 @@ class NgaPost:
     source_id: str = ""
     source_label: str = ""
     canonical_key: str = ""
+    thread_id: str = ""
+    thread_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -232,6 +234,7 @@ class ThreadAuthorWatch:
     feishu_app_secret: str = ""
     feishu_receive_id: str = ""
     feishu_id_type: str = "chat_id"
+    thread_label: str = ""
 
     @property
     def key(self) -> str:
@@ -334,15 +337,17 @@ class BotCommand:
     target_id: str = ""
     count: int = DEFAULT_REPLY_COUNT
     days: int = 0
+    thread_id: str = ""
 
     def __str__(self) -> str:
         action_labels = {"start": "开始菜单", "history": "查询", "pack": "打包"}
         target_labels = {"reply": "用户回复", "thread": "帖子回复", "": "无目标"}
         range_text = f"{self.days} 天" if self.days else f"{self.count} 条"
+        thread_text = f" @{self.thread_id}" if self.target_type == "reply" and self.thread_id else ""
         return (
             f"{action_labels.get(self.action, self.action)} "
             f"{target_labels.get(self.target_type, self.target_type)} "
-            f"{self.target_id or '-'} {range_text}"
+            f"{self.target_id or '-'}{thread_text} {range_text}"
         ).strip()
 
 
@@ -573,25 +578,92 @@ def parse_thread_author_watches(raw: Any) -> list[ThreadAuthorWatch]:
 
 
 def post_source_display_name(post: NgaPost) -> str:
-    return (post.source_label or post.source_id or "").strip()
+    source_label = str(post.source_label or "").strip()
+    if source_label:
+        return source_label
+    author = str(post.author or "").strip()
+    author_id = str(post.author_id or "").strip()
+    if author and author != author_id and not re.fullmatch(r"\d+", author):
+        return author
+    if author_id:
+        return author_id
+    if author:
+        return author
+    if post.source_type == "thread_author":
+        _, source_author_id = parse_thread_author_source_id(post.source_id)
+        if source_author_id:
+            return source_author_id
+    return (post.source_id or "").strip()
+
+
+def post_author_display_name(post: NgaPost) -> str:
+    author = str(post.author or "").strip()
+    author_id = str(post.author_id or "").strip()
+    if author and author != author_id and not re.fullmatch(r"\d+", author):
+        return author
+    source_label = str(post.source_label or "").strip()
+    if source_label:
+        return source_label
+    if author_id:
+        return author_id
+    if author:
+        return author
+    if post.source_type == "thread_author":
+        _, source_author_id = parse_thread_author_source_id(post.source_id)
+        if source_author_id:
+            return source_author_id
+    return str(post.source_id or "").strip()
+
+
+def parse_thread_author_source_id(source_id: str) -> tuple[str, str]:
+    text = str(source_id or "").strip()
+    if ":" not in text:
+        return "", ""
+    tid, author_id = text.split(":", 1)
+    return tid.strip(), author_id.strip()
+
+
+def post_thread_id_for_title(post: NgaPost) -> str:
+    thread_id = str(getattr(post, "thread_id", "") or "").strip()
+    if thread_id:
+        return thread_id
+    if post.source_type == "thread_author":
+        tid, _ = parse_thread_author_source_id(post.source_id)
+        if tid:
+            return tid
+    try:
+        parsed = urllib.parse.urlparse(post.url)
+        query = urllib.parse.parse_qs(parsed.query)
+        return str((query.get("tid") or [""])[0]).strip()
+    except Exception:
+        return ""
+
+
+def post_thread_display_name(post: NgaPost) -> str:
+    thread_label = str(getattr(post, "thread_label", "") or "").strip()
+    if thread_label:
+        return thread_label
+    subject = str(post.subject or "").strip()
+    if subject:
+        return subject
+    return post_thread_id_for_title(post)
+
+
+def truncate_reply_title(value: str, limit: int = 36) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."
 
 
 def new_reply_title(post: NgaPost) -> str:
     source_name = post_source_display_name(post)
+    thread_name = truncate_reply_title(post_thread_display_name(post))
+    if source_name and thread_name:
+        return f"\u3010{source_name}\u3011\u5728\u3010{thread_name}\u3011\u65b0\u56de\u590d"
     if source_name:
-        if post.source_type == "thread_author" and post.subject:
-            title = post.subject.strip()
-            if len(title) > 36:
-                title = title[:36].rstrip() + "..."
-            if post.source_label:
-                return f"{source_name} 在《{title}》新回复"
-            return f"帖内作者 {source_name} 在《{title}》新回复"
-        if post.source_label:
-            return f"{source_name} 新回复"
-        if post.source_type == "author":
-            return f"用户 {source_name} 新回复"
-        return f"{source_name} 新回复"
-    return "NGA 新回复"
+        return f"{source_name}\u65b0\u56de\u590d"
+    return "NGA \u65b0\u56de\u590d"
 
 
 def watch_author_targets(args: argparse.Namespace) -> list[WatchTarget]:
@@ -606,6 +678,45 @@ def preset_thread_targets(args: argparse.Namespace) -> list[WatchTarget]:
 
 def thread_author_watches(args: argparse.Namespace) -> list[ThreadAuthorWatch]:
     return parse_thread_author_watches(getattr(args, "thread_author_watches", "") or os.getenv("NGA_THREAD_AUTHOR_WATCHES", ""))
+
+
+def append_unique_watch_target(targets: list[WatchTarget], seen: set[str], target_id: str, label: str = "") -> None:
+    target_id = str(target_id or "").strip()
+    if not target_id or target_id in seen:
+        return
+    seen.add(target_id)
+    targets.append(WatchTarget(target_id, str(label or "").strip()))
+
+
+def command_author_targets(args: argparse.Namespace) -> list[WatchTarget]:
+    base_targets = watch_author_targets(args)
+    rules = configured_listen_rules(args)
+    if not rules:
+        return base_targets
+    labels_by_id = {target.id: target.label for target in base_targets if target.label}
+    targets: list[WatchTarget] = []
+    seen: set[str] = set()
+    for rule in rules:
+        append_unique_watch_target(targets, seen, rule.author_id, labels_by_id.get(rule.author_id) or rule.label)
+    for target in base_targets:
+        append_unique_watch_target(targets, seen, target.id, target.label)
+    return targets
+
+
+def command_thread_targets(args: argparse.Namespace) -> list[WatchTarget]:
+    base_targets = preset_thread_targets(args)
+    rules = configured_listen_rules(args)
+    if not rules:
+        return base_targets
+    labels_by_id = {target.id: target.label for target in base_targets if target.label}
+    targets: list[WatchTarget] = []
+    seen: set[str] = set()
+    for rule in rules:
+        if rule.mode == "thread_author":
+            append_unique_watch_target(targets, seen, rule.tid, labels_by_id.get(rule.tid))
+    for target in base_targets:
+        append_unique_watch_target(targets, seen, target.id, target.label)
+    return targets
 
 
 def parse_feishu_bot_profiles(raw: Any) -> list[FeishuBotProfile]:
@@ -1263,12 +1374,21 @@ def thread_author_watches_for_watch(args: argparse.Namespace) -> list[ThreadAuth
         return thread_author_watches(args) if mode in {"thread_author", "both"} else []
     watches: list[ThreadAuthorWatch] = []
     seen: set[str] = set()
+    author_labels = {target.id: target.label for target in watch_author_targets(args) if target.label}
+    thread_labels = {target.id: target.label for target in preset_thread_targets(args) if target.label}
     for rule in rules:
         key = f"{rule.tid}:{rule.author_id}"
         if key in seen:
             continue
         seen.add(key)
-        watches.append(ThreadAuthorWatch(rule.tid, rule.author_id, rule.label))
+        watches.append(
+            ThreadAuthorWatch(
+                rule.tid,
+                rule.author_id,
+                author_labels.get(rule.author_id) or rule.label,
+                thread_label=thread_labels.get(rule.tid, ""),
+            )
+        )
     return watches
 
 
@@ -1300,6 +1420,8 @@ def add_post_source(post: NgaPost, source_type: str, target: WatchTarget) -> Nga
         source_id=target.id,
         source_label=target.label,
         canonical_key=post.canonical_key or post.key,
+        thread_id=post.thread_id,
+        thread_label=post.thread_label,
     )
 
 
@@ -1320,6 +1442,8 @@ def add_thread_author_source(post: NgaPost, watch: ThreadAuthorWatch) -> NgaPost
         source_id=watch.key,
         source_label=watch.label,
         canonical_key=post.canonical_key or post.key,
+        thread_id=watch.tid,
+        thread_label=watch.thread_label,
     )
 
 
@@ -2022,6 +2146,31 @@ def strip_markup(value: str) -> str:
     return value.strip()
 
 
+NGA_LIMITED_PLACEHOLDER_MARKERS = (
+    "账号权限不足",
+    "权限不足",
+    "帖子发布或回复时间超过限制",
+)
+
+
+def is_limited_nga_placeholder(item: dict[str, Any], subject: str, content: str) -> bool:
+    denied = first_str(item, "denied", "__topic_denied", "topic_denied").strip()
+    if denied == "1":
+        return True
+    error = strip_markup(first_str(item, "error", "__topic_error", "topic_error"))
+    text = "\n".join(part for part in (subject, content, error) if part)
+    return bool(error and any(marker in text for marker in NGA_LIMITED_PLACEHOLDER_MARKERS))
+
+
+def item_with_topic_context(item: dict[str, Any], topic: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(item)
+    for name in ("tid", "fid", "subject", "postdate", "lastpost", "lastmodify", "denied", "error"):
+        value = topic.get(name)
+        if value is not None and value != "":
+            enriched[f"__topic_{name}"] = value
+    return enriched
+
+
 IMAGE_EXT_RE = r"(?:jpg|jpeg|png|gif|webp|bmp)"
 
 
@@ -2147,6 +2296,8 @@ def make_post(item: dict[str, Any], fallback_subject: str = "") -> NgaPost | Non
     floor = first_str(item, "lou", "floor")
     subject = strip_markup(first_str(item, "subject", "title", "thread_subject"))
     subject = subject or strip_markup(fallback_subject) or "(无标题)"
+    if is_limited_nga_placeholder(item, subject, content):
+        return None
 
     key_source = "|".join([tid, pid, postdate, subject, content[:80]])
     key = pid or hashlib.sha1(key_source.encode("utf-8")).hexdigest()
@@ -2169,6 +2320,7 @@ def make_post(item: dict[str, Any], fallback_subject: str = "") -> NgaPost | Non
         quote_image_urls=quote_image_urls,
         reply_image_urls=reply_image_urls,
         canonical_key=key,
+        thread_id=tid,
     )
 
 
@@ -2251,6 +2403,10 @@ def post_sort_key(post: NgaPost) -> tuple[float, str]:
     return post_timestamp(post) or 0.0, post.key
 
 
+def posts_chronological(posts: list[NgaPost]) -> list[NgaPost]:
+    return sorted(posts, key=post_sort_key)
+
+
 def post_identity_key(post: NgaPost) -> str:
     return str(post.canonical_key or post.key or "").strip()
 
@@ -2268,9 +2424,41 @@ def is_post_seen(seen: set[str], post: NgaPost) -> bool:
     return bool(post_seen_keys(post) & seen)
 
 
+def payload_user_lookup(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    users: dict[str, dict[str, Any]] = {}
+    for item in walk_dicts(payload.get("data", payload)):
+        raw_users = item.get("__U")
+        if not isinstance(raw_users, dict):
+            continue
+        for raw_uid, raw_user in raw_users.items():
+            if not isinstance(raw_user, dict):
+                continue
+            uid = str(raw_user.get("uid") or raw_uid or "").strip()
+            if uid:
+                users[uid] = raw_user
+    return users
+
+
+def item_with_payload_author(item: dict[str, Any], users: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    uid = first_str(item, "authorid", "uid", "user_id")
+    if not uid or first_str(item, "author", "username"):
+        return item
+    user = users.get(uid)
+    if not isinstance(user, dict):
+        return item
+    author = first_str(user, "username", "uname", "name")
+    if not author:
+        return item
+    enriched = dict(item)
+    enriched["author"] = author
+    return enriched
+
+
 def extract_posts(payload: dict[str, Any]) -> list[NgaPost]:
     seen: set[str] = set()
+    handled_items: set[int] = set()
     posts: list[NgaPost] = []
+    users = payload_user_lookup(payload)
     topics = payload.get("data", {}).get("__T", {})
     if isinstance(topics, dict):
         for topic in topics.values():
@@ -2279,13 +2467,17 @@ def extract_posts(payload: dict[str, Any]) -> list[NgaPost]:
             reply = topic.get("__P")
             if not isinstance(reply, dict):
                 continue
+            handled_items.add(id(reply))
+            reply = item_with_topic_context(item_with_payload_author(reply, users), topic)
             post = make_post(reply, fallback_subject=first_str(topic, "subject", "title"))
             if post and post.key not in seen:
                 seen.add(post.key)
                 posts.append(post)
 
     for item in walk_dicts(payload.get("data", payload)):
-        post = make_post(item)
+        if id(item) in handled_items:
+            continue
+        post = make_post(item_with_payload_author(item, users))
         if post and post.key not in seen:
             seen.add(post.key)
             posts.append(post)
@@ -2402,7 +2594,7 @@ def post_image_lines(post: NgaPost, limit: int = 6) -> list[str]:
 
 
 def feishu_message_text(post: NgaPost) -> str:
-    byline = f"Author: {post.author or post.author_id or 'unknown'}"
+    byline = f"Author: {post_author_display_name(post) or 'unknown'}"
     if post.floor:
         byline += f" Floor: {post.floor}"
     source_line = ""
@@ -2417,7 +2609,7 @@ def feishu_message_text(post: NgaPost) -> str:
     ]
     if source_line:
         lines.append(source_line)
-    lines.extend([f"Link: {post.url}", "", friendly_post_content(post.content, quote_limit=700, reply_limit=1200)[:1800]])
+    lines.extend([f"Link: {post.url}", "", post_friendly_content(post, quote_limit=700, reply_limit=1200)[:1800]])
     lines.extend(post_image_lines(post, limit=10))
     return "\n".join(lines)
 
@@ -2425,11 +2617,12 @@ def feishu_message_text(post: NgaPost) -> str:
 def feishu_history_text(posts: list[NgaPost], title: str) -> str:
     lines = [title]
     for idx, post in enumerate(posts, 1):
-        excerpt = re.sub(r"\s+", " ", friendly_post_content(post.content, quote_limit=180, reply_limit=260)).strip()[:420]
+        excerpt = re.sub(r"\s+", " ", post_friendly_content(post, quote_limit=180, reply_limit=260)).strip()[:420]
         lines.append(f"\n{idx}. {post.subject}")
         meta = post.post_time or "unknown"
-        if post.author or post.author_id:
-            meta += f" | {post.author or post.author_id}"
+        author = post_author_display_name(post)
+        if author:
+            meta += f" | {author}"
         if post.floor:
             meta += f" | #{post.floor}"
         if post.source_id:
@@ -2447,8 +2640,9 @@ def wechat_posts_text(posts: list[NgaPost], title: str) -> str:
             lines.extend(["", "-" * 24])
         lines.append(f"\n{idx}. {post.subject}")
         meta = post.post_time or "unknown"
-        if post.author or post.author_id:
-            meta += f" | {post.author or post.author_id}"
+        author = post_author_display_name(post)
+        if author:
+            meta += f" | {author}"
         if post.floor:
             meta += f" | #{post.floor}"
         if post.source_id:
@@ -2456,7 +2650,7 @@ def wechat_posts_text(posts: list[NgaPost], title: str) -> str:
         lines.append(meta)
         lines.append(post.url)
         lines.append("")
-        lines.append(friendly_post_content(post.content, quote_limit=900, reply_limit=1600))
+        lines.append(post_friendly_content(post, quote_limit=900, reply_limit=1600))
         lines.extend(post_image_lines(post, limit=6))
     return "\n".join(lines).strip()
 
@@ -2467,7 +2661,7 @@ def posts_to_txt(posts: list[NgaPost], title: str) -> str:
         meta = [
             f"{idx}. {post.subject}",
             f"time: {post.post_time or 'unknown'}",
-            f"author: {post.author or post.author_id or 'unknown'}",
+            f"author: {post_author_display_name(post) or 'unknown'}",
             f"url: {post.url}",
         ]
         if post.floor:
@@ -2479,7 +2673,7 @@ def posts_to_txt(posts: list[NgaPost], title: str) -> str:
         meta.extend(f"reply-image: {url}" for url in reply_images)
         meta.extend(f"image: {url}" for url in other_images)
         chunks.append("\n".join(meta))
-        chunks.append(friendly_post_content(post.content, quote_limit=1200, reply_limit=3000))
+        chunks.append(post_friendly_content(post, quote_limit=1200, reply_limit=3000))
         chunks.append("-" * 60)
     return "\n".join(chunks)
 
@@ -2510,17 +2704,8 @@ def wxpusher_escape_markdown_text(value: str) -> str:
     return "\n".join(lines)
 
 
-def wxpusher_friendly_post_content(value: str, *, quote_limit: int = 800, reply_limit: int = 1800) -> str:
-    text = wxpusher_escape_markdown_text(friendly_post_content(value, quote_limit=quote_limit, reply_limit=reply_limit))
-    formatted: list[str] = []
-    for line in text.splitlines():
-        if line == "被回复内容：":
-            formatted.append("**被回复内容：**")
-        elif line == "本次回复：":
-            formatted.append('<span style="color:#d93025;font-weight:700;">本次回复：</span>')
-        else:
-            formatted.append(line)
-    return "\n".join(formatted).strip()
+def wxpusher_friendly_post_content(post: NgaPost, *, quote_limit: int = 800, reply_limit: int = 1800) -> str:
+    return wxpusher_escape_markdown_text(post_friendly_content(post, quote_limit=quote_limit, reply_limit=reply_limit)).strip()
 
 
 def wxpusher_posts_markdown(posts: list[NgaPost]) -> str:
@@ -2533,8 +2718,9 @@ def wxpusher_posts_markdown(posts: list[NgaPost]) -> str:
         meta: list[str] = []
         if post.post_time:
             meta.append(f"时间：{post.post_time}")
-        if post.author or post.author_id:
-            meta.append(f"作者：{wxpusher_escape_inline(post.author or post.author_id)}")
+        author = post_author_display_name(post)
+        if author:
+            meta.append(f"作者：{wxpusher_escape_inline(author)}")
         if post.floor:
             meta.append(f"楼层：#{post.floor}")
         if post.source_id:
@@ -2543,7 +2729,7 @@ def wxpusher_posts_markdown(posts: list[NgaPost]) -> str:
             lines.append(" · ".join(meta))
         if post.url:
             lines.append(f"[打开 NGA]({post.url})")
-        content = wxpusher_friendly_post_content(post.content)
+        content = wxpusher_friendly_post_content(post)
         if content:
             lines.extend(["", content])
         image_lines = post_image_lines(post, limit=4)
@@ -2561,8 +2747,9 @@ def dingtalk_posts_markdown(posts: list[NgaPost], title: str) -> str:
         meta: list[str] = []
         if post.post_time:
             meta.append(f"- 时间: {post.post_time}")
-        if post.author or post.author_id:
-            meta.append(f"- 作者: {post.author or post.author_id}")
+        author = post_author_display_name(post)
+        if author:
+            meta.append(f"- 作者: {author}")
         if post.floor:
             meta.append(f"- 楼层: #{post.floor}")
         if post.source_id:
@@ -2570,7 +2757,7 @@ def dingtalk_posts_markdown(posts: list[NgaPost], title: str) -> str:
         if post.url:
             meta.append(f"- 链接: [打开 NGA]({post.url})")
         lines.extend(meta)
-        content = friendly_post_content(post.content, quote_limit=360, reply_limit=760)
+        content = post_friendly_content(post, quote_limit=360, reply_limit=760)
         if content:
             lines.extend(["", content])
         image_lines = post_image_lines(post, limit=4)
@@ -2602,43 +2789,81 @@ def clean_nga_display_text(value: str) -> str:
     return text.strip()
 
 
-def nga_quote_header_label(value: str) -> str:
+def nga_quote_header_author(value: str) -> str:
     match = re.search(r"Post by\s+(.+?)(?:\s*\(([^)\n]+)\))?:\s*$", str(value or "").strip(), flags=re.I)
     if not match:
-        return "引用："
-    author = clean_nga_display_text(match.group(1)).strip()
-    posted_at = clean_nga_display_text(match.group(2) or "").strip()
-    if author and posted_at:
-        return f"引用 {author}（{posted_at}）："
+        return ""
+    return clean_nga_display_text(match.group(1)).strip()
+
+
+def nga_quote_header_label(value: str) -> str:
+    author = nga_quote_header_author(value)
     if author:
-        return f"引用 {author}："
-    return "引用："
+        return f"{author} \u8bf4\uff1a"
+    return "\u5bf9\u65b9\u8bf4\uff1a"
 
 
-def friendly_post_content(value: str, *, quote_limit: int = 600, reply_limit: int = 1200) -> str:
+def post_quote_reply_label(post: NgaPost) -> str:
+    author = post_author_display_name(post)
+    if author:
+        return f"{author} \u56de\u590d\u4e86\u4e0a\u9762\u8fd9\u53e5\u8bdd\uff1a"
+    return "\u56de\u590d\u4e86\u4e0a\u9762\u8fd9\u53e5\u8bdd\uff1a"
+
+
+def quote_card_section_title(value: str) -> str:
+    author = nga_quote_header_author(value) or "\u5bf9\u65b9"
+    return f"\u3010{author}\u3011\u88ab\u56de\u590d\u5185\u5bb9\uff1a"
+
+
+def reply_card_section_title(post: NgaPost) -> str:
+    author = post_author_display_name(post)
+    if author:
+        return f"\u3010{author}\u3011\u56de\u590d\u5185\u5bb9\uff1a"
+    return "\u56de\u590d\u5185\u5bb9\uff1a"
+
+
+def reply_section_title(author: str = "") -> str:
+    author = str(author or "").strip()
+    if author:
+        return f"\u3010{author}\u3011\u56de\u590d\u5185\u5bb9\uff1a"
+    return "\u56de\u590d\u5185\u5bb9\uff1a"
+
+
+def friendly_post_content(value: str, *, quote_limit: int = 600, reply_limit: int = 1200, reply_author: str = "") -> str:
     quoted = split_quoted_reply(value)
+    reply_title = reply_section_title(reply_author)
     if not quoted:
         if QUOTE_END_MARKER in value:
             quote_body, reply_body = value.split(QUOTE_END_MARKER, 1)
             lines: list[str] = []
             if quote_body.strip():
-                lines.extend(["被回复内容：", truncate_text(display_text(quote_body), quote_limit)])
+                lines.extend(["\u3010\u5bf9\u65b9\u3011\u88ab\u56de\u590d\u5185\u5bb9\uff1a", truncate_text(display_text(quote_body), quote_limit)])
             if reply_body.strip():
                 if lines:
                     lines.append("")
-                lines.extend(["本次回复：", truncate_text(display_text(reply_body), reply_limit)])
+                lines.extend([reply_title, truncate_text(display_text(reply_body), reply_limit)])
             if lines:
                 return "\n".join(lines).strip()
-        return display_text(value)
+        text = display_text(value)
+        if reply_author and text:
+            return "\n".join([reply_title, text]).strip()
+        return text
     quote_header, quote_body, reply_body = quoted
-    lines: list[str] = ["被回复内容："]
-    quote_parts = [nga_quote_header_label(quote_header)]
+    lines: list[str] = [quote_card_section_title(quote_header)]
     if quote_body:
-        quote_parts.append(quote_body)
-    lines.append(truncate_text(display_text("\n".join(part for part in quote_parts if part)), quote_limit))
+        lines.append(truncate_text(display_text(quote_body), quote_limit))
     if reply_body:
-        lines.extend(["", "本次回复：", truncate_text(display_text(reply_body), reply_limit)])
+        lines.extend(["", reply_title, truncate_text(display_text(reply_body), reply_limit)])
     return "\n".join(lines).strip()
+
+
+def post_friendly_content(post: NgaPost, *, quote_limit: int = 600, reply_limit: int = 1200) -> str:
+    return friendly_post_content(
+        post.content,
+        quote_limit=quote_limit,
+        reply_limit=reply_limit,
+        reply_author=post_author_display_name(post),
+    )
 
 
 def split_quoted_reply(content: str) -> tuple[str, str, str] | None:
@@ -2715,19 +2940,14 @@ def append_post_image_elements(
 def post_card_element(post: NgaPost, image_keys_by_url: dict[str, str] | None = None) -> list[dict[str, Any]]:
     title = lark_md_escape(post.subject)
     time_text = lark_md_escape(post.post_time or "unknown")
-    author_text = lark_md_escape(post.author or post.author_id or "unknown")
+    author_text = lark_md_escape(post_author_display_name(post) or "unknown")
     floor_text = f" | #{lark_md_escape(post.floor)}" if post.floor else ""
-    source_text = ""
-    if post.source_id:
-        source_name = post.source_label or post.source_id
-        source_kind = "user" if post.source_type == "author" else post.source_type or "target"
-        source_text = f"\nWatch: {lark_md_escape(source_kind)} {lark_md_escape(source_name)} ({lark_md_escape(post.source_id)})"
     elements: list[dict[str, Any]] = [
         {
             "tag": "div",
             "text": {
                 "tag": "lark_md",
-                "content": f"**{title}**\n{time_text} | {author_text}{floor_text}{source_text}",
+                "content": f"**{title}**\n{time_text} | {author_text}{floor_text}",
             },
         },
     ]
@@ -2739,15 +2959,16 @@ def post_card_element(post: NgaPost, image_keys_by_url: dict[str, str] | None = 
     quoted = split_quoted_reply(post.content)
     if quoted:
         quote_header, quote_body, reply_body = quoted
-        quote_lines = [quote_header]
+        quote_title = lark_md_escape(quote_card_section_title(quote_header))
+        quote_content = f"**{quote_title}**"
         if quote_body:
-            quote_lines.extend(["", truncate_text(display_text(quote_body), 420)])
+            quote_content += f"\n{lark_quote(truncate_text(display_text(quote_body), 420))}"
         elements.append(
             {
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"**被回复内容**\n{lark_quote(chr(10).join(quote_lines))}",
+                    "content": quote_content,
                 },
             }
         )
@@ -2759,7 +2980,10 @@ def post_card_element(post: NgaPost, image_keys_by_url: dict[str, str] | None = 
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"**本次回复**\n{lark_md_escape(truncate_text(display_text(reply_body), 700)).replace(chr(10), chr(10) + chr(10))}",
+                    "content": (
+                        f"**{lark_md_escape(reply_card_section_title(post))}**\n"
+                        f"{lark_md_escape(truncate_text(display_text(reply_body), 700)).replace(chr(10), chr(10) + chr(10))}"
+                    ),
                 },
             }
         )
@@ -2773,7 +2997,7 @@ def post_card_element(post: NgaPost, image_keys_by_url: dict[str, str] | None = 
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"**回复内容**\n{excerpt}",
+                    "content": f"**{lark_md_escape(reply_card_section_title(post))}**\n{excerpt}",
                 },
             }
         )
@@ -2957,6 +3181,8 @@ def deserialize_post(value: Any) -> NgaPost | None:
             source_id=str(value.get("source_id") or ""),
             source_label=str(value.get("source_label") or ""),
             canonical_key=str(value.get("canonical_key") or value.get("key") or ""),
+            thread_id=str(value.get("thread_id") or ""),
+            thread_label=str(value.get("thread_label") or ""),
         )
     except Exception:
         return None
@@ -4656,6 +4882,78 @@ def default_command_count(command_name: str) -> int:
     return DEFAULT_THREAD_COUNT if command_name.endswith("_t") else DEFAULT_REPLY_COUNT
 
 
+def command_count_token(value: str | None) -> bool:
+    return bool(re.fullmatch(r"\d{1,4}d?", str(value or "").strip().lower()))
+
+
+def command_alias_token(value: str | None, prefix: str) -> bool:
+    return bool(re.fullmatch(rf"{re.escape(prefix)}\s*\d+", str(value or "").strip(), flags=re.I))
+
+
+def parse_reply_command_tokens(
+    tokens: list[str],
+    author_targets: list[WatchTarget],
+    thread_targets: list[WatchTarget],
+    effective_author_id: str,
+) -> tuple[str, str, str | None]:
+    target = effective_author_id
+    thread_id = ""
+    raw_count: str | None = None
+    explicit_author = False
+    for index, token in enumerate(tokens):
+        token = str(token or "").strip()
+        if not token:
+            continue
+        if command_alias_token(token, "t"):
+            thread_id = resolve_target_alias(token, thread_targets, "t")
+            continue
+        if command_alias_token(token, "u"):
+            target = resolve_target_alias(token, author_targets, "u")
+            explicit_author = True
+            continue
+        if command_count_token(token) and (explicit_author or thread_id or index > 0):
+            raw_count = token
+            continue
+        if not explicit_author:
+            target = resolve_target_alias(token, author_targets, "u")
+            explicit_author = True
+            continue
+        if not thread_id:
+            thread_id = resolve_target_alias(token, thread_targets, "t")
+            continue
+        if raw_count is None:
+            raw_count = token
+    return target, thread_id, raw_count
+
+
+def parse_thread_command_tokens(
+    tokens: list[str],
+    thread_targets: list[WatchTarget],
+    effective_tid: str,
+) -> tuple[str, str | None]:
+    target = effective_tid
+    raw_count: str | None = None
+    explicit_thread = False
+    for index, token in enumerate(tokens):
+        token = str(token or "").strip()
+        if not token:
+            continue
+        if command_alias_token(token, "t"):
+            target = resolve_target_alias(token, thread_targets, "t")
+            explicit_thread = True
+            continue
+        if command_count_token(token) and (explicit_thread or index > 0):
+            raw_count = token
+            continue
+        if not explicit_thread:
+            target = resolve_target_alias(token, thread_targets, "t")
+            explicit_thread = True
+            continue
+        if raw_count is None:
+            raw_count = token
+    return target, raw_count
+
+
 def parse_bot_command(
     text: str,
     default_author_id: str,
@@ -4684,16 +4982,18 @@ def parse_bot_command(
             count=clamp_count(legacy.group(1), DEFAULT_REPLY_COUNT, 50),
         )
 
-    match = re.search(r"(?:^|\s)/(history_r|pack_r|history_t|pack_t)(?:\s+([A-Za-z]?\d+))?(?:\s+(\d{1,4}d?))?(?:\s|$)", compact)
+    match = re.search(r"(?:^|\s)/(history_r|pack_r|history_t|pack_t)(?P<tail>(?:\s+\S+){0,4})(?:\s|$)", compact)
     if not match:
         return None
 
-    name, raw_target, raw_count = match.groups()
+    name = match.group(1)
+    tokens = str(match.group("tail") or "").split()
     target_type = "thread" if name.endswith("_t") else "reply"
     if target_type == "thread":
-        target = resolve_target_alias(raw_target or "", thread_targets, "t") or effective_tid
+        target, raw_count = parse_thread_command_tokens(tokens, thread_targets, effective_tid)
+        thread_id = ""
     else:
-        target = resolve_target_alias(raw_target or "", author_targets, "u") or effective_author_id
+        target, thread_id, raw_count = parse_reply_command_tokens(tokens, author_targets, thread_targets, effective_author_id)
     days = 0
     if name.startswith("pack_"):
         count, days = parse_pack_count_or_days(raw_count, default_command_count(name), 500)
@@ -4703,9 +5003,10 @@ def parse_bot_command(
     # Compatibility for the older "/pack_r <default tid> <count>" spelling.
     if name == "pack_r" and target == default_tid:
         target_type = "thread"
+        thread_id = ""
 
     action = "pack" if name.startswith("pack_") else "history"
-    return BotCommand(action=action, target_type=target_type, target_id=target, count=count, days=days)
+    return BotCommand(action=action, target_type=target_type, target_id=target, count=count, days=days, thread_id=thread_id)
 
 
 def bot_command_from_form(
@@ -4719,6 +5020,9 @@ def bot_command_from_form(
     raw_custom_target = str(form.get("custom_target_id") or "").strip()
     raw_preset_target = str(form.get("preset_target_id") or "").strip()
     raw_target = raw_custom_target or raw_preset_target or str(form.get("target_id") or "").strip()
+    raw_custom_thread = str(form.get("custom_thread_id") or "").strip()
+    raw_preset_thread = str(form.get("preset_thread_id") or "").strip()
+    raw_thread = raw_custom_thread or raw_preset_thread or str(form.get("thread_id") or "").strip()
     raw_count = str(form.get("count") or "").strip()
     if raw_name not in {"history_r", "pack_r", "history_t", "pack_t"}:
         raw_name = "history_r"
@@ -4726,8 +5030,10 @@ def bot_command_from_form(
     thread_targets = thread_targets or parse_target_list("", default_tid)
     if raw_name.endswith("_t"):
         target = resolve_target_alias(raw_target, thread_targets, "t") or (thread_targets[0].id if thread_targets else default_tid)
+        thread_id = ""
     else:
         target = resolve_target_alias(raw_target, author_targets, "u") or (author_targets[0].id if author_targets else default_author_id)
+        thread_id = resolve_target_alias(raw_thread, thread_targets, "t") if raw_thread else ""
     days = 0
     if raw_name.startswith("pack_"):
         count, days = parse_pack_count_or_days(raw_count or None, default_command_count(raw_name), 500)
@@ -4737,7 +5043,8 @@ def bot_command_from_form(
     action = "pack" if raw_name.startswith("pack_") else "history"
     if raw_name == "pack_r" and target == default_tid:
         target_type = "thread"
-    return BotCommand(action=action, target_type=target_type, target_id=target, count=count, days=days)
+        thread_id = ""
+    return BotCommand(action=action, target_type=target_type, target_id=target, count=count, days=days, thread_id=thread_id)
 
 
 def form_action_name(form: dict[str, Any]) -> str:
@@ -5011,6 +5318,11 @@ def command_form_card(
         f"{prefix}{index}={target_display_name(target)}"
         for index, target in enumerate(targets[:6], 1)
     )
+    thread_targets = thread_targets or []
+    thread_help = " / ".join(
+        f"t{index}={target_display_name(target)}"
+        for index, target in enumerate(thread_targets[:6], 1)
+    )
     return {
         "schema": "2.0",
         "config": {"wide_screen_mode": True, "update_multi": True},
@@ -5035,6 +5347,22 @@ def command_form_card(
                             "placeholder": {"tag": "plain_text", "content": f"{target_label} / preset alias"},
                             "default_value": target_id,
                         },
+                        *(
+                            [
+                                {
+                                    "tag": "markdown",
+                                    "content": "可选 `tid`：留空走用户主页；填写 `tid` 或 `t1` 则只拉取该用户在指定帖子内的回复" + (f"；{thread_help}" if thread_help else ""),
+                                },
+                                {
+                                    "tag": "input",
+                                    "name": "custom_thread_id",
+                                    "placeholder": {"tag": "plain_text", "content": "optional tid / t1"},
+                                    "default_value": "",
+                                },
+                            ]
+                            if command.endswith("_r")
+                            else []
+                        ),
                         {
                             "tag": "input",
                             "name": "count",
@@ -5076,7 +5404,7 @@ def ai_settings_card(manager: ai_analysis.AIManager, mention_enabled: bool = Fal
     runtime_model = "model" in state and manager._runtime_setting_is_current(state, "model")
     runtime_reasoning = "reasoning_effort" in state and manager._runtime_setting_is_current(state, "reasoning_effort")
     model_choices = ai_analysis.model_options(manager.config.provider)
-    reasoning_choices = ai_analysis.reasoning_effort_options(manager.config.provider)
+    reasoning_choices = ai_analysis.reasoning_effort_options(manager.config.provider, current_model)
     if manager.config.provider in {"codex", "claude", "codewhale"}:
         model_control = {
             "tag": "select_static",
@@ -5499,7 +5827,10 @@ def command_pack_file_name(command: BotCommand, post_count: int) -> str:
         range_part = f"{today}" if command.days == 1 else f"{today}_{command.days}d"
     else:
         range_part = str(post_count)
-    safe_target = re.sub(r"[^A-Za-z0-9_-]+", "_", command.target_id or "any").strip("_") or "any"
+    target_parts = [command.target_id or "any"]
+    if command.target_type == "reply" and command.thread_id:
+        target_parts.append(command.thread_id)
+    safe_target = re.sub(r"[^A-Za-z0-9_-]+", "_", "_".join(target_parts)).strip("_") or "any"
     return f"nga_{command.target_type}_{safe_target}_{range_part}_{int(time.time())}.txt"
 
 
@@ -5614,8 +5945,8 @@ def wechat_settings_text(args: argparse.Namespace, manager: ai_analysis.AIManage
 
 def dingtalk_start_markdown(args: argparse.Namespace) -> str:
     target_user = str(getattr(args, "dingtalk_target_user_ids", "") or "").strip()
-    author_targets = watch_author_targets(args)
-    thread_targets = preset_thread_targets(args)
+    author_targets = command_author_targets(args)
+    thread_targets = command_thread_targets(args)
     active_uid, active_tid = dingtalk_active_target_ids(args, target_user, author_targets, thread_targets)
     lines = [
         "## NGA Wolf Watcher",
@@ -5747,8 +6078,8 @@ def wechat_normalize_short_command(args: argparse.Namespace, user_id: str, text:
     if not compact:
         return raw
     menu = wechat_bot.WeChatMenuState(wechat_client_for_args(args).config.state_dir).get(user_id)
-    author_targets = watch_author_targets(args)
-    thread_targets = preset_thread_targets(args)
+    author_targets = command_author_targets(args)
+    thread_targets = command_thread_targets(args)
     default_uid, default_tid = wechat_active_target_ids(args, user_id, author_targets, thread_targets)
 
     def parse_short_count(prefix: str, default: int) -> int | None:
@@ -6101,10 +6432,10 @@ def run_bot_command(args: argparse.Namespace, command: BotCommand) -> None:
         push_feishu_card(args, settings_card_for_args(args, manager))
         return
 
-    author_targets = watch_author_targets(args)
-    thread_targets = preset_thread_targets(args)
+    author_targets = command_author_targets(args)
+    thread_targets = command_thread_targets(args)
     if command.target_type == "reply":
-        thread_author_tid = thread_author_tid_for_reply_command(args, command.target_id)
+        thread_author_tid = str(command.thread_id or "").strip()
         if thread_author_tid:
             if command.action == "pack" and command.days:
                 posts = collect_thread_in_days_with_retries(args, thread_author_tid, command.days, command.target_id)
@@ -6126,6 +6457,7 @@ def run_bot_command(args: argparse.Namespace, command: BotCommand) -> None:
     else:
         raise RuntimeError(f"未知命令目标：{command}")
 
+    posts = posts_chronological(posts)
     title = f"NGA {label} {command_range_title(command, len(posts))}"
     if not command.days and len(posts) < command.count:
         title += f"（请求 {command.count} 条，NGA 临时限流时会先返回已获取部分）"
@@ -6376,7 +6708,7 @@ def start_ws(args: argparse.Namespace) -> None:
         if ai_analysis.parse_ai_command(text) is not None:
             run_ai_command_background(args_for_chat(args, chat_id), text, sender_id, f"飞书消息:{message_id}", message_id, image_refs, file_refs, reply_context)
             return
-        command = parse_bot_command(text, args.default_author_id, args.default_tid, watch_author_targets(args), preset_thread_targets(args))
+        command = parse_bot_command(text, args.default_author_id, args.default_tid, command_author_targets(args), command_thread_targets(args))
         if command is None:
             if should_forward_plain_text_to_ai(args_for_chat(args, chat_id), text, sender_id, image_keys, file_refs):
                 run_ai_plain_text_background(args_for_chat(args, chat_id), text, sender_id, f"飞书消息:{message_id}", message_id, image_refs, file_refs, reply_context)
@@ -6482,9 +6814,9 @@ def start_ws(args: argparse.Namespace) -> None:
                 command_name = str(form.get("command") or "history_r")
                 target_id = str(form.get("target_id") or (args.default_tid if command_name.endswith("_t") else args.default_author_id))
                 count = str(form.get("count") or default_command_count(command_name))
-                form_card = command_form_card(command_name, target_id, count, watch_author_targets(scoped_args), preset_thread_targets(scoped_args))
+                form_card = command_form_card(command_name, target_id, count, command_author_targets(scoped_args), command_thread_targets(scoped_args))
                 return card_response(form_card, "已打开预填表单")
-            command = bot_command_from_form(form, args.default_author_id, args.default_tid, watch_author_targets(scoped_args), preset_thread_targets(scoped_args))
+            command = bot_command_from_form(form, args.default_author_id, args.default_tid, command_author_targets(scoped_args), command_thread_targets(scoped_args))
             run_command_background(scoped_args, command, "卡片操作")
             return card_response(processing_card("正在处理", f"已收到 `{command}`，结果会发送到当前群。", "open_fetch_menu"), "已收到，正在处理")
         except Exception as exc:
@@ -7051,17 +7383,81 @@ def collect_posts_with_retries(args: argparse.Namespace, count_pages: int | None
     )
 
 
+def post_needs_forum_author(post: NgaPost) -> bool:
+    author = str(post.author or "").strip()
+    author_id = str(post.author_id or "").strip()
+    if not author:
+        return True
+    return bool(author_id and author == author_id) or bool(re.fullmatch(r"\d+", author))
+
+
+def post_matches_identity(candidate: NgaPost, original: NgaPost) -> bool:
+    keys = {str(original.key or "").strip(), str(original.canonical_key or "").strip()}
+    keys.discard("")
+    candidate_keys = {str(candidate.key or "").strip(), str(candidate.canonical_key or "").strip()}
+    candidate_keys.discard("")
+    return bool(keys & candidate_keys)
+
+
+def merge_enriched_post(original: NgaPost, enriched: NgaPost) -> NgaPost:
+    return NgaPost(
+        key=original.key,
+        subject=enriched.subject or original.subject,
+        content=enriched.content or original.content,
+        url=original.url or enriched.url,
+        post_time=enriched.post_time or original.post_time,
+        author=enriched.author or original.author,
+        author_id=enriched.author_id or original.author_id,
+        floor=enriched.floor or original.floor,
+        image_urls=enriched.image_urls or original.image_urls,
+        quote_image_urls=enriched.quote_image_urls or original.quote_image_urls,
+        reply_image_urls=enriched.reply_image_urls or original.reply_image_urls,
+        source_type=original.source_type,
+        source_id=original.source_id,
+        source_label=original.source_label,
+        canonical_key=original.canonical_key or enriched.canonical_key or original.key,
+        thread_id=original.thread_id or enriched.thread_id,
+        thread_label=original.thread_label or enriched.thread_label,
+    )
+
+
+def enrich_author_posts_from_threads(args: argparse.Namespace, posts: list[NgaPost], author_id: str = "") -> list[NgaPost]:
+    if not posts:
+        return posts
+    enriched_by_thread: dict[tuple[str, str], list[NgaPost]] = {}
+    result: list[NgaPost] = []
+    for post in posts:
+        if not post_needs_forum_author(post):
+            result.append(post)
+            continue
+        tid = post_tid(post)
+        effective_author_id = str(post.author_id or author_id or "").strip()
+        if not tid or not effective_author_id:
+            result.append(post)
+            continue
+        cache_key = (tid, effective_author_id)
+        if cache_key not in enriched_by_thread:
+            try:
+                enriched_by_thread[cache_key] = collect_thread_tail_with_retries(args, tid, 20, effective_author_id)
+            except Exception as exc:
+                print(f"补全用户 {effective_author_id} 在帖子 {tid} 的论坛用户名失败，继续使用原始作者字段: {exc}", file=sys.stderr)
+                enriched_by_thread[cache_key] = []
+        enriched = next((candidate for candidate in enriched_by_thread[cache_key] if post_matches_identity(candidate, post)), None)
+        result.append(merge_enriched_post(post, enriched) if enriched else post)
+    return result
+
+
 def collect_posts_for_author_with_retries(args: argparse.Namespace, author_id: str, count_pages: int | None = None) -> list[NgaPost]:
     cloned = copy.copy(args)
     cloned.author_id = author_id
-    return collect_posts_with_retries(cloned, count_pages)
+    return enrich_author_posts_from_threads(args, collect_posts_with_retries(cloned, count_pages), author_id)
 
 
 def collect_replies_with_retries(args: argparse.Namespace, author_id: str, count: int) -> list[NgaPost]:
     cookie = args.cookie or os.getenv("NGA_COOKIE", "")
     if not cookie:
         raise SystemExit("缺少 NGA_COOKIE。请从已登录 bbs.nga.cn 的浏览器会话复制 Cookie。")
-    return collect_recent_replies(
+    posts = collect_recent_replies(
         author_id,
         count,
         cookie,
@@ -7074,6 +7470,7 @@ def collect_replies_with_retries(args: argparse.Namespace, author_id: str, count
         getattr(args, "nga_cache_ttl", DEFAULT_NGA_CACHE_TTL),
         True,
     )
+    return enrich_author_posts_from_threads(args, posts, author_id)
 
 
 def collect_replies_in_days_with_retries(args: argparse.Namespace, author_id: str, days: int) -> list[NgaPost]:
@@ -7081,7 +7478,7 @@ def collect_replies_in_days_with_retries(args: argparse.Namespace, author_id: st
     if not cookie:
         raise SystemExit("缺少 NGA_COOKIE。请从已登录 bbs.nga.cn 的浏览器会话复制 Cookie。")
     max_pages = int(os.getenv("NGA_DAILY_PACK_MAX_PAGES", str(DEFAULT_DAILY_PACK_MAX_PAGES)))
-    return collect_replies_in_natural_days(
+    posts = collect_replies_in_natural_days(
         author_id,
         days,
         cookie,
@@ -7095,6 +7492,7 @@ def collect_replies_in_days_with_retries(args: argparse.Namespace, author_id: st
         True,
         max_pages,
     )
+    return enrich_author_posts_from_threads(args, posts, author_id)
 
 
 def collect_thread_tail_with_retries(args: argparse.Namespace, tid: str, count: int, author_id: str = "") -> list[NgaPost]:
@@ -7218,7 +7616,7 @@ def handle_feishu_commands(args: argparse.Namespace, state: dict[str, Any]) -> b
             handled.add(message_id)
             changed = True
             continue
-        command = parse_bot_command(text, args.default_author_id, args.default_tid, watch_author_targets(args), preset_thread_targets(args))
+        command = parse_bot_command(text, args.default_author_id, args.default_tid, command_author_targets(args), command_thread_targets(args))
         if command is None:
             if should_forward_plain_text_to_ai(args, text, sender_id, image_keys, file_refs):
                 run_ai_plain_text_background(args, text, sender_id, f"飞书消息轮询:{message_id}", message_id, image_refs, file_refs, reply_context)
@@ -7361,8 +7759,8 @@ def handle_wechat_commands(args: argparse.Namespace) -> bool:
                     client.mark_handled(message)
                     changed = True
                     continue
-                author_targets = watch_author_targets(scoped_args)
-                thread_targets = preset_thread_targets(scoped_args)
+                author_targets = command_author_targets(scoped_args)
+                thread_targets = command_thread_targets(scoped_args)
                 active_uid, active_tid = wechat_active_target_ids(scoped_args, message.user_id, author_targets, thread_targets)
                 command = parse_bot_command(text, args.default_author_id, args.default_tid, author_targets, thread_targets, active_uid, active_tid)
                 if command is not None:
@@ -7440,8 +7838,8 @@ def handle_dingtalk_card_action(args: argparse.Namespace, action: dingtalk_bot.D
         if parsed_ai is not None:
             run_ai_command_background(scoped_args, command, sender_id, f"DingTalk card:{message_id}", message_id)
             return
-        author_targets = watch_author_targets(scoped_args)
-        thread_targets = preset_thread_targets(scoped_args)
+        author_targets = command_author_targets(scoped_args)
+        thread_targets = command_thread_targets(scoped_args)
         parsed = parse_bot_command(command, args.default_author_id, args.default_tid, author_targets, thread_targets, args.default_author_id, args.default_tid)
         if parsed is not None:
             run_command_background(scoped_args, parsed, f"DingTalk card:{message_id}")
@@ -7492,8 +7890,8 @@ def handle_dingtalk_message(args: argparse.Namespace, message: dingtalk_bot.Ding
         if ai_analysis.parse_ai_command(text) is not None:
             run_ai_command_background(scoped_args, text, sender_id, f"DingTalk message:{message.message_id}", message.message_id)
         else:
-            author_targets = watch_author_targets(scoped_args)
-            thread_targets = preset_thread_targets(scoped_args)
+            author_targets = command_author_targets(scoped_args)
+            thread_targets = command_thread_targets(scoped_args)
             command = parse_bot_command(text, args.default_author_id, args.default_tid, author_targets, thread_targets, args.default_author_id, args.default_tid)
             if command is not None:
                 run_command_background(scoped_args, command, f"DingTalk message:{message.message_id}")

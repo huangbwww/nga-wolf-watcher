@@ -207,6 +207,131 @@ def test_refresh_auto_fills_missing_swing_high_low(tmp_path: Path, monkeypatch: 
     assert item["f382"] != "0.000"
 
 
+def test_fetch_minute_falls_back_to_recent_trading_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    requested_urls: list[str] = []
+
+    def fake_fetch_text(url: str, encoding: str = "utf-8") -> str:
+        requested_urls.append(url)
+        if "minute/query" in url:
+            return stock_quotes.json.dumps(
+                {
+                    "data": {
+                        "sh600000": {
+                            "data": {"date": "20260627", "data": []},
+                            "qt": {"sh600000": ["1", "浦发银行", "600000", "10.00", "9.80"]},
+                        }
+                    }
+                }
+            )
+        if "day/query" in url:
+            return stock_quotes.json.dumps(
+                {
+                    "data": {
+                        "sh600000": {
+                            "data": [
+                                {
+                                    "date": "20260626",
+                                    "prec": "9.90",
+                                    "data": ["0930 10.00 100 1000", "0931 10.20 250 2520"],
+                                }
+                            ],
+                            "qt": {"sh600000": ["1", "浦发银行", "600000", "10.20", "9.90"]},
+                        }
+                    }
+                }
+            )
+        raise AssertionError(f"unexpected url {url}")
+
+    monkeypatch.setattr(stock_quotes, "fetch_text", fake_fetch_text)
+
+    result = stock_quotes.fetch_minute("sh600000")
+
+    assert result is not None
+    assert result["date"] == "20260626"
+    assert result["isFallback"] is True
+    assert result["source"] == "recent-trading-day"
+    assert result["prevClose"] == 9.90
+    assert [point["time"] for point in result["points"]] == ["0930", "0931"]
+    assert any("minute/query" in url for url in requested_urls)
+    assert any("day/query" in url for url in requested_urls)
+
+
+def test_fetch_minute_prefers_realtime_data_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    requested_urls: list[str] = []
+
+    def fake_fetch_text(url: str, encoding: str = "utf-8") -> str:
+        requested_urls.append(url)
+        if "day/query" in url:
+            raise AssertionError("realtime minute data should not be replaced by recent trading day data")
+        return stock_quotes.json.dumps(
+            {
+                "data": {
+                    "sh600000": {
+                        "data": {"date": "20260629", "data": ["0930 10.00 100 1000", "0931 10.10 220 2222"]},
+                        "qt": {"sh600000": ["1", "浦发银行", "600000", "10.10", "9.90"]},
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr(stock_quotes, "fetch_text", fake_fetch_text)
+
+    result = stock_quotes.fetch_minute("sh600000")
+
+    assert result is not None
+    assert result["date"] == "20260629"
+    assert result["source"] == "minute-query"
+    assert result["isFallback"] is False
+    assert [point["time"] for point in result["points"]] == ["0930", "0931"]
+    assert any("minute/query" in url for url in requested_urls)
+    assert not any("day/query" in url for url in requested_urls)
+
+
+def test_chart_data_can_select_recent_minute_date(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    requested_urls: list[str] = []
+
+    def fake_fetch_text(url: str, encoding: str = "utf-8") -> str:
+        requested_urls.append(url)
+        if "minute/query" in url:
+            raise AssertionError("selected historical minute should not use realtime minute query")
+        if "day/query" in url:
+            return stock_quotes.json.dumps(
+                {
+                    "data": {
+                        "sh600000": {
+                            "data": [
+                                {
+                                    "date": "20260626",
+                                    "prec": "10.10",
+                                    "data": ["0930 10.30 100 1030", "0931 10.20 240 2448"],
+                                },
+                                {
+                                    "date": "20260625",
+                                    "prec": "9.90",
+                                    "data": ["0930 10.00 120 1200", "0931 10.10 260 2626"],
+                                },
+                            ],
+                            "qt": {"sh600000": ["1", "浦发银行", "600000", "10.20", "10.10"]},
+                        }
+                    }
+                }
+            )
+        raise AssertionError(f"unexpected url {url}")
+
+    monkeypatch.setattr(stock_quotes, "fetch_text", fake_fetch_text)
+
+    result = stock_quotes.chart_data(tmp_path, "sh600000", period="minute", date="2026-06-25")
+
+    assert result["ok"] is True
+    assert result["selectedDate"] == "20260625"
+    assert result["main"]["date"] == "20260625"
+    assert result["main"]["source"] == "historical-trading-day"
+    assert result["main"]["isFallback"] is False
+    assert [point["time"] for point in result["main"]["points"]] == ["0930", "0931"]
+    assert [option["date"] for option in result["recentMinutes"]] == ["20260626", "20260625"]
+    assert all("day/query" in url for url in requested_urls)
+
+
 def test_clear_watchlist_keeps_default_group(tmp_path: Path) -> None:
     stock_quotes.save_watchlist(
         tmp_path,

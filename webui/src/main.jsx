@@ -9,7 +9,9 @@ import {
   CircleStop,
   Database,
   Edit3,
+  ExternalLink,
   FolderOpen,
+  Github,
   ListChecks,
   MessageSquare,
   Plus,
@@ -990,6 +992,57 @@ function Notice({ message, kind = "info" }) {
   return <div className={`notice ${kind}`}>{message}</div>;
 }
 
+function updateErrorMessage(error) {
+  const text = String(error?.message || error || "检查更新失败");
+  if (text.includes("403")) return "GitHub API 限流，稍后再试";
+  if (text.includes("timed out") || text.includes("timeout")) return "连接 GitHub 超时，稍后再试";
+  return text;
+}
+
+function SidebarVersionPanel({ info, currentVersion, busy, toast, onCheck, onOpenLatest, onOpenRepo }) {
+  const latestVersion = info?.latestVersion || "";
+  const hasResult = info && !info.loading && info.ok !== false;
+  const hasUpdate = hasResult && Boolean(info?.hasUpdate);
+  const checkedAt = info?.checkedAt
+    ? new Date(info.checkedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
+    : "";
+  const statusText = info?.loading
+    ? "正在检测新版本..."
+    : hasResult
+      ? hasUpdate
+        ? `发现新版本 ${latestVersion}`
+        : `已是最新${checkedAt ? ` · ${checkedAt}` : ""}`
+      : "启动后自动检测，也可手动检查";
+
+  return (
+    <div className={`sidebar-version ${hasUpdate ? "has-update" : ""}`}>
+      <button className="sidebar-github-link" type="button" onClick={onOpenRepo} title="打开 GitHub 项目主页">
+        <Github size={16} />
+        <span>GitHub</span>
+        <ExternalLink size={13} />
+      </button>
+      <div className="sidebar-version-row">
+        <span>版本</span>
+        <strong>{currentVersion || "--"}</strong>
+      </div>
+      <button className="sidebar-version-check" type="button" disabled={busy} onClick={onCheck}>
+        <RefreshCw size={14} className={info?.loading ? "spin" : ""} />
+        <span>{info?.loading ? "检测中" : "检测更新"}</span>
+      </button>
+      <p className={`sidebar-version-status ${hasUpdate ? "success" : ""}`} title={statusText}>
+        {statusText}
+      </p>
+      {toast?.text ? <div className={`sidebar-version-toast ${toast.kind || "info"}`} role="status">{toast.text}</div> : null}
+      {hasUpdate ? (
+        <button className="sidebar-version-release" type="button" onClick={onOpenLatest}>
+          <ExternalLink size={14} />
+          <span>打开最新版</span>
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function ChannelPicker({ config, setConfig, channel, onChannelChange }) {
   const value = channel || (config.bot_channel === "wechat" ? "wechat" : config.bot_channel === "dingtalk" ? "dingtalk" : config.bot_channel === "email" ? "email" : config.bot_channel === "wxpusher" ? "wxpusher" : "feishu");
   const update = (nextChannel) => {
@@ -1891,11 +1944,28 @@ function ThreadAuthorEditor({ config, setConfig }) {
   );
 }
 
-function AiAgentControls({ config, setConfig, options, hint = null }) {
+function AiAgentControls({ config, setConfig, options, agentCli, busy = false, onRescan, onTest, hint = null }) {
   const provider = config.ai_provider || "codex";
   const update = (key, value) => setConfig((current) => ({ ...current, [key]: value }));
+  const cliConfig = config.ai_cli && typeof config.ai_cli === "object" ? config.ai_cli : {};
+  const cliSelection = cliConfig[provider] && typeof cliConfig[provider] === "object"
+    ? cliConfig[provider]
+    : { mode: "auto", selected_path: "", manual_path: "", manual_args: [] };
+  const updateCliSelection = (patch) => setConfig((current) => ({
+    ...current,
+    ai_cli: {
+      ...(current.ai_cli && typeof current.ai_cli === "object" ? current.ai_cli : {}),
+      [provider]: {
+        mode: "auto",
+        selected_path: "",
+        manual_path: "",
+        manual_args: [],
+        ...((current.ai_cli && current.ai_cli[provider]) || {}),
+        ...patch,
+      },
+    },
+  }));
   const modelOptions = options.aiModels?.[provider] || [];
-  const reasoningOptions = options.aiReasoning?.[provider] || [];
   const providerSpec = ["ai_provider", "AI Agent", "select", options.aiProviders || ["codex", "claude", "codewhale", "custom"]];
   if (provider === "custom") {
     return (
@@ -1908,14 +1978,44 @@ function AiAgentControls({ config, setConfig, options, hint = null }) {
     );
   }
   const modelValue = modelOptions.includes(config.ai_model) ? config.ai_model : modelOptions[0] || "";
-  const reasoningValue = reasoningOptions.includes(config.ai_reasoning_effort) ? config.ai_reasoning_effort : reasoningOptions[0] || "";
+  const reasoningOptions = options.aiReasoningByModel?.[provider]?.[modelValue] || options.aiReasoning?.[provider] || [];
+  const configuredDefaultReasoning = options.aiDefaultReasoning?.[provider] || "";
+  const defaultReasoningValue = reasoningOptions.includes(configuredDefaultReasoning)
+    ? configuredDefaultReasoning
+    : reasoningOptions.includes("medium")
+      ? "medium"
+      : reasoningOptions[0] || "";
+  const reasoningValue = reasoningOptions.includes(config.ai_reasoning_effort) ? config.ai_reasoning_effort : defaultReasoningValue;
+  const updateModel = (value) => setConfig((current) => {
+    const nextReasoningOptions = options.aiReasoningByModel?.[provider]?.[value] || options.aiReasoning?.[provider] || [];
+    const currentReasoning = current.ai_reasoning_effort || "";
+    const providerDefaultReasoning = options.aiDefaultReasoning?.[provider] || "";
+    const nextReasoning = nextReasoningOptions.includes(currentReasoning)
+      ? currentReasoning
+      : nextReasoningOptions.includes(providerDefaultReasoning)
+        ? providerDefaultReasoning
+        : nextReasoningOptions[0] || "";
+    return { ...current, ai_model: value, ai_reasoning_effort: nextReasoning };
+  });
+  const providerState = agentCli?.providers?.[provider] || {};
+  const candidates = Array.isArray(providerState.candidates) ? providerState.candidates : [];
+  const resolved = providerState.resolved;
+  const selectedPath = cliSelection.selected_path || candidates[0]?.path || "";
+  const selectedIsMissing = Boolean(cliSelection.selected_path) && !candidates.some((candidate) => candidate.path === cliSelection.selected_path);
+  const scanStatus = agentCli?.status === "scanning"
+    ? "正在扫描本机 Agent CLI…"
+    : agentCli?.status === "error"
+      ? `扫描失败：${agentCli.error || "未知错误"}`
+      : resolved
+        ? `当前解析：${resolved.path}${resolved.version ? ` · ${resolved.version}` : ""} · ${resolved.source} · ${resolved.status || "compatible"}`
+        : `已发现 ${candidates.length} 个候选；点击“测试选择”确认兼容性。`;
   return (
     <div className={`field-wide ai-settings-grid ai-agent-grid ${hint ? "validation-target-active" : ""}`} data-validation-target="ai-settings">
       {hint ? <div className="field-alert field-wide">{hint}</div> : null}
       <Field config={config} setConfig={setConfig} spec={providerSpec} />
       <label className="field">
         <span>模型</span>
-        <select value={modelValue} onChange={(event) => update("ai_model", event.target.value)}>
+        <select value={modelValue} onChange={(event) => updateModel(event.target.value)}>
           {modelOptions.map((option) => (
             <option key={option} value={option}>
               {option}
@@ -1933,6 +2033,83 @@ function AiAgentControls({ config, setConfig, options, hint = null }) {
           ))}
         </select>
       </label>
+      <div className="editor-card field-wide agent-cli-card">
+        <div className="editor-header compact">
+          <div>
+            <h3>本地 Agent CLI</h3>
+            <p>扫描和手动路径都属于运行 NGA Wolf Watcher 的服务器主机。自动模式优先 PATH；已检测和手动模式严格使用指定路径。</p>
+          </div>
+        </div>
+        <div className="agent-cli-grid">
+          <label className="field">
+            <span>选择方式</span>
+            <select
+              value={cliSelection.mode || "auto"}
+              onChange={(event) => {
+                const mode = event.target.value;
+                updateCliSelection(mode === "selected" && !cliSelection.selected_path
+                  ? { mode, selected_path: candidates[0]?.path || "" }
+                  : { mode });
+              }}
+            >
+              <option value="auto">自动选择</option>
+              <option value="selected">从扫描结果选择</option>
+              <option value="manual">手动填写</option>
+            </select>
+          </label>
+          {cliSelection.mode === "selected" ? (
+            <label className="field agent-cli-path-field">
+              <span>已检测路径</span>
+              <select value={selectedPath} onChange={(event) => updateCliSelection({ selected_path: event.target.value })}>
+                {!candidates.length ? <option value="">未发现候选</option> : null}
+                {selectedIsMissing ? <option value={cliSelection.selected_path}>当前已保存但未检测到：{cliSelection.selected_path}</option> : null}
+                {candidates.map((candidate) => (
+                  <option key={`${candidate.path}-${candidate.source}`} value={candidate.path}>
+                    {candidate.path}{candidate.version ? ` · ${candidate.version}` : ""} · {candidate.source}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          {cliSelection.mode === "manual" ? (
+            <>
+              <label className="field agent-cli-path-field">
+                <span>CLI 绝对路径</span>
+                <input value={cliSelection.manual_path || ""} onChange={(event) => updateCliSelection({ manual_path: event.target.value })} placeholder="例如 /usr/local/bin/codex 或 C:\\Tools\\codex.exe" />
+              </label>
+              <label className="field field-wide">
+                <span>附加参数（每行一个）</span>
+                <textarea
+                  rows={2}
+                  value={Array.isArray(cliSelection.manual_args) ? cliSelection.manual_args.join("\n") : ""}
+                  onChange={(event) => updateCliSelection({ manual_args: event.target.value.split(/\r?\n/).filter((item) => item.length) })}
+                  placeholder="仅在启动该 CLI 前必须追加固定参数时填写"
+                />
+              </label>
+            </>
+          ) : null}
+        </div>
+        <div className={`agent-cli-status ${agentCli?.status === "error" ? "error" : ""}`}>{scanStatus}</div>
+        {candidates.length ? (
+          <div className="agent-cli-candidates">
+            {candidates.map((candidate) => (
+              <div className="agent-cli-candidate" key={`status-${candidate.path}-${candidate.source}`}>
+                <code>{candidate.path}</code>
+                <span>{candidate.version || "未探测版本"} · {candidate.source} · {candidate.status}</span>
+                {candidate.diagnostic ? <small>{candidate.diagnostic}</small> : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
+        <div className="inline-actions agent-cli-actions">
+          <ActionButton icon={RefreshCw} disabled={busy || agentCli?.status === "scanning"} onClick={() => onRescan?.(provider)}>
+            重新扫描
+          </ActionButton>
+          <ActionButton icon={Play} disabled={busy || agentCli?.status === "scanning"} onClick={() => onTest?.(provider)}>
+            测试选择
+          </ActionButton>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2124,6 +2301,7 @@ function App() {
   const [config, setConfig] = useState({});
   const [defaults, setDefaults] = useState({});
   const [options, setOptions] = useState({});
+  const [agentCli, setAgentCli] = useState({ status: "idle", error: "", providers: {} });
   const [status, setStatus] = useState({ running: false, pids: [] });
   const [logs, setLogs] = useState("");
   const [logOffset, setLogOffset] = useState(0);
@@ -2136,10 +2314,15 @@ function App() {
   const [closeRequest, setCloseRequest] = useState(null);
   const [validationHint, setValidationHint] = useState(null);
   const [cookieCheck, setCookieCheck] = useState(null);
+  const [updateInfo, setUpdateInfo] = useState(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateToast, setUpdateToast] = useState(null);
   const [activePage, setActivePage] = useState(() => pageForHash(window.location.hash));
   const [activeHash, setActiveHash] = useState(() => window.location.hash || "#stock-dashboard");
   const logOffsetRef = useRef(0);
   const bootstrappedRef = useRef(false);
+  const updateCheckInFlightRef = useRef(false);
+  const updateToastTimerRef = useRef(0);
 
   const channel = selectedChannel === "wechat" ? "wechat" : selectedChannel === "dingtalk" ? "dingtalk" : selectedChannel === "email" ? "email" : selectedChannel === "wxpusher" ? "wxpusher" : "feishu";
   const feishuProfiles = useMemo(() => parseProfiles(config, "feishu_bot_profiles"), [config]);
@@ -2151,6 +2334,7 @@ function App() {
   const listenRules = useMemo(() => parseListenRules(config), [config]);
   const authorRows = useMemo(() => parseTargetList(config.watch_author_ids, config.default_author_id), [config.watch_author_ids, config.default_author_id]);
   const threadRows = useMemo(() => parseTargetList(config.preset_thread_ids, config.default_tid), [config.preset_thread_ids, config.default_tid]);
+  const isMac = status.platform === "darwin";
   const configSnapshot = useMemo(() => JSON.stringify(config), [config]);
   const isDirty = Boolean(savedSnapshot && configSnapshot !== savedSnapshot);
   const setStructured = (patch) => {
@@ -2342,6 +2526,7 @@ function App() {
       setSelectedChannel(merged.bot_channel === "wechat" ? "wechat" : merged.bot_channel === "dingtalk" ? "dingtalk" : merged.bot_channel === "email" ? "email" : merged.bot_channel === "wxpusher" ? "wxpusher" : "feishu");
       setDefaults(boot.defaults);
       setOptions(boot.options || {});
+      setAgentCli(boot.agentCli || { status: "idle", error: "", providers: {} });
       setStatus(boot.status);
       setLogs(boot.logs?.text || "");
       const nextOffset = boot.logs?.offset || 0;
@@ -2392,6 +2577,11 @@ function App() {
         const stat = await api().status();
         if (stopped || isClosing()) return;
         if (stat?.status) setStatus(stat.status);
+        if (hasApiMethod("agent_cli_status")) {
+          const cliState = await api().agent_cli_status();
+          if (stopped || isClosing()) return;
+          if (cliState?.agentCli) setAgentCli(cliState.agentCli);
+        }
         const next = await api().read_logs(logOffsetRef.current);
         if (stopped || isClosing()) return;
         if (next?.text) {
@@ -2489,6 +2679,7 @@ function App() {
     try {
       const result = await fn();
       if (isClosing()) return;
+      if (result?.agentCli) setAgentCli(result.agentCli);
       if (!result?.ok) {
         const errors = result?.errors || [result?.error || `${label}失败`];
         setMessage(errors.join("\n"));
@@ -2513,6 +2704,9 @@ function App() {
       setBusy(false);
     }
   };
+
+  const rescanAgentClis = (provider) => run("重新扫描 Agent CLI", () => api().agent_cli_rescan(provider));
+  const testAgentCli = (provider) => run("测试 Agent CLI", () => api().agent_cli_test(provider, config));
 
   const startListening = async () => {
     if (!api()?.validate) {
@@ -2576,6 +2770,96 @@ function App() {
   const queryDraftChats = (profile) => api().query_feishu_chats_for_profile(profile);
   const recentDingtalkUser = (profile) => api().recent_dingtalk_user_for_profile(profile);
   const sendTestTarget = (targetId) => run("发送测试消息", () => api().send_test_target(config, targetId));
+  const showUpdateToast = (text, kind = "error") => {
+    if (!text) return;
+    window.clearTimeout(updateToastTimerRef.current);
+    setUpdateToast({ text, kind });
+    updateToastTimerRef.current = window.setTimeout(() => setUpdateToast(null), 3600);
+  };
+  const clearTransientUpdateLoading = () => {
+    setUpdateInfo((current) => {
+      if (!current?.loading) return current;
+      const { loading: _loading, ...rest } = current;
+      return rest.latestVersion || rest.currentVersion || rest.releaseUrl || typeof rest.hasUpdate === "boolean"
+        ? rest
+        : null;
+    });
+  };
+  const runUpdateCheck = async ({ manual = false } = {}) => {
+    if (updateCheckInFlightRef.current) return null;
+    if (!api()?.check_update) {
+      if (manual) showUpdateToast("当前版本不支持检查更新");
+      return null;
+    }
+    updateCheckInFlightRef.current = true;
+    if (manual) setUpdateBusy(true);
+    setUpdateInfo((current) => ({ ...(current || {}), loading: true }));
+    try {
+      const result = await api().check_update();
+      const checkedAt = Date.now();
+      if (!result?.ok) {
+        if (manual) showUpdateToast(updateErrorMessage(result?.error || "检查更新失败"));
+        clearTransientUpdateLoading();
+        return result;
+      }
+      const next = { ...result, checkedAt };
+      setUpdateInfo(next);
+      return next;
+    } catch (error) {
+      if (manual) showUpdateToast(updateErrorMessage(error));
+      clearTransientUpdateLoading();
+      return null;
+    } finally {
+      updateCheckInFlightRef.current = false;
+      if (manual) setUpdateBusy(false);
+    }
+  };
+  const checkUpdate = () => runUpdateCheck({ manual: true });
+  const openLatestReleasePage = async () => {
+    const url = updateInfo?.releaseUrl || "";
+    if (api()?.open_latest_release_page) {
+      const result = await api().open_latest_release_page(url);
+      if (!result?.ok) {
+        showUpdateToast(updateErrorMessage(result?.error || "打开最新版页面失败"));
+      }
+      return;
+    }
+    window.open(url || "https://github.com/huangbwww/nga-wolf-watcher/releases/latest", "_blank", "noopener,noreferrer");
+  };
+  const openRepositoryPage = async () => {
+    if (api()?.open_repository_page) {
+      const result = await api().open_repository_page();
+      if (!result?.ok) {
+        showUpdateToast(updateErrorMessage(result?.error || "打开 GitHub 主页失败"));
+      }
+      return;
+    }
+    window.open("https://github.com/huangbwww/nga-wolf-watcher", "_blank", "noopener,noreferrer");
+  };
+  useEffect(() => {
+    let stopped = false;
+    let didInitialCheck = false;
+    let startupTimer = 0;
+    const tryInitialCheck = () => {
+      if (stopped || didInitialCheck || isClosing()) return;
+      if (!bootstrappedRef.current || !hasApiMethod("check_update")) return;
+      didInitialCheck = true;
+      window.clearInterval(startupTimer);
+      runUpdateCheck({ manual: false });
+    };
+    startupTimer = window.setInterval(tryInitialCheck, 2000);
+    const periodicTimer = window.setInterval(() => {
+      if (stopped || isClosing() || !bootstrappedRef.current || !hasApiMethod("check_update")) return;
+      runUpdateCheck({ manual: false });
+    }, 6 * 60 * 60 * 1000);
+    tryInitialCheck();
+    return () => {
+      stopped = true;
+      window.clearInterval(startupTimer);
+      window.clearInterval(periodicTimer);
+    };
+  }, []);
+  useEffect(() => () => window.clearTimeout(updateToastTimerRef.current), []);
   const checkNgaCookie = async () => {
     if (!api()?.check_nga_cookie) {
       setCookieCheck({ kind: "error", text: "pywebview API 未就绪" });
@@ -2621,6 +2905,7 @@ function App() {
     setMessageKind("info");
     try {
       const result = await api().save_config(config);
+      if (result?.agentCli) setAgentCli(result.agentCli);
       if (!result?.ok) {
         setMessage((result?.errors || [result?.error || "保存配置失败"]).join("\n"));
         setMessageKind("error");
@@ -2699,6 +2984,15 @@ function App() {
           <a href="#advanced" className={activeHash === "#advanced" ? "active" : ""} onClick={(event) => navigateTo("#advanced", event)}>高级配置</a>
           <a href="#logs" className={activeHash === "#logs" ? "active" : ""} onClick={(event) => navigateTo("#logs", event)}>日志</a>
         </nav>
+        <SidebarVersionPanel
+          info={updateInfo}
+          currentVersion={updateInfo?.currentVersion || status.appVersion}
+          busy={updateBusy || Boolean(updateInfo?.loading)}
+          toast={updateToast}
+          onCheck={checkUpdate}
+          onOpenLatest={openLatestReleasePage}
+          onOpenRepo={openRepositoryPage}
+        />
       </aside>
 
       <section className={`content page-${activePage}`}>
@@ -2821,7 +3115,7 @@ function App() {
             {fieldGroups.ai.filter((spec) => spec[0] === "ai_enabled").map((spec) => (
               <Field key={spec[0]} config={config} setConfig={setConfig} spec={spec} hint={targetHint(spec[0])} />
             ))}
-            <AiAgentControls config={config} setConfig={setConfig} options={options} hint={targetHint("ai-settings")} />
+            <AiAgentControls config={config} setConfig={setConfig} options={options} agentCli={agentCli} busy={busy} onRescan={rescanAgentClis} onTest={testAgentCli} hint={targetHint("ai-settings")} />
             {fieldGroups.ai.filter((spec) => spec[0] !== "ai_enabled").map((spec) => (
               <Field key={spec[0]} config={config} setConfig={setConfig} spec={spec} hint={targetHint(spec[0])} />
             ))}
@@ -2841,13 +3135,15 @@ function App() {
           </div>
         </Section>
 
-        <Section icon={Settings} title="关闭行为" description="控制点击窗口关闭按钮时每次询问、默认隐藏到托盘，还是默认退出程序。关闭弹窗里勾选记住选择后也会写入这里。" defaultOpen={false}>
-          <div className="grid">
-            {fieldGroups.close.map((spec) => (
-              <Field key={spec[0]} config={config} setConfig={setConfig} spec={spec} />
-            ))}
-          </div>
-        </Section>
+        {!isMac && (
+          <Section icon={Settings} title="关闭行为" description="控制点击窗口关闭按钮时每次询问、默认隐藏到托盘，还是默认退出程序。关闭弹窗里勾选记住选择后也会写入这里。" defaultOpen={false}>
+            <div className="grid">
+              {fieldGroups.close.map((spec) => (
+                <Field key={spec[0]} config={config} setConfig={setConfig} spec={spec} />
+              ))}
+            </div>
+          </Section>
+        )}
 
         <Section icon={TerminalSquare} title="高级配置" description="保留全部旧配置字段，适合排查或迁移。" defaultOpen={false} sectionId="advanced" hint={sectionHint("advanced")}>
           <div id="advanced" className="json-panel">

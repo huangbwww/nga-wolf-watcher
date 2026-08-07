@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -12,11 +13,12 @@ import webbrowser
 import ctypes
 from argparse import Namespace
 from pathlib import Path
-from tkinter import BooleanVar, END, Listbox, SINGLE, StringVar, messagebox
+from tkinter import BooleanVar, END, Listbox, SINGLE, StringVar, filedialog, messagebox
 from typing import Any, Callable
 
 import customtkinter as ctk
 
+import agent_cli
 import ai_analysis
 import nga_feishu_watch
 import nga_wolf_config
@@ -59,6 +61,13 @@ ROUTE_CHANNEL_LABELS = {
     "wxpusher": "WxPusher",
 }
 ROUTE_CHANNEL_VALUES = {label: value for value, label in ROUTE_CHANNEL_LABELS.items()}
+
+AI_CLI_MODE_LABELS = {
+    "auto": "自动选择",
+    "selected": "从扫描结果选择",
+    "manual": "手动填写",
+}
+AI_CLI_MODE_VALUES = {label: value for value, label in AI_CLI_MODE_LABELS.items()}
 
 FEISHU_ID_TYPE_LABELS = {
     "chat_id": "群聊 chat_id（推荐）",
@@ -568,6 +577,24 @@ class App:
         self.ai_send_errors_var = BooleanVar(value=bool(self.config.get("ai_send_errors_to_feishu", False)))
         self.ai_upload_long_result_var = BooleanVar(value=bool(self.config.get("ai_upload_long_result", False)))
         self.ai_ignore_codex_user_config_var = BooleanVar(value=bool(self.config.get("ai_ignore_codex_user_config", False)))
+        self.agent_cli_service = agent_cli.GLOBAL_AGENT_CLI_SERVICE
+        self.agent_cli_service.start()
+        self.ai_cli_config = agent_cli.normalize_agent_cli_config(
+            self.config.get("ai_cli"),
+            legacy_commands={
+                "codex": self.config.get("ai_codex_command"),
+                "claude": self.config.get("ai_claude_command"),
+                "codewhale": self.config.get("ai_codewhale_command"),
+            },
+        )
+        initial_cli_provider = str(self.config.get("ai_provider") or "codex").strip().lower()
+        self.ai_cli_editor_provider = initial_cli_provider if initial_cli_provider in agent_cli.BUILTIN_PROVIDERS else ""
+        initial_selection = agent_cli.AgentCliSelection.from_value(self.ai_cli_config.get(self.ai_cli_editor_provider))
+        self.ai_cli_mode_var = StringVar(value=AI_CLI_MODE_LABELS.get(initial_selection.mode, AI_CLI_MODE_LABELS["auto"]))
+        self.ai_cli_selected_path_var = StringVar(value=initial_selection.selected_path)
+        self.ai_cli_manual_path_var = StringVar(value=initial_selection.manual_path)
+        self.ai_cli_manual_args_var = StringVar(value=self.format_agent_cli_args(initial_selection.manual_args))
+        self.ai_cli_status_var = StringVar(value="正在扫描本机 Agent CLI…")
         raw_window_mode = str(self.config.get("ai_schedule_window_mode") or "a_share")
         self.ai_schedule_window_mode_var = StringVar(value="自定义" if raw_window_mode == "custom" else "A股开市时间")
         self.status_var = StringVar(value="未启动")
@@ -633,8 +660,16 @@ class App:
         self.ai_model_entry: ctk.CTkEntry | None = None
         self.ai_reasoning_menu: ctk.CTkOptionMenu | None = None
         self.ai_reasoning_entry: ctk.CTkEntry | None = None
+        self.ai_cli_frame: ctk.CTkFrame | None = None
+        self.ai_cli_candidate_menu: ctk.CTkOptionMenu | None = None
+        self.ai_cli_manual_entry: ctk.CTkEntry | None = None
+        self.ai_cli_manual_args_entry: ctk.CTkEntry | None = None
+        self.ai_cli_browse_button: ctk.CTkButton | None = None
+        self.ai_cli_rescan_button: ctk.CTkButton | None = None
+        self.ai_cli_test_button: ctk.CTkButton | None = None
 
         self.build_ui()
+        self.root.after(100, self.poll_agent_cli_discovery)
         self.poll_logs()
         self.poll_process()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -727,6 +762,10 @@ class App:
             self.ai_ignore_codex_user_config_var,
             self.ai_upload_long_result_var,
             self.ai_schedule_window_mode_var,
+            self.ai_cli_mode_var,
+            self.ai_cli_selected_path_var,
+            self.ai_cli_manual_path_var,
+            self.ai_cli_manual_args_var,
             self.watch_mode_label_var,
         ]
         for var in variables:
@@ -1498,7 +1537,7 @@ class App:
             button_color="#e2e8f0",
             button_hover_color="#cbd5e1",
             text_color=TEXT,
-            command=lambda _value: self.update_ai_model_controls(),
+            command=self.on_ai_provider_change,
         ).grid(row=3, column=1, sticky="ew", padx=(0, 16), pady=(6, 8))
         ctk.CTkLabel(frame, text="默认模型", anchor="w", text_color=TEXT).grid(row=4, column=0, sticky="w", padx=16, pady=(6, 8))
         self.ai_model_menu = ctk.CTkOptionMenu(
@@ -1510,6 +1549,7 @@ class App:
             button_color="#e2e8f0",
             button_hover_color="#cbd5e1",
             text_color=TEXT,
+            command=lambda _value: self.update_ai_reasoning_for_model(),
         )
         self.ai_model_entry = ctk.CTkEntry(
             frame,
@@ -1542,23 +1582,21 @@ class App:
             border_color=BORDER,
             text_color=TEXT,
         )
+        self.build_agent_cli_controls(frame, row=6)
         self.update_ai_model_controls()
         fields = [
             ("自动分析 Prompt", "ai_auto_analysis_prompt"),
             ("AI 工作目录", "ai_work_dir"),
             ("AI 超时(秒)", "ai_timeout"),
-            ("Codex 命令", "ai_codex_command"),
-            ("Claude 命令", "ai_claude_command"),
-            ("CodeWhale 命令", "ai_codewhale_command"),
             ("Custom 命令模板", "ai_custom_command"),
             ("定时间隔(分钟)", "ai_schedule_interval_minutes"),
             ("定时 Prompt", "ai_schedule_prompt"),
             ("允许用户 ID", "ai_allowed_user_ids"),
             ("飞书最大字符", "ai_max_feishu_chars"),
         ]
-        for offset, (label, key) in enumerate(fields, start=6):
+        for offset, (label, key) in enumerate(fields, start=7):
             self.add_entry(frame, label, key, offset)
-        window_row = 6 + len(fields)
+        window_row = 7 + len(fields)
         ctk.CTkLabel(frame, text="定时窗口", anchor="w", text_color=TEXT).grid(row=window_row, column=0, sticky="w", padx=16, pady=(6, 8))
         window_frame = ctk.CTkFrame(frame, fg_color="transparent")
         window_frame.grid(row=window_row, column=1, sticky="ew", padx=(0, 16), pady=(6, 8))
@@ -1631,25 +1669,327 @@ class App:
             text_color=TEXT,
         ).grid(row=switch_row + 2, column=0, columnspan=2, sticky="w", padx=16, pady=(6, 16))
 
+    @staticmethod
+    def format_agent_cli_args(args: object) -> str:
+        values = [str(item) for item in (args or ()) if str(item)] if isinstance(args, (list, tuple)) else []
+        if not values:
+            return ""
+        return subprocess.list2cmdline(values) if os.name == "nt" else shlex.join(values)
+
+    def build_agent_cli_controls(self, parent: ctk.CTkFrame, row: int) -> None:
+        self.ai_cli_frame = ctk.CTkFrame(
+            parent,
+            fg_color=CARD_ALT,
+            corner_radius=10,
+            border_width=1,
+            border_color=BORDER,
+        )
+        self.ai_cli_frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=16, pady=(8, 10))
+        self.ai_cli_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            self.ai_cli_frame,
+            text="本地 Agent CLI",
+            anchor="w",
+            text_color=TEXT,
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 4))
+        ctk.CTkLabel(self.ai_cli_frame, text="选择方式", anchor="w", text_color=TEXT).grid(
+            row=1, column=0, sticky="w", padx=12, pady=5
+        )
+        ctk.CTkOptionMenu(
+            self.ai_cli_frame,
+            variable=self.ai_cli_mode_var,
+            values=list(AI_CLI_MODE_VALUES),
+            height=32,
+            fg_color="#ffffff",
+            button_color="#e2e8f0",
+            button_hover_color="#cbd5e1",
+            text_color=TEXT,
+            command=self.on_agent_cli_mode_change,
+        ).grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=5)
+        ctk.CTkLabel(self.ai_cli_frame, text="扫描结果", anchor="w", text_color=TEXT).grid(
+            row=2, column=0, sticky="w", padx=12, pady=5
+        )
+        self.ai_cli_candidate_menu = ctk.CTkOptionMenu(
+            self.ai_cli_frame,
+            variable=self.ai_cli_selected_path_var,
+            values=["未发现候选"],
+            height=32,
+            fg_color="#ffffff",
+            button_color="#e2e8f0",
+            button_hover_color="#cbd5e1",
+            text_color=TEXT,
+            dynamic_resizing=False,
+        )
+        self.ai_cli_candidate_menu.grid(row=2, column=1, sticky="ew", padx=(0, 12), pady=5)
+        ctk.CTkLabel(self.ai_cli_frame, text="手动路径", anchor="w", text_color=TEXT).grid(
+            row=3, column=0, sticky="w", padx=12, pady=5
+        )
+        manual_path_frame = ctk.CTkFrame(self.ai_cli_frame, fg_color="transparent")
+        manual_path_frame.grid(row=3, column=1, sticky="ew", padx=(0, 12), pady=5)
+        manual_path_frame.grid_columnconfigure(0, weight=1)
+        self.ai_cli_manual_entry = ctk.CTkEntry(
+            manual_path_frame,
+            textvariable=self.ai_cli_manual_path_var,
+            height=32,
+            corner_radius=8,
+            fg_color="#ffffff",
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
+            placeholder_text="CLI 可执行文件的绝对路径",
+        )
+        self.ai_cli_manual_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.ai_cli_browse_button = ctk.CTkButton(
+            manual_path_frame,
+            text="浏览",
+            width=58,
+            height=32,
+            fg_color="#e8eef7",
+            hover_color="#dbe5f2",
+            text_color=TEXT,
+            command=self.browse_agent_cli_path,
+        )
+        self.ai_cli_browse_button.grid(row=0, column=1)
+        ctk.CTkLabel(self.ai_cli_frame, text="附加参数", anchor="w", text_color=TEXT).grid(
+            row=4, column=0, sticky="w", padx=12, pady=5
+        )
+        self.ai_cli_manual_args_entry = ctk.CTkEntry(
+            self.ai_cli_frame,
+            textvariable=self.ai_cli_manual_args_var,
+            height=32,
+            corner_radius=8,
+            fg_color="#ffffff",
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
+            placeholder_text="可选，按当前系统的命令行格式填写",
+        )
+        self.ai_cli_manual_args_entry.grid(row=4, column=1, sticky="ew", padx=(0, 12), pady=5)
+        ctk.CTkLabel(
+            self.ai_cli_frame,
+            textvariable=self.ai_cli_status_var,
+            anchor="w",
+            justify="left",
+            wraplength=560,
+            text_color=MUTED,
+            font=ctk.CTkFont(size=11),
+        ).grid(row=5, column=0, columnspan=2, sticky="ew", padx=12, pady=(6, 4))
+        actions = ctk.CTkFrame(self.ai_cli_frame, fg_color="transparent")
+        actions.grid(row=6, column=0, columnspan=2, sticky="w", padx=12, pady=(4, 10))
+        self.ai_cli_rescan_button = ctk.CTkButton(
+            actions,
+            text="重新扫描",
+            width=92,
+            height=30,
+            fg_color="#e8eef7",
+            hover_color="#dbe5f2",
+            text_color=TEXT,
+            command=self.rescan_agent_clis,
+        )
+        self.ai_cli_rescan_button.grid(row=0, column=0, padx=(0, 8))
+        self.ai_cli_test_button = ctk.CTkButton(
+            actions,
+            text="测试选择",
+            width=92,
+            height=30,
+            fg_color=PRIMARY,
+            hover_color=PRIMARY_HOVER,
+            text_color="#ffffff",
+            command=self.test_agent_cli_selection,
+        )
+        self.ai_cli_test_button.grid(row=0, column=1)
+        self.refresh_agent_cli_controls()
+
+    def store_agent_cli_editor(self) -> None:
+        provider = self.ai_cli_editor_provider
+        if provider not in agent_cli.BUILTIN_PROVIDERS:
+            return
+        selected_path = self.ai_cli_selected_path_var.get().strip()
+        if selected_path == "未发现候选":
+            selected_path = ""
+        selection = agent_cli.AgentCliSelection.from_value(
+            {
+                "mode": AI_CLI_MODE_VALUES.get(self.ai_cli_mode_var.get(), "auto"),
+                "selected_path": selected_path,
+                "manual_path": self.ai_cli_manual_path_var.get().strip(),
+                "manual_args": self.ai_cli_manual_args_var.get().strip(),
+            }
+        )
+        self.ai_cli_config[provider] = selection.to_dict()
+
+    def load_agent_cli_editor(self, provider: str) -> None:
+        self.ai_cli_editor_provider = provider if provider in agent_cli.BUILTIN_PROVIDERS else ""
+        if not self.ai_cli_editor_provider:
+            return
+        selection = agent_cli.AgentCliSelection.from_value(self.ai_cli_config.get(provider))
+        self.ai_cli_mode_var.set(AI_CLI_MODE_LABELS.get(selection.mode, AI_CLI_MODE_LABELS["auto"]))
+        self.ai_cli_selected_path_var.set(selection.selected_path)
+        self.ai_cli_manual_path_var.set(selection.manual_path)
+        self.ai_cli_manual_args_var.set(self.format_agent_cli_args(selection.manual_args))
+        self.refresh_agent_cli_controls()
+
+    def on_ai_provider_change(self, value: str) -> None:
+        self.store_agent_cli_editor()
+        provider = str(value or "").strip().lower()
+        self.update_ai_model_controls()
+        self.load_agent_cli_editor(provider)
+        self.update_agent_cli_control_states()
+
+    def on_agent_cli_mode_change(self, value: str) -> None:
+        mode = AI_CLI_MODE_VALUES.get(str(value or ""), "auto")
+        if mode == "selected" and not self.ai_cli_selected_path_var.get().strip():
+            provider = str(self.vars["ai_provider"].get() or "codex").strip().lower()
+            provider_state = self.agent_cli_service.snapshot().get("providers", {}).get(provider, {})
+            candidates = provider_state.get("candidates", []) if isinstance(provider_state, dict) else []
+            first_path = next((str(item.get("path") or "") for item in candidates if item.get("path")), "")
+            if first_path:
+                self.ai_cli_selected_path_var.set(first_path)
+        self.update_agent_cli_control_states()
+
+    def update_agent_cli_control_states(self) -> None:
+        provider = str(self.vars["ai_provider"].get() or "codex").strip().lower()
+        if self.ai_cli_frame is None:
+            return
+        if provider not in agent_cli.BUILTIN_PROVIDERS:
+            self.ai_cli_frame.grid_remove()
+            return
+        self.ai_cli_frame.grid()
+        mode = AI_CLI_MODE_VALUES.get(self.ai_cli_mode_var.get(), "auto")
+        if self.ai_cli_candidate_menu is not None:
+            self.ai_cli_candidate_menu.configure(state="normal" if mode == "selected" else "disabled")
+        manual_state = "normal" if mode == "manual" else "disabled"
+        for widget in (self.ai_cli_manual_entry, self.ai_cli_manual_args_entry, self.ai_cli_browse_button):
+            if widget is not None:
+                widget.configure(state=manual_state)
+
+    def refresh_agent_cli_controls(self) -> None:
+        provider = str(self.vars["ai_provider"].get() or "codex").strip().lower()
+        if provider not in agent_cli.BUILTIN_PROVIDERS:
+            self.update_agent_cli_control_states()
+            return
+        snapshot = self.agent_cli_service.snapshot()
+        provider_state = snapshot.get("providers", {}).get(provider, {})
+        candidates = provider_state.get("candidates", []) if isinstance(provider_state, dict) else []
+        paths = [str(item.get("path") or "") for item in candidates if str(item.get("path") or "")]
+        current = self.ai_cli_selected_path_var.get().strip()
+        if self.ai_cli_candidate_menu is not None:
+            menu_paths = ([current] if current and current not in paths else []) + paths
+            self.ai_cli_candidate_menu.configure(values=menu_paths or ["未发现候选"])
+        status = str(snapshot.get("status") or "idle")
+        resolved = provider_state.get("resolved") if isinstance(provider_state, dict) else None
+        if status == "scanning":
+            text = "正在扫描本机 Agent CLI…"
+        elif status == "error":
+            text = f"扫描失败：{snapshot.get('error') or '未知错误'}"
+        elif isinstance(resolved, dict):
+            version = f" · {resolved.get('version')}" if resolved.get("version") else ""
+            text = f"当前解析：{resolved.get('path')}{version} · {resolved.get('source') or 'unknown'} · {resolved.get('status') or 'compatible'}"
+        else:
+            text = f"已发现 {len(paths)} 个候选；点击“测试选择”确认兼容性。"
+        if AI_CLI_MODE_VALUES.get(self.ai_cli_mode_var.get(), "auto") == "selected" and current and current not in paths:
+            text += f"\n当前已保存路径未被本次扫描检测到：{current}"
+        details = []
+        for item in candidates[:4]:
+            detail = f"{item.get('path')} · {item.get('version') or '未探测版本'} · {item.get('source') or 'unknown'} · {item.get('status') or 'unverified'}"
+            if item.get("diagnostic"):
+                detail += f"（{item.get('diagnostic')}）"
+            details.append(detail)
+        if details:
+            text += "\n" + "\n".join(details)
+        self.ai_cli_status_var.set(text)
+        self.update_agent_cli_control_states()
+
+    def poll_agent_cli_discovery(self) -> None:
+        self.refresh_agent_cli_controls()
+        if self.agent_cli_service.snapshot().get("status") == "scanning":
+            self.root.after(150, self.poll_agent_cli_discovery)
+
+    def browse_agent_cli_path(self) -> None:
+        path = filedialog.askopenfilename(title="选择本地 Agent CLI 可执行文件", filetypes=[("All files", "*")])
+        if path:
+            self.ai_cli_manual_path_var.set(path)
+
+    def agent_cli_required_capabilities(self, provider: str) -> set[str]:
+        if provider == "codex" and self.ai_ignore_codex_user_config_var.get():
+            return {"ignore-user-config"}
+        return set()
+
+    def rescan_agent_clis(self) -> None:
+        provider = str(self.vars["ai_provider"].get() or "codex").strip().lower()
+        if provider not in agent_cli.BUILTIN_PROVIDERS:
+            return
+        self.ai_cli_status_var.set("正在重新扫描本机 Agent CLI…")
+        if self.ai_cli_rescan_button is not None:
+            self.ai_cli_rescan_button.configure(state="disabled")
+
+        def worker() -> None:
+            try:
+                self.agent_cli_service.rescan()
+                self.agent_cli_service.probe_all(provider)
+            finally:
+                def finish() -> None:
+                    if self.ai_cli_rescan_button is not None:
+                        self.ai_cli_rescan_button.configure(state="normal")
+                    self.refresh_agent_cli_controls()
+
+                self.root.after(0, finish)
+
+        threading.Thread(target=worker, name="agent-cli-rescan-ui", daemon=True).start()
+
+    def test_agent_cli_selection(self) -> None:
+        self.store_agent_cli_editor()
+        provider = self.ai_cli_editor_provider
+        if provider not in agent_cli.BUILTIN_PROVIDERS:
+            return
+        selection = agent_cli.AgentCliSelection.from_value(self.ai_cli_config.get(provider))
+        required = self.agent_cli_required_capabilities(provider)
+        self.ai_cli_status_var.set("正在测试所选 Agent CLI…")
+        if self.ai_cli_test_button is not None:
+            self.ai_cli_test_button.configure(state="disabled")
+
+        def worker() -> None:
+            result = self.agent_cli_service.test_selection(provider, selection, additional_required=required)
+
+            def finish() -> None:
+                if self.ai_cli_test_button is not None:
+                    self.ai_cli_test_button.configure(state="normal")
+                self.refresh_agent_cli_controls()
+                if result.get("ok"):
+                    resolved = result.get("resolved") or {}
+                    self.ai_cli_status_var.set(
+                        f"测试通过：{resolved.get('path')}{' · ' + str(resolved.get('version')) if resolved.get('version') else ''}"
+                    )
+                else:
+                    error = str(result.get("error") or "Agent CLI 测试失败")
+                    self.ai_cli_status_var.set(f"测试失败：{error}")
+                    messagebox.showerror("Agent CLI 测试失败", error)
+
+            self.root.after(0, finish)
+
+        threading.Thread(target=worker, name="agent-cli-test-ui", daemon=True).start()
+
     def update_ai_model_controls(self) -> None:
         provider = str(self.vars.get("ai_provider").get() if "ai_provider" in self.vars else "codex").strip().lower()
         if provider in {"codex", "claude", "codewhale"}:
             model_values = ai_analysis.model_options(provider)
-            reasoning_values = ai_analysis.reasoning_effort_options(provider)
             if self.ai_model_menu is not None:
                 self.ai_model_menu.configure(values=model_values)
                 self.ai_model_menu.grid(row=4, column=1, sticky="ew", padx=(0, 16), pady=(6, 8))
             if self.ai_model_entry is not None:
                 self.ai_model_entry.grid_forget()
             if self.ai_reasoning_menu is not None:
-                self.ai_reasoning_menu.configure(values=reasoning_values)
                 self.ai_reasoning_menu.grid(row=5, column=1, sticky="ew", padx=(0, 16), pady=(6, 8))
             if self.ai_reasoning_entry is not None:
                 self.ai_reasoning_entry.grid_forget()
             if not self.vars["ai_model"].get().strip() or self.vars["ai_model"].get().strip() not in model_values:
                 self.vars["ai_model"].set(ai_analysis.provider_default_model(provider))
+            reasoning_values = ai_analysis.reasoning_effort_options(provider, self.vars["ai_model"].get())
+            if self.ai_reasoning_menu is not None:
+                self.ai_reasoning_menu.configure(values=reasoning_values)
             if not self.vars["ai_reasoning_effort"].get().strip() or self.vars["ai_reasoning_effort"].get().strip() not in reasoning_values:
                 self.vars["ai_reasoning_effort"].set(ai_analysis.provider_default_reasoning_effort(provider))
+            self.update_agent_cli_control_states()
             return
 
         if self.ai_model_menu is not None:
@@ -1660,6 +2000,19 @@ class App:
             self.ai_model_entry.grid(row=4, column=1, sticky="ew", padx=(0, 16), pady=(6, 8))
         if self.ai_reasoning_entry is not None:
             self.ai_reasoning_entry.grid(row=5, column=1, sticky="ew", padx=(0, 16), pady=(6, 8))
+        self.update_agent_cli_control_states()
+
+    def update_ai_reasoning_for_model(self) -> None:
+        provider = str(self.vars["ai_provider"].get() or "codex").strip().lower()
+        if provider not in {"codex", "claude", "codewhale"}:
+            return
+        values = ai_analysis.reasoning_effort_options(provider, self.vars["ai_model"].get())
+        if self.ai_reasoning_menu is not None:
+            self.ai_reasoning_menu.configure(values=values)
+        current = self.vars["ai_reasoning_effort"].get().strip()
+        if current not in values:
+            default = ai_analysis.provider_default_reasoning_effort(provider)
+            self.vars["ai_reasoning_effort"].set(default if default in values else (values[0] if values else ""))
 
     def path_card(self, parent: ctk.CTkFrame, row: int) -> None:
         frame = self.card(parent, row)
@@ -3502,6 +3855,7 @@ class App:
                 ).grid(row=1, column=0, sticky="ew", padx=10, pady=(2, 8))
 
     def collect_config(self) -> dict[str, object]:
+        self.store_agent_cli_editor()
         config = dict(self.config)
         config["nga_cookie"] = self.cookie_textboxes[0].get("1.0", "end").strip() if self.cookie_textboxes else ""
         config["thread_author_watches"] = self.thread_author_config_text()
@@ -3622,6 +3976,7 @@ class App:
         config["ai_send_errors_to_feishu"] = self.ai_send_errors_var.get()
         config["ai_upload_long_result"] = self.ai_upload_long_result_var.get()
         config["ai_ignore_codex_user_config"] = self.ai_ignore_codex_user_config_var.get()
+        config["ai_cli"] = agent_cli.normalize_agent_cli_config(self.ai_cli_config)
         window_mode = "custom" if self.ai_schedule_window_mode_var.get() == "自定义" else "a_share"
         config["ai_schedule_window_mode"] = window_mode
         if window_mode == "a_share":
@@ -3728,6 +4083,19 @@ class App:
         if errors:
             messagebox.showerror("配置不完整", "\n".join(errors))
             return False
+        provider = str(config.get("ai_provider") or "codex").strip().lower()
+        if bool(config.get("ai_enabled", False)) and provider in agent_cli.BUILTIN_PROVIDERS:
+            cli_result = self.agent_cli_service.test_selection(
+                provider,
+                agent_cli.selection_for_provider(config, provider),
+                additional_required={"ignore-user-config"}
+                if provider == "codex" and bool(config.get("ai_ignore_codex_user_config", False))
+                else set(),
+            )
+            self.refresh_agent_cli_controls()
+            if not cli_result.get("ok"):
+                messagebox.showerror("Agent CLI 不可用", str(cli_result.get("error") or "Agent CLI 测试失败"))
+                return False
         self.config = config
         save_config(self.config)
         self.append_log("配置已保存。")

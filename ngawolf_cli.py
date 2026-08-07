@@ -20,6 +20,7 @@ import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 
+import agent_cli
 import nga_feishu_watch
 import nga_wolf_config
 import wechat_bot
@@ -1459,7 +1460,102 @@ def command_check(paths: CliPaths) -> int:
     if errors:
         print_validation_errors(errors)
         return 2
+    provider = str(config.get("ai_provider") or "codex").strip().lower()
+    if bool(config.get("ai_enabled", False)) and provider in agent_cli.BUILTIN_PROVIDERS:
+        result = _agent_cli_test_result(config, provider)
+        if not result.get("ok"):
+            print(str(result.get("error") or f"No compatible {provider} CLI found"), file=sys.stderr)
+            return 2
+        resolved = result.get("resolved") or {}
+        print(
+            f"Agent CLI: {provider} {resolved.get('version') or 'unknown'} "
+            f"[{resolved.get('selectionMode')}] source={resolved.get('source') or 'unknown'} "
+            f"status={resolved.get('status') or 'compatible'} path={resolved.get('path')}"
+        )
     return 0
+
+
+def _agent_cli_required(config: dict[str, object], provider: str) -> set[str]:
+    if provider == "codex" and bool(config.get("ai_ignore_codex_user_config", False)):
+        return {"ignore-user-config"}
+    return set()
+
+
+def _agent_cli_service(*, probe_all: bool = False, provider: str | None = None) -> agent_cli.AgentCliDiscoveryService:
+    service = agent_cli.AgentCliDiscoveryService()
+    service.rescan()
+    if probe_all:
+        service.probe_all(provider)
+    return service
+
+
+def _agent_cli_test_result(
+    config: dict[str, object],
+    provider: str,
+    *,
+    service: agent_cli.AgentCliDiscoveryService | None = None,
+) -> dict[str, object]:
+    current = service or _agent_cli_service()
+    selection = agent_cli.selection_for_provider(config, provider)
+    return current.test_selection(
+        provider,
+        selection,
+        additional_required=_agent_cli_required(config, provider),
+    )
+
+
+def _print_agent_cli_snapshot(snapshot: dict[str, object], provider: str | None = None) -> None:
+    providers = snapshot.get("providers") if isinstance(snapshot, dict) else {}
+    providers = providers if isinstance(providers, dict) else {}
+    names = [provider] if provider else list(agent_cli.BUILTIN_PROVIDERS)
+    for name in names:
+        data = providers.get(name) if isinstance(providers.get(name), dict) else {}
+        print(f"{name}:")
+        candidates = data.get("candidates") if isinstance(data, dict) else []
+        if not candidates:
+            print("  (no installations found)")
+            continue
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            version = candidate.get("version") or "unknown"
+            status = candidate.get("status") or "unverified"
+            source = candidate.get("source") or "unknown"
+            print(f"  {status:12} {version:18} {source:16} {candidate.get('path')}")
+            if candidate.get("diagnostic"):
+                print(f"    {candidate.get('diagnostic')}")
+
+
+def command_agent_cli(
+    paths: CliPaths,
+    action: str,
+    *,
+    provider: str | None = None,
+) -> int:
+    config = load_service_config(paths)
+    if action in {"list", "rescan"}:
+        service = _agent_cli_service(probe_all=True, provider=provider)
+        _print_agent_cli_snapshot(service.snapshot(), provider)
+        return 0
+    if action == "test":
+        target = str(provider or config.get("ai_provider") or "codex").strip().lower()
+        if target not in agent_cli.BUILTIN_PROVIDERS:
+            print(f"Unsupported built-in Agent provider: {target}", file=sys.stderr)
+            return 2
+        service = _agent_cli_service()
+        result = _agent_cli_test_result(config, target, service=service)
+        if not result.get("ok"):
+            print(str(result.get("error") or "Agent CLI test failed"), file=sys.stderr)
+            return 2
+        resolved = result.get("resolved") or {}
+        print(
+            f"{target}: {resolved.get('version') or 'unknown'} "
+            f"[{resolved.get('selectionMode')}] source={resolved.get('source') or 'unknown'} "
+            f"status={resolved.get('status') or 'compatible'} path={resolved.get('path')}"
+        )
+        return 0
+    print(f"Unknown agent-cli action: {action}", file=sys.stderr)
+    return 2
 
 
 def command_mark_seen(paths: CliPaths) -> int:
@@ -1717,6 +1813,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     logs_parser.add_argument("-f", "--follow", action="store_true", help="Follow log output.")
     logs_parser.add_argument("-n", "--lines", type=int, default=80, help="Number of log lines to show.")
 
+    agent_parser = subparsers.add_parser("agent-cli", help="Discover and test local Agent CLIs.")
+    agent_subparsers = agent_parser.add_subparsers(dest="agent_cli_action", required=True)
+    agent_list = agent_subparsers.add_parser("list", help="List detected Agent CLI installations.")
+    agent_list.add_argument("--provider", choices=list(agent_cli.BUILTIN_PROVIDERS))
+    agent_test = agent_subparsers.add_parser("test", help="Test the configured Agent CLI selection.")
+    agent_test.add_argument("provider", nargs="?", choices=list(agent_cli.BUILTIN_PROVIDERS))
+    agent_rescan = agent_subparsers.add_parser("rescan", help="Rescan and validate Agent CLI installations.")
+    agent_rescan.add_argument("--provider", choices=list(agent_cli.BUILTIN_PROVIDERS))
+
     return parser.parse_args(argv)
 
 
@@ -1754,6 +1859,12 @@ def main(argv: list[str] | None = None) -> int:
         return command_status(paths)
     if args.command == "logs":
         return command_logs(paths, follow=getattr(args, "follow", False), lines=getattr(args, "lines", 80))
+    if args.command == "agent-cli":
+        return command_agent_cli(
+            paths,
+            getattr(args, "agent_cli_action", "list"),
+            provider=getattr(args, "provider", None),
+        )
     if args.command == "run":
         return command_run(paths, once=getattr(args, "once", False))
     print(f"{args.command} is not implemented yet.", file=sys.stderr)

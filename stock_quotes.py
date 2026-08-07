@@ -327,18 +327,7 @@ def fetch_kline(code: str, period: str = "day") -> list[dict[str, Any]]:
     return stock_strategy.parse_kline_rows(rows)
 
 
-def fetch_minute(code: str) -> dict[str, Any] | None:
-    full_code = normalize_code(code)
-    if not full_code:
-        return None
-    var_name = f"min_{full_code}_{int(time.time() * 1000)}"
-    text = fetch_text(f"https://web.ifzq.gtimg.cn/appstock/app/minute/query?_var={var_name}&code={full_code}")
-    payload = parse_jsonp_object(text)
-    node = (payload.get("data") or {}).get(full_code) if isinstance(payload, dict) else None
-    if not isinstance(node, dict):
-        return None
-    data_node = node.get("data") if isinstance(node.get("data"), dict) else {}
-    rows = data_node.get("data") if isinstance(data_node.get("data"), list) else []
+def parse_minute_points(rows: list[Any]) -> list[dict[str, Any]]:
     points: list[dict[str, Any]] = []
     for line in rows:
         parts = str(line).strip().split()
@@ -355,14 +344,110 @@ def fetch_minute(code: str) -> dict[str, Any] | None:
                 "amount": stock_strategy.to_number(parts[3] if len(parts) > 3 else 0),
             }
         )
-    prev_close = 0.0
+    return points
+
+
+def minute_prev_close(node: dict[str, Any], full_code: str, fallback: Any = 0) -> float:
+    prev_close = stock_strategy.to_number(fallback)
     qt = node.get("qt") if isinstance(node.get("qt"), dict) else {}
     qt_row = qt.get(full_code)
     if isinstance(qt_row, list) and len(qt_row) > 4:
-        prev_close = stock_strategy.to_number(qt_row[4])
-    if prev_close <= 0 and points:
-        prev_close = points[0]["price"]
-    return {"code": full_code, "date": data_node.get("date") or "", "points": points, "prevClose": prev_close}
+        prev_close = stock_strategy.to_number(qt_row[4]) or prev_close
+    return prev_close
+
+
+def normalize_minute_date(value: Any) -> str:
+    raw = re.sub(r"\D", "", str(value or ""))
+    return raw if len(raw) == 8 else ""
+
+
+def build_minute_payload(
+    full_code: str,
+    *,
+    date: Any,
+    rows: list[Any],
+    prev_close: Any = 0,
+    source: str = "minute-query",
+    is_fallback: bool = False,
+) -> dict[str, Any]:
+    points = parse_minute_points(rows)
+    prev_close_number = stock_strategy.to_number(prev_close)
+    if prev_close_number <= 0 and points:
+        prev_close_number = points[0]["price"]
+    return {
+        "code": full_code,
+        "date": str(date or ""),
+        "points": points,
+        "prevClose": prev_close_number,
+        "source": source,
+        "isFallback": is_fallback,
+    }
+
+
+def fetch_recent_minutes(code: str, *, prev_close: Any = 0) -> list[dict[str, Any]]:
+    full_code = normalize_code(code)
+    if not full_code:
+        return []
+    text = fetch_text(f"https://web.ifzq.gtimg.cn/appstock/app/day/query?code={full_code}")
+    payload = parse_jsonp_object(text)
+    node = (payload.get("data") or {}).get(full_code) if isinstance(payload, dict) else None
+    if not isinstance(node, dict):
+        return []
+    day_rows = node.get("data") if isinstance(node.get("data"), list) else []
+    result: list[dict[str, Any]] = []
+    for day in day_rows:
+        if not isinstance(day, dict):
+            continue
+        rows = day.get("data") if isinstance(day.get("data"), list) else []
+        if not rows:
+            continue
+        fallback_prev_close = minute_prev_close(node, full_code, day.get("prec") or prev_close)
+        minute = build_minute_payload(
+            full_code,
+            date=day.get("date") or "",
+            rows=rows,
+            prev_close=fallback_prev_close,
+            source="recent-trading-day",
+            is_fallback=False,
+        )
+        if minute["points"]:
+            result.append(minute)
+    return result
+
+
+def fetch_recent_minute(code: str, *, date: Any = "", prev_close: Any = 0, is_fallback: bool = True) -> dict[str, Any] | None:
+    wanted_date = normalize_minute_date(date)
+    recent_minutes = fetch_recent_minutes(code, prev_close=prev_close)
+    if wanted_date:
+        selected = next((minute for minute in recent_minutes if normalize_minute_date(minute.get("date")) == wanted_date), None)
+        if selected:
+            return {**selected, "source": "historical-trading-day", "isFallback": False}
+        return None
+    if recent_minutes:
+        return {**recent_minutes[0], "isFallback": is_fallback}
+    return None
+
+
+def fetch_minute(code: str, *, date: Any = "") -> dict[str, Any] | None:
+    full_code = normalize_code(code)
+    if not full_code:
+        return None
+    selected_date = normalize_minute_date(date)
+    if selected_date:
+        return fetch_recent_minute(full_code, date=selected_date, is_fallback=False)
+    var_name = f"min_{full_code}_{int(time.time() * 1000)}"
+    text = fetch_text(f"https://web.ifzq.gtimg.cn/appstock/app/minute/query?_var={var_name}&code={full_code}")
+    payload = parse_jsonp_object(text)
+    node = (payload.get("data") or {}).get(full_code) if isinstance(payload, dict) else None
+    if not isinstance(node, dict):
+        return None
+    data_node = node.get("data") if isinstance(node.get("data"), dict) else {}
+    rows = data_node.get("data") if isinstance(data_node.get("data"), list) else []
+    prev_close = minute_prev_close(node, full_code)
+    main = build_minute_payload(full_code, date=data_node.get("date") or "", rows=rows, prev_close=prev_close)
+    if main["points"]:
+        return main
+    return fetch_recent_minute(full_code, prev_close=main.get("prevClose")) or main
 
 
 def parse_jsonp_object(text: str) -> dict[str, Any]:
@@ -701,13 +786,33 @@ def recalculate(data_dir: Path, code: str) -> dict[str, Any]:
         return {"ok": False, "error": "未找到股票"}
 
 
-def chart_data(data_dir: Path, code: str, *, period: str = "day") -> dict[str, Any]:
+def minute_options(minutes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "date": minute.get("date") or "",
+            "pointCount": len(minute.get("points") or []),
+        }
+        for minute in minutes
+        if minute.get("date")
+    ]
+
+
+def chart_data(data_dir: Path, code: str, *, period: str = "day", date: Any = "") -> dict[str, Any]:
     full_code = normalize_code(code)
     if not full_code:
         return {"ok": False, "error": "无效股票代码"}
     if period == "minute":
-        main = fetch_minute(full_code)
-        return {"ok": True, "kind": "minute", "code": full_code, "main": main}
+        selected_date = normalize_minute_date(date)
+        main = fetch_minute(full_code, date=selected_date)
+        recent_minutes = fetch_recent_minutes(full_code, prev_close=(main or {}).get("prevClose") if isinstance(main, dict) else 0)
+        return {
+            "ok": True,
+            "kind": "minute",
+            "code": full_code,
+            "main": main,
+            "selectedDate": selected_date,
+            "recentMinutes": minute_options(recent_minutes),
+        }
     klines = fetch_kline(full_code, period)
     watchlist = load_watchlist(data_dir)
     row = next((item for item in watchlist["items"] if item.get("fullCode") == full_code), None)
@@ -721,17 +826,22 @@ def chart_data(data_dir: Path, code: str, *, period: str = "day") -> dict[str, A
     return {"ok": True, "kind": "kline", "code": full_code, "period": period, "klines": klines, "item": row}
 
 
-def market_chart(code: str, *, period: str = "minute") -> dict[str, Any]:
+def market_chart(code: str, *, period: str = "minute", date: Any = "") -> dict[str, Any]:
     full_code = normalize_code(code)
     if not full_code:
         return {"ok": False, "error": "无效指数代码"}
     if period == "minute":
+        selected_date = normalize_minute_date(date)
+        main = fetch_minute(full_code, date=selected_date)
+        recent_minutes = fetch_recent_minutes(full_code, prev_close=(main or {}).get("prevClose") if isinstance(main, dict) else 0)
         return {
             "ok": True,
             "kind": "market-minute",
             "code": full_code,
-            "main": fetch_minute(full_code),
-            "small": fetch_minute(SMALL_CAP_CODE),
+            "main": main,
+            "small": fetch_minute(SMALL_CAP_CODE, date=selected_date),
+            "selectedDate": selected_date,
+            "recentMinutes": minute_options(recent_minutes),
         }
     return {"ok": True, "kind": "kline", "code": full_code, "period": period, "klines": fetch_kline(full_code, period)}
 

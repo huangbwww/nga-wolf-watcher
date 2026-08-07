@@ -12,18 +12,32 @@ import traceback
 import webbrowser
 from pathlib import Path
 from typing import Any
+from urllib.request import Request, urlopen
 
+import agent_cli
 import ai_analysis
 import nga_wolf_gui as legacy
 import stock_quotes
 import wechat_bot
 
+try:
+    from build_version import APP_VERSION
+except Exception:
+    APP_VERSION = "v1.5.9"
+
 
 APP_TITLE = "NGA Wolf Watcher"
+GITHUB_REPO = "huangbwww/nga-wolf-watcher"
+REPO_PAGE_URL = f"https://github.com/{GITHUB_REPO}"
+LATEST_RELEASE_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+LATEST_RELEASE_PAGE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
+RELEASE_PAGE_PREFIX = f"https://github.com/{GITHUB_REPO}/releases/"
+_PLATFORM_ASSET_KEYWORD = {"win32": "windows", "darwin": "macos"}.get(sys.platform, sys.platform)
 _ACTIVE_WINDOW: Any | None = None
 _CLOSE_CONFIRMED = False
 _TRAY_ICON: Any | None = None
 _TRAY_LOCK = threading.Lock()
+_MAC_QUIT_REQUESTED = False
 
 
 def _set_active_window(window: Any | None) -> None:
@@ -35,8 +49,96 @@ def _set_active_window(window: Any | None) -> None:
 def _request_frontend_close_dialog() -> bool | None:
     if _CLOSE_CONFIRMED:
         return None
+    if sys.platform == "darwin":
+        if _MAC_QUIT_REQUESTED or _mac_command_key_equivalent() == "q":
+            _trigger_frontend_close("nga-tray-exit-trigger")
+        else:
+            _hide_active_window()
+        return False
     _trigger_frontend_close("nga-close-request-trigger")
     return False
+
+
+def _install_macos_lifecycle_hooks() -> None:
+    if sys.platform != "darwin":
+        return
+    try:
+        import AppKit
+        import Foundation
+        import webview.platforms.cocoa as cocoa
+    except Exception:
+        return
+    if getattr(cocoa.BrowserView, "_ngawolf_lifecycle_hooks_installed", False):
+        return
+
+    original_should_terminate = cocoa.BrowserView.AppDelegate.applicationShouldTerminate_
+    original_key_down = cocoa.BrowserView.WebKitHost.keyDown_
+
+    def application_should_terminate(self: Any, app: Any) -> Any:
+        global _MAC_QUIT_REQUESTED
+        _MAC_QUIT_REQUESTED = True
+        try:
+            return original_should_terminate(self, app)
+        finally:
+            _MAC_QUIT_REQUESTED = False
+
+    def application_should_handle_reopen(self: Any, app: Any, has_visible_windows: bool) -> Any:
+        _show_active_window()
+        return Foundation.YES
+
+    def key_down(self: Any, event: Any) -> None:
+        try:
+            if event.modifierFlags() & AppKit.NSCommandKeyMask:
+                chars = event.charactersIgnoringModifiers() or event.characters() or ""
+                if str(chars).lower() == "q":
+                    _trigger_frontend_close("nga-tray-exit-trigger")
+                    return
+        except Exception:
+            pass
+        original_key_down(self, event)
+
+    cocoa.BrowserView.AppDelegate.applicationShouldTerminate_ = application_should_terminate
+    cocoa.BrowserView.AppDelegate.applicationShouldHandleReopen_hasVisibleWindows_ = application_should_handle_reopen
+    cocoa.BrowserView.WebKitHost.keyDown_ = key_down
+    cocoa.BrowserView._ngawolf_lifecycle_hooks_installed = True
+
+
+def _mac_command_key_equivalent() -> str:
+    if sys.platform != "darwin":
+        return ""
+    try:
+        import AppKit
+
+        event = AppKit.NSApp.currentEvent()
+        if event is None or event.type() != AppKit.NSKeyDown:
+            return ""
+        if not (event.modifierFlags() & AppKit.NSCommandKeyMask):
+            return ""
+        chars = event.charactersIgnoringModifiers() or event.characters() or ""
+        return str(chars).lower()
+    except Exception:
+        return ""
+
+
+def _hide_active_window() -> None:
+    window = _ACTIVE_WINDOW
+    if window is None:
+        return
+    try:
+        window.hide()
+    except Exception:
+        pass
+
+
+def _show_active_window() -> None:
+    window = _ACTIVE_WINDOW
+    if window is None:
+        return
+    try:
+        window.show()
+        window.restore()
+    except Exception:
+        pass
 
 
 def _trigger_frontend_close(element_id: str) -> None:
@@ -129,6 +231,38 @@ def _start_tray_icon_when_ready(api: "PreviewApi") -> None:
         _ensure_tray_icon(api)
     except Exception:
         logging.getLogger(__name__).debug("Failed to initialize tray icon on startup", exc_info=True)
+
+
+def _version_tuple(value: Any) -> tuple[int, int, int]:
+    text = str(value or "").strip().lower()
+    if text.startswith("v"):
+        text = text[1:]
+    text = text.split("-", 1)[0].split("+", 1)[0]
+    parts: list[int] = []
+    for part in text.split("."):
+        digits = "".join(ch for ch in part if ch.isdigit())
+        parts.append(int(digits or "0"))
+        if len(parts) == 3:
+            break
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3])
+
+
+def _is_newer_version(latest: Any, current: Any) -> bool:
+    return _version_tuple(latest) > _version_tuple(current)
+
+
+def _fetch_latest_release() -> dict[str, Any]:
+    request = Request(
+        LATEST_RELEASE_API_URL,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"NGA-Wolf-Watcher/{APP_VERSION}",
+        },
+    )
+    with urlopen(request, timeout=8) as response:
+        return json.loads(response.read().decode("utf-8"))
 
 
 def _pid_has_watcher_config(pid: int) -> bool:
@@ -374,6 +508,8 @@ class PreviewApi:
     def __init__(self) -> None:
         self.process: subprocess.Popen[str] | None = None
         self.closing = False
+        self.agent_cli_service = agent_cli.GLOBAL_AGENT_CLI_SERVICE
+        self.agent_cli_service.start()
 
     def shutdown(self) -> dict[str, Any]:
         self.closing = True
@@ -443,6 +579,8 @@ class PreviewApi:
         return {
             "running": bool(pids),
             "pids": pids,
+            "appVersion": APP_VERSION,
+            "platform": sys.platform,
             "configPath": str(legacy.config_path()),
             "runtimeConfigPath": str(legacy.watcher_config_path()),
             "statePath": str(legacy.resolved_state_path(legacy.load_config())),
@@ -454,7 +592,9 @@ class PreviewApi:
         return {
             "config": self._merged_config(),
             "defaults": dict(legacy.DEFAULT_CONFIG),
+            "appVersion": APP_VERSION,
             "status": self._status(),
+            "agentCli": self.agent_cli_service.snapshot(),
             "options": {
                 "botChannels": ["feishu", "wechat"],
                 "watchModes": ["author", "thread_author", "both"],
@@ -470,9 +610,49 @@ class PreviewApi:
                     "claude": ai_analysis.reasoning_effort_options("claude"),
                     "codewhale": ai_analysis.reasoning_effort_options("codewhale"),
                 },
+                "aiDefaultReasoning": {
+                    provider: ai_analysis.provider_default_reasoning_effort(provider)
+                    for provider in ("codex", "claude", "codewhale")
+                },
+                "aiReasoningByModel": {
+                    "codex": {
+                        model: ai_analysis.reasoning_effort_options("codex", model)
+                        for model in ai_analysis.model_options("codex")
+                    },
+                },
             },
             "logs": self.read_logs(0),
         }
+
+    @staticmethod
+    def _agent_cli_required(config: dict[str, Any], provider: str) -> set[str]:
+        if provider == "codex" and bool(config.get("ai_ignore_codex_user_config", False)):
+            return {"ignore-user-config"}
+        return set()
+
+    def agent_cli_status(self) -> dict[str, Any]:
+        return {"ok": True, "agentCli": self.agent_cli_service.snapshot()}
+
+    def agent_cli_rescan(self, provider: str = "") -> dict[str, Any]:
+        target = str(provider or "").strip().lower()
+        if target and target not in agent_cli.BUILTIN_PROVIDERS:
+            return {"ok": False, "error": f"Unsupported Agent provider: {target}"}
+        self.agent_cli_service.rescan()
+        self.agent_cli_service.probe_all(target or None)
+        return {"ok": True, "agentCli": self.agent_cli_service.snapshot()}
+
+    def agent_cli_test(self, provider: str = "", config: dict[str, Any] | None = None) -> dict[str, Any]:
+        merged = self._merged_config(config)
+        target = str(provider or merged.get("ai_provider") or "codex").strip().lower()
+        if target not in agent_cli.BUILTIN_PROVIDERS:
+            return {"ok": False, "error": f"Unsupported Agent provider: {target}"}
+        result = self.agent_cli_service.test_selection(
+            target,
+            agent_cli.selection_for_provider(merged, target),
+            additional_required=self._agent_cli_required(merged, target),
+        )
+        result["agentCli"] = self.agent_cli_service.snapshot()
+        return result
 
     def validate(self, config: dict[str, Any]) -> dict[str, Any]:
         merged = self._merged_config(config)
@@ -485,8 +665,22 @@ class PreviewApi:
         errors = legacy.validate_config(merged)
         if errors:
             return {"ok": False, "errors": webui_friendly_errors(merged, errors)}
+        provider = str(merged.get("ai_provider") or "codex").strip().lower()
+        if bool(merged.get("ai_enabled", False)) and provider in agent_cli.BUILTIN_PROVIDERS:
+            cli_result = self.agent_cli_test(provider, merged)
+            if not cli_result.get("ok"):
+                return {
+                    "ok": False,
+                    "errors": [str(cli_result.get("error") or "Agent CLI validation failed")],
+                    "agentCli": cli_result.get("agentCli"),
+                }
         legacy.save_config(merged)
-        return {"ok": True, "config": merged, "status": self._status()}
+        return {
+            "ok": True,
+            "config": merged,
+            "status": self._status(),
+            "agentCli": self.agent_cli_service.snapshot(),
+        }
 
     def mark_seen(self, config: dict[str, Any] | None = None) -> dict[str, Any]:
         merged = self._merged_config(config)
@@ -792,6 +986,47 @@ class PreviewApi:
         except Exception as exc:
             return {"ok": False, "error": str(exc), "path": str(path)}
 
+    def check_update(self) -> dict[str, Any]:
+        try:
+            release = _fetch_latest_release()
+        except Exception as exc:
+            return {"ok": False, "error": f"检查更新失败：{exc}", "currentVersion": APP_VERSION}
+        latest_version = str(release.get("tag_name") or "").strip()
+        release_url = str(release.get("html_url") or "").strip() or LATEST_RELEASE_PAGE_URL
+        has_update = _is_newer_version(latest_version, APP_VERSION)
+        if has_update:
+            assets = release.get("assets") or []
+            has_platform_asset = any(
+                _PLATFORM_ASSET_KEYWORD in (asset.get("name") or "").lower()
+                for asset in assets
+            )
+            if not has_platform_asset:
+                has_update = False
+        return {
+            "ok": True,
+            "currentVersion": APP_VERSION,
+            "latestVersion": latest_version,
+            "hasUpdate": has_update,
+            "releaseUrl": release_url,
+            "releaseName": str(release.get("name") or latest_version),
+            "publishedAt": str(release.get("published_at") or ""),
+        }
+
+    def open_latest_release_page(self, url: str = "") -> dict[str, Any]:
+        target = str(url or "").strip() or LATEST_RELEASE_PAGE_URL
+        if not target.startswith(RELEASE_PAGE_PREFIX):
+            target = LATEST_RELEASE_PAGE_URL
+        try:
+            return {"ok": bool(webbrowser.open(target)), "url": target}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "url": target}
+
+    def open_repository_page(self) -> dict[str, Any]:
+        try:
+            return {"ok": bool(webbrowser.open(REPO_PAGE_URL)), "url": REPO_PAGE_URL}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "url": REPO_PAGE_URL}
+
     def stock_bootstrap(self) -> dict[str, Any]:
         try:
             return stock_quotes.bootstrap(legacy.data_dir())
@@ -843,15 +1078,15 @@ class PreviewApi:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    def stock_chart(self, code: str, period: str = "day") -> dict[str, Any]:
+    def stock_chart(self, code: str, period: str = "day", date: str = "") -> dict[str, Any]:
         try:
-            return stock_quotes.chart_data(legacy.data_dir(), code, period=str(period or "day"))
+            return stock_quotes.chart_data(legacy.data_dir(), code, period=str(period or "day"), date=str(date or ""))
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    def stock_market_chart(self, code: str, period: str = "minute") -> dict[str, Any]:
+    def stock_market_chart(self, code: str, period: str = "minute", date: str = "") -> dict[str, Any]:
         try:
-            return stock_quotes.market_chart(code, period=str(period or "minute"))
+            return stock_quotes.market_chart(code, period=str(period or "minute"), date=str(date or ""))
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -898,6 +1133,7 @@ def run_preview() -> None:
     except ImportError as exc:
         raise SystemExit("pywebview is not installed. Run: python -m pip install pywebview") from exc
 
+    _install_macos_lifecycle_hooks()
     api = PreviewApi()
     logging.getLogger("pywebview").addFilter(WebViewShutdownNoiseFilter())
     index_path = webui_index_path()

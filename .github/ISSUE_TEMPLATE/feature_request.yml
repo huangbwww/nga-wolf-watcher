@@ -1,0 +1,44 @@
+name: Feature request / 功能建议
+description: Suggest an improvement or new workflow. / 提出改进建议或新的使用流程。
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / 你遇到的问题
+      description: What are you trying to do, and what is painful today? / 你想完成什么？现在有什么不方便？
+      placeholder: I want to...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution / 建议方案
+      description: What would a good solution look like? / 你觉得理想的解决方式是什么？
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area / 相关模块
+      options:
+        - NGA watching / NGA 监听
+        - Feishu / 飞书
+        - WeChat / 微信
+        - DingTalk / 钉钉
+        - Email / 邮箱
+        - WxPusher
+        - Local AI agent / 本地 AI Agent
+        - Stock workbench / 股票工作台
+        - Packaging / installation / 打包或安装
+        - Documentation / 文档
+        - Other / 其他
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Extra context / 补充信息
+      description: Screenshots, examples, or links that explain the request. / 可以补充截图、示例或相关链接。

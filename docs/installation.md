@@ -1,6 +1,6 @@
 # Installation And Runtime
 
-Windows, Linux, source runtime, and release build notes.
+Windows, macOS, Linux, source runtime, and release build notes.
 
 > Detailed reference. Start with the repository README for the quick path.
 
@@ -11,13 +11,15 @@ Release assets use the same lowercase project prefix and include version, platfo
 ```text
 nga-wolf-watcher-vX.Y.Z-windows-x86_64-setup.exe
 nga-wolf-watcher-vX.Y.Z-windows-x86_64-portable.zip
+nga-wolf-watcher-vX.Y.Z-macos-arm64-experimental.dmg
+nga-wolf-watcher-vX.Y.Z-macos-arm64-experimental.zip
 nga-wolf-watcher-vX.Y.Z-linux-x86_64.tar.gz
 nga-wolf-watcher-vX.Y.Z-linux-aarch64.tar.gz
 install-linux.sh
 SHA256SUMS
 ```
 
-The Windows `setup.exe` and `portable.zip` replace the old single large onefile exe. The Linux archives contain the headless `ngawolf` CLI; `install-linux.sh` installs those archives first and falls back to source installation only when needed.
+The Windows `setup.exe` and `portable.zip` replace the old single large onefile exe. The macOS assets contain an unsigned experimental `.dmg` with an Applications shortcut plus a fallback `.zip` for Apple Silicon Macs. The Linux archives contain the headless `ngawolf` CLI; `install-linux.sh` installs those archives first and falls back to source installation only when needed.
 
 The Windows setup installer supports Simplified Chinese and English. Current Windows release assets are not code-signed, so Windows SmartScreen may show an unknown-publisher warning. Verify downloaded files with `SHA256SUMS` from the same release when needed.
 
@@ -37,6 +39,14 @@ This path does not require editing code or running Python commands.
 Keep the first-start mark-seen option enabled before the first launch. It marks currently fetched NGA replies as already seen, so old replies are not pushed to Feishu in bulk.
 
 The setup and portable builds use the same data directory as the older exe. The GUI saves local secrets under `%LOCALAPPDATA%\NGA Wolf Watcher\config.json`. Runtime state is stored next to it as `.nga_seen.json` by default. Do not share these files.
+
+## macOS Experimental App
+
+Download `nga-wolf-watcher-vX.Y.Z-macos-arm64-experimental.dmg` from [Releases](https://github.com/huangbwww/nga-wolf-watcher/releases/latest), open it, then drag `NGA-Wolf-Watcher.app` to `Applications`. If the DMG flow does not work on your machine, use the fallback `.zip` package, unzip it, and open `NGA-Wolf-Watcher.app`.
+
+This package is currently built for Apple Silicon Macs and is not signed or notarized. On first launch, macOS may block it as an unidentified app. Right-click the app and choose Open, or allow it in System Settings, if you trust the downloaded release asset. Verify downloaded files with `SHA256SUMS` when needed.
+
+The macOS app stores local secrets under `~/.nga_wolf_watcher/config.json`. Runtime state and logs are stored in the same directory. Do not share these files.
 
 ## Run With BAT
 
@@ -193,3 +203,20 @@ python -m PyInstaller --noconfirm --clean .\NGA-Wolf-Watcher-Web-Onedir.spec
 ```
 
 The portable app folder is `dist\NGA-Wolf-Watcher\`. Release assets are named `nga-wolf-watcher-vX.Y.Z-windows-x86_64-portable.zip` and `nga-wolf-watcher-vX.Y.Z-windows-x86_64-setup.exe`.
+
+## Build macOS Experimental App
+
+Build the frontend first, then package the pywebview client as an unsigned `.app` bundle:
+
+```bash
+cd webui
+npm ci
+npm run build
+cd ..
+python -m pip install -r requirements.txt pyinstaller
+python -m PyInstaller --noconfirm --clean NGA-Wolf-Watcher-macOS.spec
+bash tools/build-macos-dmg.sh dist/NGA-Wolf-Watcher.app "release/nga-wolf-watcher-vX.Y.Z-macos-arm64-experimental.dmg" "NGA Wolf Watcher"
+ditto -c -k --keepParent dist/NGA-Wolf-Watcher.app "release/nga-wolf-watcher-vX.Y.Z-macos-arm64-experimental.zip"
+```
+
+The macOS package is experimental until code signing and notarization are configured.

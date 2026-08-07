@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Installation documentation / 安装文档
+    url: https://github.com/huangbwww/nga-wolf-watcher/blob/main/docs/installation.md
+    about: Check install and runtime notes before opening setup issues. / 提交安装问题前可先查看安装和运行说明。
+  - name: Configuration documentation / 配置文档
+    url: https://github.com/huangbwww/nga-wolf-watcher/blob/main/docs/configuration.md
+    about: Check channel fields, commands, and troubleshooting notes. / 提交通道、命令或排查问题前可先查看配置说明。

@@ -196,6 +196,24 @@ def test_validate_config_reports_missing_cookie_and_invalid_email_requirements()
     assert len(errors) >= 4
 
 
+def test_validate_config_checks_codex_reasoning_against_model() -> None:
+    config = dict(nga_wolf_config.DEFAULT_CONFIG)
+    config.update(
+        {
+            "ai_provider": "codex",
+            "ai_model": "gpt-5.6-luna",
+            "ai_reasoning_effort": "ultra",
+        }
+    )
+
+    errors = nga_wolf_config.validate_config(config, require_cookie=False, require_receive_id=False)
+    assert any("AI 思考强度" in error for error in errors)
+
+    config["ai_reasoning_effort"] = "max"
+    errors = nga_wolf_config.validate_config(config, require_cookie=False, require_receive_id=False)
+    assert not any("AI 思考强度" in error for error in errors)
+
+
 def test_gui_and_shared_default_config_are_same_object() -> None:
     sys.modules.setdefault("customtkinter", types.SimpleNamespace())
     nga_wolf_gui = importlib.import_module("nga_wolf_gui")
