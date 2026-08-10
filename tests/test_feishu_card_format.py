@@ -111,7 +111,13 @@ class FeishuCardFormatTests(unittest.TestCase):
         with patch.object(nga_feishu_watch, "collect_thread_tail_with_retries", return_value=[enriched]) as collect_thread:
             posts = nga_feishu_watch.enrich_author_posts_from_threads(Namespace(), [raw], "150058")
 
-        collect_thread.assert_called_once_with(ANY, "45974302", 20, "150058")
+        collect_thread.assert_called_once_with(
+            ANY,
+            "45974302",
+            20,
+            "150058",
+            stop_retry_if=nga_feishu_watch.is_nga_board_closed,
+        )
         sourced = nga_feishu_watch.add_post_source(posts[0], "author", nga_feishu_watch.WatchTarget("150058", ""))
 
         self.assertEqual(posts[0].author, "-\u963f\u72fc-")

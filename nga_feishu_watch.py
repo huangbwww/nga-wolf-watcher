@@ -171,6 +171,10 @@ def is_nga_content_missing(exc: Exception) -> bool:
     return any(marker in text for marker in ("找不到内容", "没有更多页了", "没有符合条件的结果"))
 
 
+def is_nga_board_closed(exc: Exception) -> bool:
+    return "版面关闭" in str(exc)
+
+
 @dataclass(frozen=True)
 class FeishuFileRef:
     file_key: str
@@ -7147,6 +7151,7 @@ def collect_thread_tail(
     cache_ttl: float = DEFAULT_NGA_CACHE_TTL,
     allow_partial: bool = False,
     author_id: str = "",
+    stop_retry_if: Callable[[Exception], bool] | None = None,
 ) -> list[NgaPost]:
     author_id = str(author_id or "").strip()
     label_prefix = f"NGA 帖子 {tid} 作者 {author_id}" if author_id else f"NGA 帖子 {tid}"
@@ -7158,6 +7163,7 @@ def collect_thread_tail(
                 retry_initial_delay,
                 retry_delay,
                 lambda: fetch_nga_thread_page(tid, "e", cookie, timeout, request_min_interval, cache_ttl, author_id),
+                stop_retry_if=stop_retry_if,
             )
         except Exception as exc:
             if is_nga_content_missing(exc):
@@ -7172,6 +7178,7 @@ def collect_thread_tail(
             retry_initial_delay,
             retry_delay,
             lambda: fetch_nga_thread_page(tid, 1, cookie, timeout, request_min_interval, cache_ttl),
+            stop_retry_if=stop_retry_if,
         )
         last_page = thread_page_count(page_count_payload)
         if last_page > 1:
@@ -7181,6 +7188,7 @@ def collect_thread_tail(
                 retry_initial_delay,
                 retry_delay,
                 lambda: fetch_nga_thread_page(tid, last_page, cookie, timeout, request_min_interval, cache_ttl),
+                stop_retry_if=stop_retry_if,
             )
         else:
             first_payload = page_count_payload
@@ -7200,6 +7208,7 @@ def collect_thread_tail(
                 retry_initial_delay,
                 retry_delay,
                 lambda page=page: fetch_nga_thread_page(tid, page, cookie, timeout, request_min_interval, cache_ttl, author_id),
+                stop_retry_if=stop_retry_if,
             )
         except Exception as exc:
             if allow_partial and posts_by_page and is_nga_temporary_unavailable(exc):
@@ -7301,7 +7310,15 @@ def collect_thread_in_natural_days(
     return posts
 
 
-def with_retries(label: str, attempts: int, initial_delay: float, step_delay: float, fn: Any) -> Any:
+def with_retries(
+    label: str,
+    attempts: int,
+    initial_delay: float,
+    step_delay: float,
+    fn: Any,
+    *,
+    stop_retry_if: Callable[[Exception], bool] | None = None,
+) -> Any:
     last_exc: Exception | None = None
     unavailable_limit = max(1, int(os.getenv("NGA_UNAVAILABLE_RETRIES", str(DEFAULT_NGA_UNAVAILABLE_RETRIES))))
     initial_delay = max(0.0, float(initial_delay))
@@ -7311,6 +7328,8 @@ def with_retries(label: str, attempts: int, initial_delay: float, step_delay: fl
             return fn()
         except Exception as exc:
             last_exc = exc
+            if stop_retry_if is not None and stop_retry_if(exc):
+                raise
             effective_attempts = min(attempts, unavailable_limit) if is_nga_service_unavailable(exc) else attempts
             if attempt >= effective_attempts:
                 break
@@ -7438,7 +7457,13 @@ def enrich_author_posts_from_threads(args: argparse.Namespace, posts: list[NgaPo
         cache_key = (tid, effective_author_id)
         if cache_key not in enriched_by_thread:
             try:
-                enriched_by_thread[cache_key] = collect_thread_tail_with_retries(args, tid, 20, effective_author_id)
+                enriched_by_thread[cache_key] = collect_thread_tail_with_retries(
+                    args,
+                    tid,
+                    20,
+                    effective_author_id,
+                    stop_retry_if=is_nga_board_closed,
+                )
             except Exception as exc:
                 print(f"补全用户 {effective_author_id} 在帖子 {tid} 的论坛用户名失败，继续使用原始作者字段: {exc}", file=sys.stderr)
                 enriched_by_thread[cache_key] = []
@@ -7495,7 +7520,14 @@ def collect_replies_in_days_with_retries(args: argparse.Namespace, author_id: st
     return enrich_author_posts_from_threads(args, posts, author_id)
 
 
-def collect_thread_tail_with_retries(args: argparse.Namespace, tid: str, count: int, author_id: str = "") -> list[NgaPost]:
+def collect_thread_tail_with_retries(
+    args: argparse.Namespace,
+    tid: str,
+    count: int,
+    author_id: str = "",
+    *,
+    stop_retry_if: Callable[[Exception], bool] | None = None,
+) -> list[NgaPost]:
     cookie = args.cookie or os.getenv("NGA_COOKIE", "")
     if not cookie:
         raise SystemExit("缺少 NGA_COOKIE。请从已登录 bbs.nga.cn 的浏览器会话复制 Cookie。")
@@ -7512,6 +7544,7 @@ def collect_thread_tail_with_retries(args: argparse.Namespace, tid: str, count: 
         getattr(args, "nga_cache_ttl", DEFAULT_NGA_CACHE_TTL),
         True,
         author_id,
+        stop_retry_if=stop_retry_if,
     )
 
 
