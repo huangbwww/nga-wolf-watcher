@@ -14,6 +14,7 @@ import ctypes
 import datetime as dt
 import json
 import logging
+import math
 import mimetypes
 import os
 import queue
@@ -154,7 +155,18 @@ def ensure_stock_watchlist_source(path: Path) -> None:
 
 
 def is_stock_position_item(item: dict[str, Any]) -> bool:
-    return any(str(item.get(key) or "").strip() for key in ("cost", "shares", "buyDate"))
+    def is_positive_number(value: Any) -> bool:
+        try:
+            number = float(str(value or "").strip())
+        except (TypeError, ValueError):
+            return False
+        return math.isfinite(number) and number > 0
+
+    return (
+        is_positive_number(item.get("cost"))
+        or is_positive_number(item.get("shares"))
+        or bool(str(item.get("buyDate") or "").strip())
+    )
 
 
 def compact_stock_item(item: dict[str, Any]) -> dict[str, Any]:

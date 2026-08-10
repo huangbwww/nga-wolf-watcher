@@ -67,6 +67,24 @@ def test_local_history_context_syncs_positions_snapshot(tmp_path: Path) -> None:
     assert [item["fullCode"] for item in payload["items"]] == ["hk00700", "sh600000"]
 
 
+def test_stock_position_item_requires_positive_cost_or_shares_or_buy_date() -> None:
+    for item in (
+        {},
+        {"cost": "0"},
+        {"shares": 0},
+        {"cost": "-1"},
+        {"shares": "not-a-number"},
+        {"shares": "inf"},
+        {"buyDate": "   "},
+    ):
+        assert ai_analysis.is_stock_position_item(item) is False
+
+    for item in (
+        {"cost": "10.5"},
+        {"shares": 100},
+        {"buyDate": "2026-08-10"},
+    ):
+        assert ai_analysis.is_stock_position_item(item) is True
 
 
 def _task(tmp_path: Path) -> ai_analysis.AITask:
