@@ -2176,30 +2176,97 @@ def item_with_topic_context(item: dict[str, Any], topic: dict[str, Any]) -> dict
 
 
 IMAGE_EXT_RE = r"(?:jpg|jpeg|png|gif|webp|bmp)"
+NGA_DEFAULT_ATTACHMENT_BASE = "https://img.nga.cn/attachments"
+NGA_LEGACY_IMAGE_HOSTS = {"img.nga.178.com"}
 
 
-def normalize_nga_image_url(value: str) -> str:
+def is_nga_attachment_host(hostname: str) -> bool:
+    host = str(hostname or "").strip().lower().rstrip(".")
+    return host in NGA_LEGACY_IMAGE_HOSTS or bool(re.fullmatch(r"img\d*\.nga\.cn", host))
+
+
+def normalize_nga_attachment_base(value: str = "") -> str:
+    raw = html.unescape(str(value or "")).strip().strip("'\"")
+    if not raw:
+        return NGA_DEFAULT_ATTACHMENT_BASE
+    if raw.startswith("//"):
+        raw = "https:" + raw
+    elif not re.match(r"^https?://", raw, flags=re.I):
+        raw = "https://" + raw.lstrip("/")
+    parsed = urllib.parse.urlparse(raw)
+    host = str(parsed.hostname or "").lower()
+    if not is_nga_attachment_host(host):
+        return NGA_DEFAULT_ATTACHMENT_BASE
+    if host in NGA_LEGACY_IMAGE_HOSTS:
+        host = "img.nga.cn"
+    path = parsed.path.rstrip("/")
+    if not path:
+        path = "/attachments"
+    if path != "/attachments" and not path.startswith("/attachments/"):
+        return NGA_DEFAULT_ATTACHMENT_BASE
+    scheme = parsed.scheme.lower() if parsed.scheme.lower() in {"http", "https"} else "https"
+    return urllib.parse.urlunparse((scheme, host, path, "", "", ""))
+
+
+def payload_nga_attachment_base(payload: dict[str, Any]) -> str:
+    data = payload.get("data", payload) if isinstance(payload, dict) else {}
+    for container in (data, payload):
+        if not isinstance(container, dict):
+            continue
+        global_data = container.get("__GLOBAL")
+        if isinstance(global_data, dict) and global_data.get("_ATTACH_BASE_VIEW"):
+            return normalize_nga_attachment_base(str(global_data["_ATTACH_BASE_VIEW"]))
+    for item in walk_dicts(data):
+        value = item.get("_ATTACH_BASE_VIEW")
+        if value:
+            return normalize_nga_attachment_base(str(value))
+    return NGA_DEFAULT_ATTACHMENT_BASE
+
+
+def normalize_nga_image_url(value: str, attachment_base: str = "") -> str:
     url = html.unescape(str(value or "")).strip().strip("'\"")
     url = re.sub(r"^\[img[^\]]*\]", "", url, flags=re.I)
     url = re.sub(r"\[/img\]$", "", url, flags=re.I).strip().strip("'\"")
     if not url:
         return ""
     if url.startswith("//"):
-        return "https:" + url
+        url = "https:" + url
     if url.startswith("http://") or url.startswith("https://"):
+        parsed = urllib.parse.urlparse(url)
+        if str(parsed.hostname or "").lower() in NGA_LEGACY_IMAGE_HOSTS:
+            return urllib.parse.urlunparse(parsed._replace(netloc="img.nga.cn"))
         return url
     if url.startswith("./"):
         url = url[2:]
+    base = normalize_nga_attachment_base(attachment_base)
     if url.startswith("/attachments/"):
-        return "https://img.nga.178.com" + url
+        return base.rstrip("/") + "/" + url[len("/attachments/") :]
     if url.startswith("attachments/"):
-        return "https://img.nga.178.com/" + url
+        return base.rstrip("/") + "/" + url[len("attachments/") :]
     if url.startswith("mon_"):
-        return "https://img.nga.178.com/attachments/" + url
+        return base.rstrip("/") + "/" + url
     return url
 
 
-def extract_image_urls(raw_content: str, item: dict[str, Any] | None = None) -> tuple[str, ...]:
+def nga_image_download_candidates(value: str) -> list[str]:
+    url = normalize_nga_image_url(value)
+    candidates = [url]
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme == "https" and is_nga_attachment_host(str(parsed.hostname or "")):
+        candidates.append(urllib.parse.urlunparse(parsed._replace(scheme="http")))
+    return candidates
+
+
+def nga_image_browser_url(value: str) -> str:
+    candidates = nga_image_download_candidates(value)
+    return candidates[-1] if len(candidates) > 1 else candidates[0]
+
+
+def extract_image_urls(
+    raw_content: str,
+    item: dict[str, Any] | None = None,
+    attachment_base: str = "",
+) -> tuple[str, ...]:
     candidates: list[str] = []
     values = [raw_content or ""]
     if item:
@@ -2223,18 +2290,18 @@ def extract_image_urls(raw_content: str, item: dict[str, Any] | None = None) -> 
     seen: set[str] = set()
     urls: list[str] = []
     for candidate in candidates:
-        url = normalize_nga_image_url(candidate)
+        url = normalize_nga_image_url(candidate, attachment_base)
         if url and url not in seen:
             seen.add(url)
             urls.append(url)
     return tuple(urls)
 
 
-def unique_image_urls(urls: Iterable[str]) -> tuple[str, ...]:
+def unique_image_urls(urls: Iterable[str], attachment_base: str = "") -> tuple[str, ...]:
     seen: set[str] = set()
     result: list[str] = []
     for raw in urls:
-        url = normalize_nga_image_url(str(raw or ""))
+        url = normalize_nga_image_url(str(raw or ""), attachment_base)
         if url and url not in seen:
             seen.add(url)
             result.append(url)
@@ -2266,11 +2333,15 @@ def split_raw_image_sections(raw_content: str) -> tuple[str, str]:
     return "", marked
 
 
-def image_sections_from_raw(raw_content: str, item: dict[str, Any] | None = None) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
-    all_urls = extract_image_urls(raw_content, item)
+def image_sections_from_raw(
+    raw_content: str,
+    item: dict[str, Any] | None = None,
+    attachment_base: str = "",
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    all_urls = extract_image_urls(raw_content, item, attachment_base)
     quote_raw, reply_raw = split_raw_image_sections(raw_content)
-    quote_urls = unique_image_urls(extract_image_urls(quote_raw))
-    reply_urls = unique_image_urls(extract_image_urls(reply_raw))
+    quote_urls = unique_image_urls(extract_image_urls(quote_raw, attachment_base=attachment_base), attachment_base)
+    reply_urls = unique_image_urls(extract_image_urls(reply_raw, attachment_base=attachment_base), attachment_base)
     assigned = set(quote_urls) | set(reply_urls)
     remaining = tuple(url for url in all_urls if url not in assigned)
     if remaining and not quote_urls and reply_raw and reply_raw.strip() == raw_content_with_quote_markers(raw_content).strip():
@@ -2279,13 +2350,13 @@ def image_sections_from_raw(raw_content: str, item: dict[str, Any] | None = None
     return quote_urls, reply_urls, remaining
 
 
-def make_post(item: dict[str, Any], fallback_subject: str = "") -> NgaPost | None:
+def make_post(item: dict[str, Any], fallback_subject: str = "", attachment_base: str = "") -> NgaPost | None:
     raw_content = first_str(item, "content", "postcontent", "post_content", "message")
     if not raw_content:
         return None
 
-    quote_image_urls, reply_image_urls, other_image_urls = image_sections_from_raw(raw_content, item)
-    image_urls = unique_image_urls((*quote_image_urls, *reply_image_urls, *other_image_urls))
+    quote_image_urls, reply_image_urls, other_image_urls = image_sections_from_raw(raw_content, item, attachment_base)
+    image_urls = unique_image_urls((*quote_image_urls, *reply_image_urls, *other_image_urls), attachment_base)
     content = strip_markup(raw_content)
     if not content:
         if not image_urls:
@@ -2463,6 +2534,7 @@ def extract_posts(payload: dict[str, Any]) -> list[NgaPost]:
     handled_items: set[int] = set()
     posts: list[NgaPost] = []
     users = payload_user_lookup(payload)
+    attachment_base = payload_nga_attachment_base(payload)
     topics = payload.get("data", {}).get("__T", {})
     if isinstance(topics, dict):
         for topic in topics.values():
@@ -2473,7 +2545,11 @@ def extract_posts(payload: dict[str, Any]) -> list[NgaPost]:
                 continue
             handled_items.add(id(reply))
             reply = item_with_topic_context(item_with_payload_author(reply, users), topic)
-            post = make_post(reply, fallback_subject=first_str(topic, "subject", "title"))
+            post = make_post(
+                reply,
+                fallback_subject=first_str(topic, "subject", "title"),
+                attachment_base=attachment_base,
+            )
             if post and post.key not in seen:
                 seen.add(post.key)
                 posts.append(post)
@@ -2481,7 +2557,7 @@ def extract_posts(payload: dict[str, Any]) -> list[NgaPost]:
     for item in walk_dicts(payload.get("data", payload)):
         if id(item) in handled_items:
             continue
-        post = make_post(item_with_payload_author(item, users))
+        post = make_post(item_with_payload_author(item, users), attachment_base=attachment_base)
         if post and post.key not in seen:
             seen.add(post.key)
             posts.append(post)
@@ -2495,6 +2571,7 @@ def extract_thread_posts(payload: dict[str, Any]) -> tuple[list[NgaPost], int]:
     users = data.get("__U", {}) if isinstance(data, dict) else {}
     subject = first_str(topic, "subject", "title") if isinstance(topic, dict) else ""
     page = int(data.get("__PAGE", 0) or 0) if isinstance(data, dict) else 0
+    attachment_base = payload_nga_attachment_base(payload)
 
     posts: list[NgaPost] = []
     if not isinstance(replies, dict):
@@ -2507,7 +2584,7 @@ def extract_thread_posts(payload: dict[str, Any]) -> tuple[list[NgaPost], int]:
         user = users.get(uid) if isinstance(users, dict) else None
         if isinstance(user, dict):
             item["author"] = first_str(user, "username", "uname", "name")
-        post = make_post(item, fallback_subject=subject)
+        post = make_post(item, fallback_subject=subject, attachment_base=attachment_base)
         if post:
             posts.append(post)
     return posts, page
@@ -2931,7 +3008,7 @@ def append_post_image_elements(
                 }
             )
         else:
-            fallback_lines.append(f"[image {idx}]({lark_md_escape(url)})")
+            fallback_lines.append(f"[image {idx}]({lark_md_escape(nga_image_browser_url(url))})")
     if fallback_lines:
         elements.append(
             {
@@ -3461,10 +3538,7 @@ def download_nga_image_bytes(url: str, cookie: str, timeout: int) -> tuple[bytes
             content_type = str(resp.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
         return data, content_type
 
-    candidates = [url]
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme == "https" and parsed.netloc.lower().endswith("nga.178.com"):
-        candidates.append(urllib.parse.urlunparse(parsed._replace(scheme="http")))
+    candidates = nga_image_download_candidates(url)
 
     last_error: Exception | None = None
     for candidate_url in candidates:
