@@ -16,5 +16,8 @@
     "lucide-react": "^0.468.0",
     "echarts": "^5.5.0"
   },
+  "overrides": {
+    "esbuild": "0.28.1"
+  },
   "devDependencies": {}
 }

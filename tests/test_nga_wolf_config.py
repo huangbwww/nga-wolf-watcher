@@ -163,6 +163,7 @@ def test_build_args_resolves_state_and_ai_work_dir_under_data_dir(tmp_path: Path
 
     assert Path(args.state_path) == tmp_path / "state" / "seen.json"
     assert Path(args.ai_work_dir) == tmp_path / "agent" / "work"
+    assert Path(args.stock_watchlist_path) == tmp_path / "stock_watchlist.json"
     assert args.email_smtp_profiles == config["email_smtp_profiles"]
     assert args.email_to == "receiver@example.com"
     assert args.email_username == ""

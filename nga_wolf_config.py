@@ -726,6 +726,11 @@ def build_args(
     ai_work_dir = Path(str(config.get("ai_work_dir") or ".ai_agent_workspace").strip())
     if data_dir is not None and not ai_work_dir.is_absolute():
         ai_work_dir = data_dir / ai_work_dir
+    stock_watchlist_path = (
+        data_dir / ai_analysis.STOCK_WATCHLIST_FILE
+        if data_dir is not None
+        else Path(str(resolved_state_path(config, data_dir=data_dir))).parent / ai_analysis.STOCK_WATCHLIST_FILE
+    )
     ai_provider = str(config.get("ai_provider") or "codex").strip().lower()
     cli_selection = (
         agent_cli.selection_for_provider(config, ai_provider)
@@ -824,6 +829,7 @@ def build_args(
         ai_enabled=bool(config.get("ai_enabled", False)),
         ai_provider=ai_provider,
         ai_work_dir=str(ai_work_dir),
+        stock_watchlist_path=str(stock_watchlist_path),
         ai_auto_analyze_new_post=bool(config.get("ai_auto_analyze_new_post", False)),
         ai_auto_analysis_prompt=str(config.get("ai_auto_analysis_prompt") or "").strip(),
         ai_prompt_file=str(config.get("ai_prompt_file") or "").strip(),
