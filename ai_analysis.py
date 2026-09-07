@@ -52,6 +52,7 @@ CLAUDE_DEFAULT_REASONING_EFFORT = "medium"
 CODEWHALE_DEFAULT_REASONING_EFFORT = "auto"
 CODEX_MODEL_OPTIONS = [
     CODEX_DEFAULT_MODEL,
+    "gpt-6-astra",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
     "gpt-5.5",
@@ -64,6 +65,7 @@ CODEX_MODEL_OPTIONS = [
 CLAUDE_MODEL_OPTIONS = [CLAUDE_DEFAULT_MODEL, "default", "opus[1m]", "haiku"]
 CODEX_REASONING_EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max", "ultra")
 CODEX_MODEL_REASONING_EFFORTS = {
+    "gpt-6-astra": CODEX_REASONING_EFFORT_ORDER,
     "gpt-5.6-sol": CODEX_REASONING_EFFORT_ORDER,
     "gpt-5.6-terra": CODEX_REASONING_EFFORT_ORDER,
     "gpt-5.6-luna": CODEX_REASONING_EFFORT_ORDER[:-1],
@@ -340,6 +342,7 @@ def model_options(provider: str = "codex") -> list[str]:
 def model_label(provider: str, value: str) -> str:
     if provider == "codex":
         return {
+            "gpt-6-astra": "GPT-6 Astra",
             "gpt-5.6-sol": "GPT-5.6 Sol",
             "gpt-5.6-terra": "GPT-5.6 Terra",
             "gpt-5.6-luna": "GPT-5.6 Luna",

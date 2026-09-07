@@ -88,3 +88,18 @@ def test_webgui_rescan_scans_all_then_probes_requested_provider() -> None:
     assert result["ok"] is True
     assert service.rescan_calls == 1
     assert service.probe_calls == ["claude"]
+
+
+def test_webgui_bootstrap_exposes_astra_without_changing_default() -> None:
+    api = _api(FakeAgentCliService())
+    api._status = lambda: {}
+    api.read_logs = lambda offset: {}
+
+    result = api.bootstrap()
+
+    models = result["options"]["aiModels"]["codex"]
+    assert models[0] == "gpt-5.6-sol"
+    assert "gpt-6-astra" in models
+    assert result["options"]["aiReasoningByModel"]["codex"]["gpt-6-astra"] == [
+        "low", "medium", "high", "xhigh", "max", "ultra",
+    ]

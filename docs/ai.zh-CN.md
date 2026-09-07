@@ -113,7 +113,7 @@ $env:AI_CODEX_CLI_ARGS = '--some-fixed-option value'
 
 - GUI 里的“默认模型”和“默认思考强度”是启动默认值，留空或 `default` 表示不指定，使用 agent 自己的默认。
 - 飞书 `/setting` 卡片里的模型/思考强度是运行时覆盖，点“恢复默认模型/强度”会回到 GUI/启动默认值。
-- Codex 下拉模型优先显示 `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`，之后保留旧模型选项；默认使用 Sol，默认推理强度为 `high`。Sol 和 Terra 支持 `low`、`medium`、`high`、`xhigh`、`max`、`ultra`，Luna 最高支持 `max`，保留的 5.5/5.4 模型最高支持 `xhigh`。`max` 是单任务最大推理深度；`ultra` 可能自动委派给子 Agent，且 Luna 不支持。
+- Codex 下拉模型新增 `gpt-6-astra`（GPT-6 Astra），同时保留 `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` 和旧模型选项；默认仍使用 Sol，默认推理强度为 `high`。Astra、Sol 和 Terra 在 Codex 中支持 `low`、`medium`、`high`、`xhigh`、`max`、`ultra`，Luna 最高支持 `max`，保留的 5.5/5.4 模型最高支持 `xhigh`。`max` 是单任务最大推理深度；Codex 的 `ultra` 模式可能自动委派给子 Agent，且 Luna 不支持。可在 AI 设置中选择 Astra，或向机器人发送 `/model gpt-6-astra`。模型名已核对 [GPT-6 Astra 官方文档](https://developers.openai.com/api/docs/models/gpt-6-astra)；`ultra` 来自本机 Codex 模型目录，是 Codex 模式，不是公开 API 单独提供的推理等级。
 - Claude 下拉模型：`default`、`sonnet[1m]`、`opus[1m]`、`haiku`；思考强度：`low`、`medium`、`high`、`xhigh`、`max`。
 - CodeWhale 下拉模型：`deepseek-v4-flash`、`deepseek-v4-pro`，也可选 `auto` 让 CodeWhale 自动路由；思考强度：`auto`、`off`、`low`、`medium`、`high`、`max`。
 - Codex 会把模型传给 `codex exec --model <model>`，把思考强度通过 Codex 配置覆盖传入。

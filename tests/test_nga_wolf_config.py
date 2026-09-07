@@ -214,6 +214,47 @@ def test_validate_config_checks_codex_reasoning_against_model() -> None:
     assert not any("AI 思考强度" in error for error in errors)
 
 
+def test_validate_config_accepts_codex_astra_and_preserves_model_in_args(tmp_path: Path) -> None:
+    config = {
+        **nga_wolf_config.DEFAULT_CONFIG,
+        "ai_provider": "codex",
+        "ai_model": "gpt-6-astra",
+        "ai_reasoning_effort": "ultra",
+    }
+
+    errors = nga_wolf_config.validate_config(config, require_cookie=False, require_receive_id=False)
+    assert not any("AI 模型" in error or "AI 思考强度" in error for error in errors)
+    args = nga_wolf_config.build_args(config, data_dir=tmp_path)
+    assert args.ai_model == "gpt-6-astra"
+    assert args.ai_reasoning_effort == "ultra"
+
+
+@pytest.mark.parametrize(
+    ("provider", "model", "effort"),
+    [
+        ("codex", "gpt-5.6-sol", "high"),
+        ("codex", "gpt-5.6-terra", "ultra"),
+        ("codex", "gpt-5.5", "xhigh"),
+        ("codewhale", "deepseek-v4-flash", "auto"),
+        ("custom", "my-custom-model", ""),
+    ],
+)
+def test_loading_existing_ai_config_does_not_switch_to_astra(
+    tmp_path: Path, provider: str, model: str, effort: str
+) -> None:
+    path = tmp_path / "config.json"
+    saved = {"ai_provider": provider, "ai_model": model, "ai_reasoning_effort": effort}
+    nga_wolf_config.save_config(saved, path)
+    original_bytes = path.read_bytes()
+
+    loaded = nga_wolf_config.load_config(path)
+    args = nga_wolf_config.build_args(loaded, data_dir=tmp_path)
+
+    assert {key: loaded[key] for key in saved} == saved
+    assert (args.ai_provider, args.ai_model, args.ai_reasoning_effort) == (provider, model, effort)
+    assert path.read_bytes() == original_bytes
+
+
 def test_gui_and_shared_default_config_are_same_object() -> None:
     sys.modules.setdefault("customtkinter", types.SimpleNamespace())
     nga_wolf_gui = importlib.import_module("nga_wolf_gui")

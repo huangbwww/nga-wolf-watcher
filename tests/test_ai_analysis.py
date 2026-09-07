@@ -111,13 +111,37 @@ def test_codex_commands_ignore_user_config_when_enabled(tmp_path: Path) -> None:
 def test_codex_56_models_and_alias_are_available() -> None:
     assert ai_analysis.provider_default_model("codex") == "gpt-5.6-sol"
     assert ai_analysis.provider_default_reasoning_effort("codex") == "high"
-    assert ai_analysis.model_options("codex")[:3] == [
+    assert ai_analysis.model_options("codex")[:4] == [
         "gpt-5.6-sol",
+        "gpt-6-astra",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
     ]
     assert ai_analysis.normalize_provider_model("codex", "gpt-5.6") == "gpt-5.6-sol"
     assert ai_analysis.is_valid_model("gpt-5.6", "codex") is True
+
+
+def test_codex_astra_model_and_reasoning_reach_cli(tmp_path: Path) -> None:
+    config = ai_analysis.AIConfig.from_namespace(
+        Namespace(ai_provider="codex", ai_model="gpt-6-astra", ai_reasoning_effort="ultra")
+    )
+    runner = ai_analysis.CodexRunner(config)
+    task = _task(tmp_path)
+
+    for command in (
+        runner.build_command(task, tmp_path / "prompt.md", "prompt"),
+        runner.build_resume_command(task, tmp_path / "prompt.md", "prompt"),
+    ):
+        assert command[command.index("--model") + 1] == "gpt-6-astra"
+        assert 'model_reasoning_effort="ultra"' in command
+
+    assert ai_analysis.is_valid_model("gpt-6-astra", "codex") is True
+    assert ai_analysis.normalize_provider_model("codex", "GPT-6-ASTRA") == "gpt-6-astra"
+    assert ai_analysis.model_label("codex", "gpt-6-astra") == "GPT-6 Astra"
+    assert ai_analysis.reasoning_effort_options("codex", "gpt-6-astra") == [
+        "low", "medium", "high", "xhigh", "max", "ultra",
+    ]
+    assert ai_analysis.is_valid_reasoning_effort("none", "codex", "gpt-6-astra") is False
 
 
 def test_codex_reasoning_options_follow_selected_model() -> None:
