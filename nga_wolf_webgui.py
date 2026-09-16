@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -23,7 +24,7 @@ import wechat_bot
 try:
     from build_version import APP_VERSION
 except Exception:
-    APP_VERSION = "v1.6.1"
+    APP_VERSION = "v1.6.2"
 
 
 APP_TITLE = "NGA Wolf Watcher"
@@ -1115,10 +1116,48 @@ class PreviewApi:
             return {"ok": False, "error": str(exc)}
 
     def stock_export_csv(self) -> dict[str, Any]:
+        temporary_path: Path | None = None
         try:
-            return stock_quotes.export_csv(legacy.data_dir())
+            window = _ACTIVE_WINDOW
+            if window is None:
+                return {"ok": False, "error": "保存窗口未就绪，请重新打开应用后重试"}
+
+            import webview
+
+            result = stock_quotes.export_csv(legacy.data_dir())
+            downloads = Path.home() / "Downloads"
+            selected = window.create_file_dialog(
+                webview.FileDialog.SAVE,
+                directory=str(downloads if downloads.is_dir() else Path.home()),
+                save_filename=result["filename"],
+                file_types=("CSV 文件 (*.csv)",),
+            )
+            if not selected:
+                return {"ok": False, "cancelled": True}
+
+            path = Path(selected if isinstance(selected, str) else selected[0]).resolve()
+            # Keep an existing backup intact if writing the new export fails.
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", newline="", dir=path.parent,
+                prefix=".nga-csv-", suffix=".tmp", delete=False,
+            ) as output:
+                temporary_path = Path(output.name)
+                output.write(result["csv"])
+            temporary_path.replace(path)
+            return {
+                "ok": True,
+                "filename": path.name,
+                "path": str(path),
+                "message": f"CSV 已保存至：{path}",
+            }
         except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+            return {"ok": False, "error": f"导出 CSV 失败：{exc}"}
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def stock_import_csv(self, text: str = "") -> dict[str, Any]:
         try:
