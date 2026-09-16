@@ -138,6 +138,8 @@ Since v1.5.0, the Windows desktop app includes a stock dashboard and single-stoc
 
 The dashboard supports watchlists, focus-watch stocks, positions, custom groups, code/name search, fuzzy search, CSV import/export, clearing the list, drag ordering, and 3-second quote refreshes. The market strip includes Shanghai, Shenzhen, ChiNext, and STAR 50 indexes; clicking an index opens the yellow/white intraday line view.
 
+Click **Export** to choose a location and filename in the system **Save As** dialog (default: `策略备份.csv`). After the file is saved, the dashboard displays its full path as selectable text. Cancelling creates no file; a failed save displays an error.
+
 The single-stock workbench supports fast stock switching, intraday/K-line charts, volume, MA/BOLL overlays, swing high/low, Fibonacci retracement, intraday pressure/support, position profit and loss, and bull strategy signals. Swing high/low values are auto-filled from daily K-line and MACD swing logic when possible, but can still be edited manually. Strategy output is for observation and review only. It is not investment advice.
 
 ## Default Paths

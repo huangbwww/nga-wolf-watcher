@@ -1716,6 +1716,8 @@ textarea:focus {
 
 .stock-message {
   flex: 0 0 auto;
+  overflow-wrap: anywhere;
+  user-select: text;
   margin-bottom: 8px;
   padding: 8px 10px;
   border-radius: 8px;

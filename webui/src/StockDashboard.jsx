@@ -377,16 +377,6 @@ function StrategyBadge({ className = "", children }) {
   return <span className={`strategy-badge ${className}`}>{children}</span>;
 }
 
-function downloadText(filename, text, type = "text/csv;charset=utf-8") {
-  const blob = new Blob([text], { type });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  link.click();
-  URL.revokeObjectURL(url);
-}
-
 export default function StockDashboard({ api }) {
   const [watchlist, setWatchlist] = useState({ groups: [], activeGroup: "__all__", items: [] });
   const [indexes, setIndexes] = useState([]);
@@ -492,6 +482,10 @@ export default function StockDashboard({ api }) {
     if (!silent) setBusy(true);
     try {
       const result = await action(apiClient);
+      if (result?.cancelled) {
+        if (!silent) showMessage(`已取消${label}`, "info");
+        return result;
+      }
       if (!result?.ok) {
         showMessage(result?.error || `${label}失败`, "error");
         return result;
@@ -505,7 +499,7 @@ export default function StockDashboard({ api }) {
           dataSize: result.dataSize || 0,
         });
       }
-      if (!silent) showMessage(`${label}完成`, "success");
+      if (!silent) showMessage(result.message || `${label}完成`, "success");
       return result;
     } catch (error) {
       showMessage(String(error?.message || error), "error");
@@ -810,11 +804,7 @@ export default function StockDashboard({ api }) {
     });
   };
 
-  const exportCsv = () => runAction("导出 CSV", async (client) => {
-    const result = await client.stock_export_csv();
-    if (result?.ok) downloadText(result.filename || "策略备份.csv", result.csv || "");
-    return result;
-  });
+  const exportCsv = () => runAction("导出 CSV", (client) => client.stock_export_csv());
 
   const importCsv = (event) => {
     const file = event.target.files?.[0];
@@ -935,7 +925,7 @@ export default function StockDashboard({ api }) {
         </div>
       </div>
 
-      {message ? <div className={`stock-message ${messageKind}`}>{message}</div> : null}
+      {message ? <div className={`stock-message ${messageKind}`} role={messageKind === "error" ? "alert" : "status"}>{message}</div> : null}
 
       {disclaimerOpen ? (
         <div className="stock-modal-backdrop" role="dialog" aria-modal="true" aria-label="免责声明">
